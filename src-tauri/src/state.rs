@@ -12,6 +12,7 @@ use grok_config::{discover_environment, GrokConfig, GrokPaths};
 use grok_control_core::SessionRegistry;
 use grok_events::{shared_bus, EventBus};
 use grok_extensions::ExtensionsService;
+use grok_mcp::McpManager;
 use grok_memory::MemoryService;
 use grok_persistence::Persistence;
 use grok_scheduler::{JobHandler, Scheduler, ScheduledJob};
@@ -25,6 +26,7 @@ pub struct AppState {
     pub registry: Arc<SessionRegistry>,
     pub worktrees: Arc<WorktreeManager>,
     pub extensions: Arc<ExtensionsService>,
+    pub mcp: Arc<McpManager>,
     pub memory: Arc<MemoryService>,
     pub scheduler: Arc<Scheduler>,
     pub persistence: Arc<Persistence>,
@@ -67,6 +69,14 @@ impl AppState {
             grok_cli.clone(),
             event_bus.clone(),
         ));
+
+        let mcp = McpManager::new(
+            config.clone(),
+            paths.clone(),
+            grok_cli.clone(),
+            event_bus.clone(),
+        )
+        .context("mcp manager")?;
 
         let memory = MemoryService::open(paths.memory_dir.clone(), event_bus.clone())
             .await
@@ -135,6 +145,7 @@ impl AppState {
             registry,
             worktrees,
             extensions,
+            mcp,
             memory,
             scheduler,
             persistence,

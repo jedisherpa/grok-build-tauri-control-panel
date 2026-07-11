@@ -79,6 +79,81 @@ $("btn-wt-create").onclick = async () => {
   log($("worktrees-list"), await invoke("create_worktree", { repo, name, baseRef: null }));
 };
 
+// MCP
+$("btn-mcp-catalog").onclick = async () => {
+  log($("mcp-list"), await invoke("list_mcp_catalog"));
+};
+$("btn-mcp-list").onclick = async () => {
+  log($("mcp-list"), await invoke("list_mcp_servers"));
+};
+$("btn-mcp-doctor").onclick = async () => {
+  log($("mcp-list"), await invoke("doctor_mcp_server", { name: null }));
+};
+$("btn-mcp-tools").onclick = async () => {
+  log($("mcp-list"), await invoke("list_mcp_tools", { name: null }));
+};
+$("btn-mcp-creds").onclick = async () => {
+  log($("mcp-list"), await invoke("list_mcp_credentials"));
+};
+$("btn-mcp-add").onclick = async () => {
+  const fromCatalog = $("mcp-catalog").value;
+  const name = $("mcp-name").value || fromCatalog;
+  const paths = ($("mcp-paths").value || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const request = {
+    name,
+    fromCatalog,
+    allowedPaths: paths.length ? paths : null,
+    enabled: true,
+    readOnly: fromCatalog === "filesystem",
+    kind: null,
+    transport: null,
+    command: null,
+    args: null,
+    url: null,
+    env: null,
+    scope: fromCatalog === "filesystem" ? "project" : null,
+    description: null,
+    autoAttach: fromCatalog === "github",
+    requiresApproval: ["browser", "grok_build", "custom", "x_twitter"].includes(fromCatalog),
+    headers: null,
+    startupTimeoutSec: null,
+    toolTimeoutSec: null,
+    rateLimitPerMin: fromCatalog === "grok_build" ? 10 : null,
+    credentialKeys: null,
+  };
+  log($("mcp-list"), await invoke("add_mcp_server", { request }));
+};
+$("btn-mcp-remove").onclick = async () => {
+  const name = $("mcp-name").value;
+  log($("mcp-list"), await invoke("remove_mcp_server", { name }));
+};
+$("btn-mcp-toggle").onclick = async () => {
+  const name = $("mcp-name").value;
+  // toggle on by default; list first for state in real UI
+  log($("mcp-list"), await invoke("toggle_mcp", { name, enabled: true }));
+};
+$("btn-mcp-preview").onclick = async () => {
+  const names = ($("mcp-attach").value || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const approved = ($("mcp-approve").value || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  log(
+    $("mcp-list"),
+    await invoke("preview_session_mcp", {
+      names,
+      approvedHighRisk: approved,
+      includeAuto: true,
+    })
+  );
+};
+
 // Extensions
 $("btn-ext-list").onclick = async () => {
   log($("extensions-list"), await invoke("list_extensions"));

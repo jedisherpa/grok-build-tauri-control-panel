@@ -18,7 +18,8 @@ Fallback: headless CLI (`grok -p ...`) for batch/scheduler jobs.
 | `grok_control_core` | SessionRegistry, multi-session orchestration |
 | `grok_worktree` | Git/Grok worktree lifecycle |
 | `grok_permissions` | Allow/deny rules, presets, sandbox policy |
-| `grok_extensions` | MCP / skills / plugins CRUD |
+| `grok_extensions` | Skills / plugins CRUD (MCP legacy helpers) |
+| `grok_mcp` | Full MCP manager: catalog (7 servers), CRUD, doctor, credentials, session injection |
 | `grok_memory` | Cross-session memory + flush/dream |
 | `grok_scheduler` | Interval/cron/once jobs |
 | `grok_persistence` | SQLite crash recovery + transcripts |

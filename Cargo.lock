@@ -1261,6 +1261,7 @@ dependencies = [
  "grok_diff",
  "grok_events",
  "grok_extensions",
+ "grok_mcp",
  "grok_memory",
  "grok_permissions",
  "grok_persistence",
@@ -1392,6 +1393,25 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "grok_mcp"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "grok_cli_wrapper",
+ "grok_config",
+ "grok_events",
+ "regex",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "uuid",
+ "which",
 ]
 
 [[package]]

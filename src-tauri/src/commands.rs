@@ -11,6 +11,10 @@ use grok_config::{DiscoveryReport, GrokConfig};
 use grok_control_core::{AgentHandleSnapshot, SessionStatus, SpawnOptions};
 use grok_diff::{DiffCapture, DiffEngine, DiffSummary};
 use grok_extensions::ExtensionEntry;
+use grok_mcp::{
+    AddMcpRequest, DoctorReport, McpCatalogEntry, McpCredential, McpServerConfigExt, McpToolInfo,
+    UpdateMcpRequest,
+};
 use grok_memory::MemoryEntry;
 use grok_permissions::{builtin_presets, PermissionController, PermissionDecision, PermissionPreset};
 use grok_persistence::SessionRecord;
@@ -63,8 +67,23 @@ pub struct SessionIdResponse {
 pub async fn start_session(
     state: State<'_, AppState>,
     cwd: String,
-    opts: SpawnOptions,
+    mut opts: SpawnOptions,
 ) -> Result<SessionIdResponse, String> {
+    // Resolve MCP attachments via McpManager (names + auto + high-risk approval).
+    if !opts.mcp_server_names.is_empty() || opts.include_auto_mcp {
+        let payload = state
+            .mcp
+            .session_mcp_payload(
+                &opts.mcp_server_names,
+                &opts.approved_high_risk_mcp,
+                opts.include_auto_mcp,
+            )
+            .await
+            .map_err(err)?;
+        if !payload.is_empty() {
+            opts.mcp_servers = payload;
+        }
+    }
     let id = state.registry.spawn_agent(&cwd, opts).await.map_err(err)?;
     persist_session(&state, id).await;
     Ok(SessionIdResponse {
@@ -257,13 +276,14 @@ pub async fn evaluate_permission(
     })
 }
 
-// ── Phase 3: Extensions / Memory / Scheduler ─────────────────────────────
+// ── Phase 3: Extensions / MCP / Memory / Scheduler ───────────────────────
 
 #[tauri::command]
 pub async fn list_extensions(state: State<'_, AppState>) -> Result<Vec<ExtensionEntry>, String> {
     Ok(state.extensions.list_all().await)
 }
 
+/// Legacy simple add — prefers full `add_mcp_server` for catalog/security.
 #[tauri::command]
 pub async fn add_mcp(
     state: State<'_, AppState>,
@@ -273,15 +293,37 @@ pub async fn add_mcp(
     enabled: bool,
 ) -> Result<(), String> {
     state
-        .extensions
-        .add_mcp(name, command, args, enabled)
+        .mcp
+        .add(AddMcpRequest {
+            name,
+            kind: Some("custom".into()),
+            transport: Some("stdio".into()),
+            command: Some(command),
+            args: Some(args),
+            url: None,
+            env: None,
+            enabled: Some(enabled),
+            scope: None,
+            description: None,
+            allowed_paths: None,
+            read_only: None,
+            auto_attach: None,
+            requires_approval: Some(true),
+            from_catalog: None,
+            headers: None,
+            startup_timeout_sec: None,
+            tool_timeout_sec: None,
+            rate_limit_per_min: None,
+            credential_keys: None,
+        })
         .await
-        .map_err(err)
+        .map_err(err)?;
+    Ok(())
 }
 
 #[tauri::command]
 pub async fn remove_mcp(state: State<'_, AppState>, name: String) -> Result<(), String> {
-    state.extensions.remove_mcp(&name).await.map_err(err)
+    state.mcp.remove(&name).await.map_err(err)
 }
 
 #[tauri::command]
@@ -290,9 +332,110 @@ pub async fn toggle_mcp(
     name: String,
     enabled: bool,
 ) -> Result<(), String> {
+    state.mcp.set_enabled(&name, enabled).await.map_err(err)
+}
+
+// ── Full MCP manager surface ─────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn list_mcp_servers(
+    state: State<'_, AppState>,
+) -> Result<Vec<McpServerConfigExt>, String> {
+    Ok(state.mcp.list().await)
+}
+
+#[tauri::command]
+pub async fn get_mcp_server(
+    state: State<'_, AppState>,
+    name: String,
+) -> Result<McpServerConfigExt, String> {
+    state.mcp.get(&name).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn add_mcp_server(
+    state: State<'_, AppState>,
+    request: AddMcpRequest,
+) -> Result<McpServerConfigExt, String> {
+    state.mcp.add(request).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn update_mcp_server(
+    state: State<'_, AppState>,
+    request: UpdateMcpRequest,
+) -> Result<McpServerConfigExt, String> {
+    state.mcp.update(request).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn remove_mcp_server(state: State<'_, AppState>, name: String) -> Result<(), String> {
+    state.mcp.remove(&name).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn doctor_mcp_server(
+    state: State<'_, AppState>,
+    name: Option<String>,
+) -> Result<Vec<DoctorReport>, String> {
     state
-        .extensions
-        .toggle_mcp(&name, enabled)
+        .mcp
+        .doctor(name.as_deref())
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn list_mcp_tools(
+    state: State<'_, AppState>,
+    name: Option<String>,
+) -> Result<Vec<McpToolInfo>, String> {
+    state.mcp.list_tools(name.as_deref()).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn list_mcp_catalog() -> Result<Vec<McpCatalogEntry>, String> {
+    Ok(grok_mcp::builtin_catalog())
+}
+
+#[tauri::command]
+pub async fn set_mcp_credential(
+    state: State<'_, AppState>,
+    key: String,
+    value: String,
+) -> Result<(), String> {
+    state.mcp.set_credential(&key, &value).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn list_mcp_credentials(
+    state: State<'_, AppState>,
+) -> Result<Vec<McpCredential>, String> {
+    state.mcp.list_credentials_masked().await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn suggest_mcp_for_project(
+    state: State<'_, AppState>,
+    git_remote: Option<String>,
+    branch: Option<String>,
+) -> Result<Vec<String>, String> {
+    Ok(state
+        .mcp
+        .suggest_for_project(git_remote.as_deref(), branch.as_deref())
+        .await)
+}
+
+#[tauri::command]
+pub async fn preview_session_mcp(
+    state: State<'_, AppState>,
+    names: Vec<String>,
+    approved_high_risk: Vec<String>,
+    include_auto: bool,
+) -> Result<Vec<serde_json::Value>, String> {
+    state
+        .mcp
+        .session_mcp_payload(&names, &approved_high_risk, include_auto)
         .await
         .map_err(err)
 }

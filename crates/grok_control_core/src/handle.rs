@@ -23,6 +23,8 @@ pub struct SessionMetadata {
     pub plan_mode: bool,
     pub always_approve: bool,
     pub sandbox_profile: Option<String>,
+    /// MCP server names attached at spawn time.
+    pub mcp_servers: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub last_activity: DateTime<Utc>,
     pub label: Option<String>,

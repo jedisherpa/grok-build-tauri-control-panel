@@ -16,6 +16,7 @@
       <nav class="tabs">
         <button class="tab active" data-tab="sessions">Sessions</button>
         <button class="tab" data-tab="worktrees">Worktrees</button>
+        <button class="tab" data-tab="mcp">MCP</button>
         <button class="tab" data-tab="extensions">Extensions</button>
         <button class="tab" data-tab="memory">Memory</button>
         <button class="tab" data-tab="scheduler">Scheduler</button>
@@ -45,6 +46,40 @@
             <button id="btn-wt-list">List</button>
           </div>
           <pre id="worktrees-list" class="log"></pre>
+        </section>
+
+        <section id="mcp" class="panel">
+          <div class="row">
+            <button id="btn-mcp-catalog">Catalog (7)</button>
+            <button id="btn-mcp-list">List Servers</button>
+            <button id="btn-mcp-doctor">Doctor All</button>
+            <button id="btn-mcp-tools">List Tools</button>
+            <button id="btn-mcp-creds">Credentials</button>
+          </div>
+          <div class="row">
+            <label>Catalog
+              <select id="mcp-catalog">
+                <option value="filesystem">filesystem</option>
+                <option value="github">github</option>
+                <option value="linear">linear</option>
+                <option value="x_twitter">x_twitter</option>
+                <option value="browser">browser</option>
+                <option value="grok_build">grok_build</option>
+                <option value="custom">custom</option>
+              </select>
+            </label>
+            <input id="mcp-name" type="text" placeholder="server name" />
+            <input id="mcp-paths" type="text" placeholder="allowed paths (filesystem, abs)" />
+            <button id="btn-mcp-add">Add from Catalog</button>
+            <button id="btn-mcp-remove">Remove</button>
+            <button id="btn-mcp-toggle">Toggle Enable</button>
+          </div>
+          <div class="row">
+            <input id="mcp-attach" type="text" placeholder="attach names (comma)" />
+            <input id="mcp-approve" type="text" placeholder="approve high-risk (comma)" />
+            <button id="btn-mcp-preview">Preview Session MCP Payload</button>
+          </div>
+          <pre id="mcp-list" class="log"></pre>
         </section>
 
         <section id="extensions" class="panel">

@@ -203,3 +203,51 @@ cargo clippy --workspace --all-targets -- -D warnings → PASS
 2. Use **Start Mock Session** without a binary.  
 3. Prefer plan mode; avoid yolo preset except trusted repos.  
 4. Frontend is intentional thin shell — backend is the production surface.
+
+---
+
+## MCP Integration Wave (post Phase 4) — 2026-07-10
+
+**Plan source:** `docs/mcp_plans/` (`mcp_server_build_plans.zip`)  
+**Orchestrator:** `docs/mcp_plans/mcp_build_plans/integrator/orchestrator_prompt.md`
+
+### Planning wave
+- Shared infrastructure first: `McpManager`, extended config, CLI wrappers, credentials, security, session injection.
+- Then catalog for all 7 servers in order: filesystem → github → linear → x → browser → grok_build → custom.
+
+### Implementation wave
+- New crate: `crates/grok_mcp`
+  - `types` — `McpServerConfigExt`, transports, scopes, add/update DTOs
+  - `catalog` — 7 built-in templates with tools + risk flags
+  - `security` — path denylist, URL HTTPS rules, command validation
+  - `credentials` — `~/.grok/mcp_credentials.json` (0600), `${VAR}` resolve, masking
+  - `injection` — attachment policy (high-risk requires approval), ACP payload builder, Linear ID detect
+  - `manager` — list/add/update/remove/doctor/tools/suggest/session_mcp_payload
+- `grok_cli_wrapper`: `mcp_add_http`, `mcp_doctor`, `mcp_tools`
+- `SpawnOptions`: `mcp_server_names`, `approved_high_risk_mcp`, `include_auto_mcp`
+- `SessionMetadata.mcp_servers` records attachments
+- Tauri commands: `list_mcp_servers`, `add_mcp_server`, `update_mcp_server`, `remove_mcp_server`, `doctor_mcp_server`, `list_mcp_tools`, `list_mcp_catalog`, credentials, suggest, preview
+- Frontend **MCP** tab: catalog CRUD, doctor, tools, credentials, session payload preview
+- Docs: `examples/mcp_setup.md`, plans under `docs/mcp_plans/`
+
+### Audit wave
+| Auditor | Findings | Severity | Resolution |
+|---------|----------|----------|------------|
+| Security | High-risk auto-attach blocked without approval | Pass | by design |
+| Security | `/` and `~/.ssh` filesystem paths denied | Pass | tests |
+| Correctness | moved value in list_tools | High | fixed clone order |
+| Clippy | unused HashMap import | Low | removed |
+| Completeness | all 7 catalog entries | Pass | unit test |
+
+### Revise wave
+- Compile fix for tool description format after move.
+- Prefer typed `mcp_add_http` in CLI add path.
+
+### Gate
+```
+cargo check --workspace          → PASS
+cargo test --workspace           → PASS (incl. 14 grok_mcp tests)
+cargo clippy --workspace --all-targets -- -D warnings → PASS
+```
+
+**MCP auditor consensus: ALL PASS — zero Critical/High remaining.**

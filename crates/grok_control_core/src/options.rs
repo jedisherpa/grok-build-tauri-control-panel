@@ -20,7 +20,14 @@ pub struct SpawnOptions {
     pub always_approve: bool,
     pub plan_mode: bool,
     pub sandbox_profile: Option<String>,
+    /// Raw ACP mcpServers payloads (advanced). Prefer `mcp_server_names`.
     pub mcp_servers: Vec<Value>,
+    /// Names of configured MCP servers to attach (resolved by McpManager).
+    pub mcp_server_names: Vec<String>,
+    /// High-risk MCP servers explicitly approved for this spawn.
+    pub approved_high_risk_mcp: Vec<String>,
+    /// Include servers with `auto_attach = true`.
+    pub include_auto_mcp: bool,
     pub permission_allow: Vec<String>,
     pub permission_deny: Vec<String>,
     pub trust_repo: bool,
@@ -38,6 +45,9 @@ impl Default for SpawnOptions {
             plan_mode: true,
             sandbox_profile: Some("workspace".into()),
             mcp_servers: Vec::new(),
+            mcp_server_names: Vec::new(),
+            approved_high_risk_mcp: Vec::new(),
+            include_auto_mcp: true,
             permission_allow: Vec::new(),
             permission_deny: Vec::new(),
             trust_repo: false,

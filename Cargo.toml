@@ -9,6 +9,7 @@ members = [
     "crates/grok_worktree",
     "crates/grok_permissions",
     "crates/grok_extensions",
+    "crates/grok_mcp",
     "crates/grok_memory",
     "crates/grok_scheduler",
     "crates/grok_persistence",

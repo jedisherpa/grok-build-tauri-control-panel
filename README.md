@@ -9,7 +9,8 @@ Rust **Tauri 2** desktop control panel for [Grok Build](https://x.ai) — multi-
 - **Multi-session registry** with concurrent `DashMap` access
 - **Git worktree** isolation for parallel agents
 - **Permission presets** (safe / workspace / yolo) + sandbox profiles
-- **Extensions** — MCP, skills, plugins CRUD (config + CLI)
+- **MCP management** — 7-server catalog (filesystem, GitHub, Linear, X, Playwright, grok-build, custom), doctor, credentials store, session attachment
+- **Extensions** — skills, plugins CRUD (config + CLI)
 - **Memory** — structured store + MEMORY.md flush/dream
 - **Scheduler** — interval, cron, one-shot routines
 - **Persistence** — SQLite session/transcript recovery

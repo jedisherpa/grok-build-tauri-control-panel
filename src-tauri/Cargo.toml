@@ -19,6 +19,7 @@ grok_control_core = { path = "../crates/grok_control_core" }
 grok_diff = { path = "../crates/grok_diff" }
 grok_events = { path = "../crates/grok_events" }
 grok_extensions = { path = "../crates/grok_extensions" }
+grok_mcp = { path = "../crates/grok_mcp" }
 grok_memory = { path = "../crates/grok_memory" }
 grok_permissions = { path = "../crates/grok_permissions" }
 grok_persistence = { path = "../crates/grok_persistence" }

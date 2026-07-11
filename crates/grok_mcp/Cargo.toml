@@ -1,0 +1,24 @@
+[package]
+name = "grok_mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MCP manager: catalog, CRUD, doctor, session injection, security"
+
+[dependencies]
+chrono.workspace = true
+grok_cli_wrapper = { path = "../grok_cli_wrapper" }
+grok_config = { path = "../grok_config" }
+grok_events = { path = "../grok_events" }
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+which.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

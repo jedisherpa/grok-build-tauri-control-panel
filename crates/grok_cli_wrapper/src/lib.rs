@@ -166,9 +166,51 @@ impl GrokCli {
         self.run_args(&a, None).await
     }
 
+    /// `grok mcp add --transport http|sse NAME URL`
+    pub async fn mcp_add_http(
+        &self,
+        name: &str,
+        url: &str,
+        transport: &str,
+    ) -> Result<String> {
+        validate_name(name)?;
+        if !(url.starts_with("https://")
+            || url.starts_with("http://localhost")
+            || url.starts_with("http://127.0.0.1"))
+        {
+            return Err(CliError::InvalidArg("url must be https or localhost".into()));
+        }
+        self.run_args(
+            &["mcp", "add", "--transport", transport, name, url],
+            None,
+        )
+        .await
+    }
+
     pub async fn mcp_remove(&self, name: &str) -> Result<String> {
         validate_name(name)?;
         self.run_args(&["mcp", "remove", name], None).await
+    }
+
+    /// `grok mcp doctor [NAME]` when supported by the CLI.
+    pub async fn mcp_doctor(&self, name: Option<&str>) -> Result<String> {
+        match name {
+            Some(n) => {
+                validate_name(n)?;
+                self.run_args(&["mcp", "doctor", n], None).await
+            }
+            None => self.run_args(&["mcp", "doctor"], None).await,
+        }
+    }
+
+    pub async fn mcp_tools(&self, name: Option<&str>) -> Result<String> {
+        match name {
+            Some(n) => {
+                validate_name(n)?;
+                self.run_args(&["mcp", "tools", n], None).await
+            }
+            None => self.run_args(&["mcp", "tools"], None).await,
+        }
     }
 
     pub async fn sessions_list(&self) -> Result<String> {
