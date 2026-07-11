@@ -357,3 +357,13 @@ body {
   #app { grid-template-columns: 200px 1fr; }
   .col-right { display: none; }
 }
+
+img.logo {
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
+  border: 1px solid var(--border-hi);
+  object-fit: cover;
+  background: #000;
+  display: block;
+}
