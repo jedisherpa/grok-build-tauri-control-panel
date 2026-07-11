@@ -19,6 +19,7 @@ use grok_scheduler::{JobHandler, Scheduler, ScheduledJob};
 use grok_worktree::WorktreeManager;
 
 use crate::devserver::DevServerManager;
+use crate::haven::HavenClient;
 
 pub struct AppState {
     pub paths: GrokPaths,
@@ -34,6 +35,7 @@ pub struct AppState {
     pub persistence: Arc<Persistence>,
     pub dev_server: Arc<DevServerManager>,
     pub login: Arc<LoginManager>,
+    pub haven: Arc<HavenClient>,
 }
 
 impl AppState {
@@ -153,6 +155,23 @@ impl AppState {
 
         let dev_server = DevServerManager::new();
         let login = LoginManager::new(grok_cli.grok_path.clone());
+        let haven = HavenClient::new(paths.home_dir.clone());
+
+        // Auto-link Haven (Hetzner process/temp host) on startup.
+        {
+            let haven_bg = haven.clone();
+            tauri::async_runtime::spawn(async move {
+                let cfg = haven_bg.config().await;
+                if cfg.enabled && cfg.auto_connect {
+                    let st = haven_bg.connect_and_status().await;
+                    if st.connected {
+                        info!(msg = %st.message, "haven linked on startup");
+                    } else {
+                        warn!(msg = %st.message, "haven auto-connect failed");
+                    }
+                }
+            });
+        }
 
         Ok(Self {
             paths,
@@ -168,6 +187,7 @@ impl AppState {
             persistence,
             dev_server,
             login,
+            haven,
         })
     }
 }

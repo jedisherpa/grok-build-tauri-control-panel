@@ -154,6 +154,7 @@ pub struct RuntimeStatus {
     pub xai_api_key_present: bool,
     pub ready: bool,
     pub message: String,
+    pub haven: crate::haven::HavenStatus,
 }
 
 #[tauri::command]
@@ -218,6 +219,15 @@ pub async fn get_runtime_status(state: State<'_, AppState>) -> Result<RuntimeSta
         )
     };
 
+    let haven = state.haven.last_status().await;
+    let message = if haven.connected {
+        format!("{message} · {}", haven.label)
+    } else if haven.configured {
+        format!("{message} · haven offline")
+    } else {
+        message
+    };
+
     Ok(RuntimeStatus {
         grok_binary: binary.display().to_string(),
         grok_binary_exists: exists,
@@ -231,7 +241,62 @@ pub async fn get_runtime_status(state: State<'_, AppState>) -> Result<RuntimeSta
         xai_api_key_present: xai,
         ready,
         message,
+        haven,
     })
+}
+
+// ── Haven (Hetzner process + temp store) ─────────────────────────────────
+
+#[tauri::command]
+pub async fn haven_status(state: State<'_, AppState>) -> Result<crate::haven::HavenStatus, String> {
+    Ok(state.haven.connect_and_status().await)
+}
+
+#[tauri::command]
+pub async fn haven_get_config(
+    state: State<'_, AppState>,
+) -> Result<crate::haven::HavenConfig, String> {
+    let mut cfg = state.haven.config().await;
+    // Never return full token to UI logs — mask middle.
+    if cfg.auth_token.len() > 12 {
+        let t = &cfg.auth_token;
+        cfg.auth_token = format!("{}…{}", &t[..6], &t[t.len() - 4..]);
+    }
+    Ok(cfg)
+}
+
+#[tauri::command]
+pub async fn haven_set_config(
+    state: State<'_, AppState>,
+    mut config: crate::haven::HavenConfig,
+) -> Result<crate::haven::HavenStatus, String> {
+    // If UI sent a masked token, keep existing secret.
+    let existing = state.haven.config().await;
+    if config.auth_token.contains('…') || config.auth_token.contains("...") {
+        config.auth_token = existing.auth_token;
+    }
+    state.haven.set_config(config).await?;
+    Ok(state.haven.connect_and_status().await)
+}
+
+#[tauri::command]
+pub async fn haven_list_jobs(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    state.haven.list_jobs().await
+}
+
+#[tauri::command]
+pub async fn haven_start_shell(
+    state: State<'_, AppState>,
+    name: String,
+    command: String,
+    cwd: Option<String>,
+) -> Result<serde_json::Value, String> {
+    state.haven.start_shell(name, command, cwd).await
+}
+
+#[tauri::command]
+pub async fn haven_list_files(state: State<'_, AppState>) -> Result<serde_json::Value, String> {
+    state.haven.list_files().await
 }
 
 #[tauri::command]

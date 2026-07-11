@@ -1866,6 +1866,22 @@ $("btn-mem-flush").onclick = async () => {
 
 // System
 $("btn-status").onclick = () => refreshStatus().catch(toastError);
+$("btn-haven").onclick = async () => {
+  try {
+    const st = await invoke("haven_status");
+    const jobs = await invoke("haven_list_jobs").catch(() => []);
+    const files = await invoke("haven_list_files").catch(() => []);
+    $("sys-out").textContent = JSON.stringify({ status: st, jobs, files }, null, 2);
+    pushEvent(
+      st.connected ? st.message : st.message || "Haven offline",
+      st.connected ? "ok" : "err",
+      st.connected ? "boom" : "error",
+      { force: true }
+    );
+  } catch (e) {
+    toastError(e);
+  }
+};
 $("btn-baseline").onclick = async () => {
   try {
     $("sys-out").textContent = JSON.stringify(await invoke("capture_baseline"), null, 2);
@@ -1911,6 +1927,17 @@ async function boot() {
     await refreshDevStatus();
     noteTurn("idle");
     pushEvent("Bomb Code ready", "ok", "boom", { force: true });
+    // Haven (Hetzner) auto-link status
+    try {
+      const hv = await invoke("haven_status");
+      if (hv?.connected) {
+        pushEvent(hv.message || `Haven · ${hv.label} linked`, "ok", "boom", { force: true });
+      } else if (hv?.configured) {
+        pushEvent(hv.message || "Haven offline", "err", "error", { force: true });
+      }
+    } catch (_) {
+      /* older build without haven */
+    }
     if (state.sessions.length) {
       const saved = state.sessions.filter((s) => s.live === false || String(s.status).includes("saved")).length;
       const live = state.sessions.length - saved;

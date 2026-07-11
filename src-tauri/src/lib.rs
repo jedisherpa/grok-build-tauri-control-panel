@@ -2,6 +2,7 @@
 
 mod commands;
 mod devserver;
+mod haven;
 mod state;
 
 use tauri::{Emitter, Manager};
@@ -139,6 +140,12 @@ pub fn run() {
             commands::dev_server_status,
             commands::open_dev_server,
             commands::reveal_project,
+            commands::haven_status,
+            commands::haven_get_config,
+            commands::haven_set_config,
+            commands::haven_list_jobs,
+            commands::haven_start_shell,
+            commands::haven_list_files,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
