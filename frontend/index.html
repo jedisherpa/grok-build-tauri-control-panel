@@ -9,15 +9,20 @@
   <body>
     <div id="app">
       <header>
-        <h1>Grok Build Control Panel</h1>
-        <p class="subtitle">ACP-first multi-session agent orchestrator</p>
+        <div class="brand">
+          <h1>Grok Build Control Panel</h1>
+          <p class="subtitle">Code with multi-session ACP agents + MCP</p>
+        </div>
+        <div id="status-bar" class="status-bar status-unknown">
+          <span id="status-dot" class="dot"></span>
+          <span id="status-text">Starting…</span>
+        </div>
       </header>
 
       <nav class="tabs">
         <button class="tab active" data-tab="sessions">Sessions</button>
-        <button class="tab" data-tab="worktrees">Worktrees</button>
         <button class="tab" data-tab="mcp">MCP</button>
-        <button class="tab" data-tab="extensions">Extensions</button>
+        <button class="tab" data-tab="worktrees">Worktrees</button>
         <button class="tab" data-tab="memory">Memory</button>
         <button class="tab" data-tab="scheduler">Scheduler</button>
         <button class="tab" data-tab="system">System</button>
@@ -25,35 +30,53 @@
 
       <main>
         <section id="sessions" class="panel active">
-          <div class="row">
-            <label>CWD <input id="cwd" type="text" placeholder="/absolute/path" /></label>
-            <button id="btn-mock">Start Mock Session</button>
-            <button id="btn-refresh">Refresh</button>
+          <div class="card">
+            <h3>Start coding session</h3>
+            <div class="row">
+              <label class="grow">Project directory (absolute)
+                <input id="cwd" type="text" placeholder="/Users/you/code/my-project" />
+              </label>
+            </div>
+            <div class="row">
+              <label>Model <input id="model" type="text" placeholder="default" /></label>
+              <label class="check"><input id="plan-mode" type="checkbox" checked /> Plan mode</label>
+              <label class="check"><input id="always-approve" type="checkbox" /> Always approve</label>
+              <label class="grow">MCP attach (comma names)
+                <input id="mcp-attach-session" type="text" placeholder="github, docs-fs" />
+              </label>
+            </div>
+            <div class="row">
+              <button id="btn-start-acp" class="primary">Start ACP Session</button>
+              <button id="btn-mock" class="secondary">Mock (offline)</button>
+              <button id="btn-refresh">Refresh</button>
+              <button id="btn-cancel" class="danger">Cancel Selected</button>
+            </div>
+            <p class="hint">ACP uses <code>grok agent stdio</code>. Prefer plan mode unless you fully trust the repo.</p>
           </div>
-          <div class="row">
-            <input id="prompt" type="text" placeholder="Send prompt to selected session…" />
-            <button id="btn-prompt">Send Prompt</button>
-            <button id="btn-cancel">Cancel</button>
-          </div>
-          <pre id="sessions-list" class="log">No sessions yet.</pre>
-        </section>
 
-        <section id="worktrees" class="panel">
-          <div class="row">
-            <label>Repo <input id="repo" type="text" placeholder="/path/to/git/repo" /></label>
-            <label>Name <input id="wt-name" type="text" placeholder="feature-x" /></label>
-            <button id="btn-wt-create">Create</button>
-            <button id="btn-wt-list">List</button>
+          <div class="split">
+            <div class="card">
+              <h3>Sessions <span id="session-count" class="badge">0</span></h3>
+              <div id="sessions-list" class="session-list">No sessions yet.</div>
+            </div>
+            <div class="card">
+              <h3>Prompt → <span id="selected-label" class="muted">none selected</span></h3>
+              <textarea id="prompt" rows="6" placeholder="Describe the coding task…"></textarea>
+              <div class="row">
+                <button id="btn-prompt" class="primary">Send Prompt</button>
+                <button id="btn-plan-on">Enable Plan Mode</button>
+                <button id="btn-plan-off">Disable Plan Mode</button>
+              </div>
+            </div>
           </div>
-          <pre id="worktrees-list" class="log"></pre>
         </section>
 
         <section id="mcp" class="panel">
           <div class="row">
-            <button id="btn-mcp-catalog">Catalog (7)</button>
+            <button id="btn-mcp-catalog">Catalog</button>
             <button id="btn-mcp-list">List Servers</button>
-            <button id="btn-mcp-doctor">Doctor All</button>
-            <button id="btn-mcp-tools">List Tools</button>
+            <button id="btn-mcp-doctor">Doctor</button>
+            <button id="btn-mcp-tools">Tools</button>
             <button id="btn-mcp-creds">Credentials</button>
           </div>
           <div class="row">
@@ -69,32 +92,33 @@
               </select>
             </label>
             <input id="mcp-name" type="text" placeholder="server name" />
-            <input id="mcp-paths" type="text" placeholder="allowed paths (filesystem, abs)" />
-            <button id="btn-mcp-add">Add from Catalog</button>
-            <button id="btn-mcp-remove">Remove</button>
-            <button id="btn-mcp-toggle">Toggle Enable</button>
+            <input id="mcp-paths" type="text" placeholder="abs paths for filesystem" class="grow" />
+            <button id="btn-mcp-add" class="primary">Add</button>
+            <button id="btn-mcp-remove" class="danger">Remove</button>
           </div>
           <div class="row">
-            <input id="mcp-attach" type="text" placeholder="attach names (comma)" />
-            <input id="mcp-approve" type="text" placeholder="approve high-risk (comma)" />
-            <button id="btn-mcp-preview">Preview Session MCP Payload</button>
+            <input id="cred-key" type="text" placeholder="credential key e.g. GITHUB_TOKEN" />
+            <input id="cred-value" type="password" placeholder="secret value" class="grow" />
+            <button id="btn-cred-set">Save Credential</button>
           </div>
           <pre id="mcp-list" class="log"></pre>
         </section>
 
-        <section id="extensions" class="panel">
+        <section id="worktrees" class="panel">
           <div class="row">
-            <button id="btn-ext-list">List Extensions</button>
-            <button id="btn-ext-doctor">Doctor</button>
+            <label class="grow">Repo <input id="repo" type="text" placeholder="/path/to/git/repo" /></label>
+            <label>Name <input id="wt-name" type="text" placeholder="feature-x" /></label>
+            <button id="btn-wt-create" class="primary">Create</button>
+            <button id="btn-wt-list">List</button>
           </div>
-          <pre id="extensions-list" class="log"></pre>
+          <pre id="worktrees-list" class="log"></pre>
         </section>
 
         <section id="memory" class="panel">
           <div class="row">
-            <input id="mem-scope" type="text" placeholder="scope" value="workspace" />
-            <input id="mem-content" type="text" placeholder="memory content" />
-            <button id="btn-mem-add">Add</button>
+            <input id="mem-scope" type="text" value="workspace" />
+            <input id="mem-content" type="text" placeholder="memory content" class="grow" />
+            <button id="btn-mem-add" class="primary">Add</button>
             <button id="btn-mem-list">List</button>
             <button id="btn-mem-flush">Flush</button>
           </div>
@@ -104,21 +128,22 @@
         <section id="scheduler" class="panel">
           <div class="row">
             <input id="job-name" type="text" placeholder="job name" />
-            <input id="job-prompt" type="text" placeholder="prompt" />
+            <input id="job-prompt" type="text" placeholder="prompt" class="grow" />
             <input id="job-interval" type="number" value="3600" min="1" />
-            <button id="btn-job-add">Add Interval Job</button>
-            <button id="btn-job-list">List Jobs</button>
+            <button id="btn-job-add" class="primary">Add Job</button>
+            <button id="btn-job-list">List</button>
           </div>
           <pre id="scheduler-list" class="log"></pre>
         </section>
 
         <section id="system" class="panel">
           <div class="row">
-            <button id="btn-discover">Discover Environment</button>
-            <button id="btn-baseline">Capture Baseline</button>
-            <button id="btn-config">Get Config</button>
+            <button id="btn-status" class="primary">Refresh Status</button>
+            <button id="btn-discover">Discover</button>
+            <button id="btn-baseline">Baseline</button>
+            <button id="btn-config">Config</button>
             <button id="btn-checkpoint">Checkpoint</button>
-            <button id="btn-shutdown">Shutdown All</button>
+            <button id="btn-shutdown" class="danger">Shutdown All</button>
           </div>
           <pre id="system-log" class="log"></pre>
         </section>

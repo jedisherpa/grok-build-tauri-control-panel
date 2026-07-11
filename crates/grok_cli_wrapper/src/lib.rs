@@ -49,8 +49,9 @@ impl GrokCli {
     pub fn new(grok_path: impl Into<PathBuf>) -> Self {
         Self {
             grok_path: grok_path.into(),
-            default_timeout: Duration::from_secs(60),
-            clean_env: true,
+            default_timeout: Duration::from_secs(120),
+            // Inherit host env so auth tokens, git, node/npx remain available.
+            clean_env: false,
         }
     }
 
@@ -222,17 +223,30 @@ impl GrokCli {
     }
 
     fn apply_env(&self, cmd: &mut Command) {
-        if self.clean_env {
-            // Inherit PATH/HOME but strip potentially dangerous overrides if needed.
-            // Keep XAI_API_KEY for auth.
-            if let Ok(key) = std::env::var("XAI_API_KEY") {
+        // Always give children a usable PATH for GUI-launched apps.
+        let path = grok_config::child_path_env();
+        cmd.env("PATH", path);
+
+        if let Ok(home) = std::env::var("HOME") {
+            cmd.env("HOME", &home);
+            // Grok stores auth/session under ~/.grok — preserve USER for git identity.
+            cmd.env("USER", std::env::var("USER").unwrap_or_default());
+        }
+
+        // Auth: process env first (user may export XAI_API_KEY).
+        if let Ok(key) = std::env::var("XAI_API_KEY") {
+            if !key.is_empty() {
                 cmd.env("XAI_API_KEY", key);
             }
-            if let Ok(path) = std::env::var("PATH") {
-                cmd.env("PATH", path);
-            }
-            if let Ok(home) = std::env::var("HOME") {
-                cmd.env("HOME", home);
+        }
+
+        if !self.clean_env {
+            // Inherit remaining env for full CLI fidelity.
+            for (k, v) in std::env::vars() {
+                if k == "PATH" || k == "HOME" || k == "XAI_API_KEY" {
+                    continue;
+                }
+                cmd.env(k, v);
             }
         }
     }

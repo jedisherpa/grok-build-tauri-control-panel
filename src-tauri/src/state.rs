@@ -34,19 +34,29 @@ pub struct AppState {
 
 impl AppState {
     pub async fn initialize() -> Result<Self> {
+        // Critical for macOS .app launches from Finder/Dock.
+        grok_config::bootstrap_process_env();
+
         let paths = GrokPaths::discover(std::env::current_dir().ok().as_deref())
             .context("path discovery")?;
         let _ = paths.ensure_dirs();
 
         let mut config = GrokConfig::load(&paths).unwrap_or_default();
-        if config.grok_binary.is_none() {
-            config.grok_binary = grok_config::discover_grok_binary().ok();
+        // Always re-resolve binary so GUI gets absolute path to ~/.grok/bin/grok.
+        match grok_config::discover_grok_binary() {
+            Ok(bin) => {
+                info!(binary = %bin.display(), "resolved grok binary");
+                config.grok_binary = Some(bin);
+            }
+            Err(e) => warn!(error = %e, "grok binary not found — install Grok Build CLI"),
         }
+
+        // Persist panel settings (never writes Grok CLI ~/.grok/config.toml).
+        let _ = config.save(&paths.config_file);
 
         let binary = config
             .resolve_grok_binary()
             .unwrap_or_else(|_| PathBuf::from("grok"));
-        info!(binary = %binary.display(), "resolved grok binary");
 
         let config = Arc::new(RwLock::new(config));
         let event_bus = shared_bus();

@@ -12,6 +12,7 @@ use grok_events::SessionStatus;
 use crate::options::AgentMode;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionMetadata {
     pub id: Uuid,
     pub acp_session_id: Option<String>,

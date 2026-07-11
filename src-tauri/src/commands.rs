@@ -56,6 +56,101 @@ pub async fn capture_baseline(
     Ok(state.grok_cli.capture_baseline().await)
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeStatus {
+    pub grok_binary: String,
+    pub grok_binary_exists: bool,
+    pub grok_version: Option<String>,
+    pub home_dir: String,
+    pub config_path: String,
+    pub worktrees_dir: String,
+    pub default_cwd: String,
+    pub session_count: usize,
+    pub mcp_count: usize,
+    pub xai_api_key_present: bool,
+    pub ready: bool,
+    pub message: String,
+}
+
+#[tauri::command]
+pub async fn get_runtime_status(state: State<'_, AppState>) -> Result<RuntimeStatus, String> {
+    let binary = state.grok_cli.grok_path.clone();
+    let exists = binary.is_file();
+    let version = if exists {
+        state.grok_cli.version().await.ok()
+    } else {
+        None
+    };
+    let default_cwd = std::env::var("HOME")
+        .map(PathBuf::from)
+        .or_else(|_| std::env::current_dir())
+        .unwrap_or_else(|_| PathBuf::from("/tmp"));
+    // Prefer last used cwd from persistence.
+    let default_cwd = state
+        .persistence
+        .get_kv("last_cwd")
+        .ok()
+        .flatten()
+        .map(PathBuf::from)
+        .filter(|p| p.is_dir())
+        .unwrap_or(default_cwd);
+
+    let mcp_count = state.mcp.list().await.len();
+    let session_count = state.registry.session_count();
+    let xai = std::env::var("XAI_API_KEY")
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
+
+    let (ready, message) = if !exists {
+        (
+            false,
+            "Grok Build CLI not found. Install it, then restart the panel.".into(),
+        )
+    } else if version.is_none() {
+        (
+            false,
+            format!(
+                "Found {} but `grok version` failed. Check permissions.",
+                binary.display()
+            ),
+        )
+    } else {
+        (
+            true,
+            format!(
+                "Ready — {} ({})",
+                binary.display(),
+                version.as_deref().unwrap_or("?")
+            ),
+        )
+    };
+
+    Ok(RuntimeStatus {
+        grok_binary: binary.display().to_string(),
+        grok_binary_exists: exists,
+        grok_version: version,
+        home_dir: state.paths.home_dir.display().to_string(),
+        config_path: state.paths.config_file.display().to_string(),
+        worktrees_dir: state.paths.worktrees_dir.display().to_string(),
+        default_cwd: default_cwd.display().to_string(),
+        session_count,
+        mcp_count,
+        xai_api_key_present: xai,
+        ready,
+        message,
+    })
+}
+
+#[tauri::command]
+pub async fn set_last_cwd(state: State<'_, AppState>, cwd: String) -> Result<(), String> {
+    let path = PathBuf::from(&cwd);
+    if !path.is_absolute() || !path.is_dir() {
+        return Err("cwd must be an absolute existing directory".into());
+    }
+    state.persistence.set_kv("last_cwd", &cwd).map_err(err)
+}
+
 // ── Phase 1: Sessions ────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize)]
@@ -85,6 +180,7 @@ pub async fn start_session(
         }
     }
     let id = state.registry.spawn_agent(&cwd, opts).await.map_err(err)?;
+    let _ = state.persistence.set_kv("last_cwd", &cwd);
     persist_session(&state, id).await;
     Ok(SessionIdResponse {
         id: id.to_string(),
@@ -97,6 +193,7 @@ pub async fn start_mock_session(
     cwd: String,
 ) -> Result<SessionIdResponse, String> {
     let id = state.registry.spawn_mock(&cwd).await.map_err(err)?;
+    let _ = state.persistence.set_kv("last_cwd", &cwd);
     persist_session(&state, id).await;
     Ok(SessionIdResponse {
         id: id.to_string(),

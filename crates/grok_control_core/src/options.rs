@@ -9,8 +9,10 @@ pub enum AgentMode {
     Headless,
 }
 
+// Note: AgentMode accepts "acp" / "headless" (snake). Frontend may send same.
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, rename_all = "camelCase")]
 pub struct SpawnOptions {
     pub model: Option<String>,
     pub worktree: Option<String>,

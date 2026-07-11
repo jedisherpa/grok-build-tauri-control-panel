@@ -587,9 +587,11 @@ mod tests {
             home_dir: dir.to_path_buf(),
             grok_dir: dir.to_path_buf(),
             config_file: dir.join("config.toml"),
+            grok_cli_config_file: dir.join("cli-config.toml"),
             worktrees_dir: dir.join("worktrees"),
             memory_dir: dir.join("memory"),
             sessions_dir: dir.join("sessions"),
+            panel_dir: dir.to_path_buf(),
             project_config_file: None,
             project_root: None,
         };

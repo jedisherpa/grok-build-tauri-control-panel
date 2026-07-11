@@ -1,0 +1,73 @@
+# Quickstart — use the Control Panel with Grok Build
+
+## Prerequisites
+
+1. **Grok Build CLI** installed (`grok version` works).
+2. Auth configured for Grok (login via `grok` once if needed).
+3. Rust + Tauri deps (only needed to rebuild).
+
+Your CLI lives at e.g. `~/.grok/bin/grok` — the panel discovers this automatically, including when launched from Finder.
+
+## Install & launch (recommended)
+
+```bash
+cd ~/grok-build-tauri-control-panel
+./scripts/install.sh
+```
+
+This builds a release `.app` and copies it to **Applications**, then opens it.
+
+Later launches:
+
+```bash
+./scripts/run.sh
+# or
+open "/Applications/Grok Build Control Panel.app"
+```
+
+## First coding session
+
+1. Open the **Sessions** tab.
+2. Set **Project directory** to an absolute path of a git repo you want to work in.
+3. Leave **Plan mode** on (safer).
+4. Click **Start ACP Session** (uses `grok agent stdio`).
+5. Select the session in the list, type a prompt, **Send Prompt**.
+6. Watch **Live Events** for tool calls / plan updates.
+
+### Optional MCP
+
+- **MCP** tab → pick `filesystem` or `github` → **Add**.
+- For GitHub: save `GITHUB_TOKEN` under credentials first.
+- On Sessions, set **MCP attach** to those names (e.g. `github`).
+
+## Config locations (safe)
+
+| File | Purpose |
+|------|---------|
+| `~/.grok/control-panel/config.toml` | Panel settings only |
+| `~/.grok/config.toml` | Grok CLI config (**never overwritten** by panel) |
+| `~/.grok/mcp_credentials.json` | MCP secrets (mode 0600) |
+| `~/.grok/control-panel/sessions/` | Panel SQLite recovery DB |
+
+## Dev loop (rebuild UI/backend)
+
+```bash
+./scripts/run.sh --dev
+# or
+cargo tauri dev
+```
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---------|-----|
+| Status: Grok not found | Ensure `~/.grok/bin/grok` exists; re-run install |
+| ACP start fails | Run `grok agent stdio` once in a terminal; complete auth |
+| Empty UI / no Tauri bridge | Must use `.app` or `cargo tauri dev`, not opening `index.html` |
+| MCP doctor warns | Install Node/npx for stdio servers; set credentials |
+
+## Safety
+
+- Default: **plan mode on**, **always-approve off** in the panel UI.
+- High-risk MCP (browser, grok-build, custom) requires explicit attach approval.
+- Do not enable Always approve unless you trust the workspace.

@@ -10,10 +10,14 @@ use crate::{ConfigError, Result};
 pub struct GrokPaths {
     pub home_dir: PathBuf,
     pub grok_dir: PathBuf,
+    /// Panel-owned config — never overwrites Grok CLI `~/.grok/config.toml`.
     pub config_file: PathBuf,
+    /// Read-only path to the official Grok CLI config (for display/doctor).
+    pub grok_cli_config_file: PathBuf,
     pub worktrees_dir: PathBuf,
     pub memory_dir: PathBuf,
     pub sessions_dir: PathBuf,
+    pub panel_dir: PathBuf,
     pub project_config_file: Option<PathBuf>,
     pub project_root: Option<PathBuf>,
 }
@@ -26,13 +30,16 @@ impl GrokPaths {
             .ok_or_else(|| ConfigError::Invalid("cannot resolve home directory".into()))?;
 
         let grok_dir = home_dir.join(".grok");
-        let config_file = grok_dir.join("config.toml");
+        let panel_dir = grok_dir.join("control-panel");
+        // Isolate panel settings from the CLI's config.toml ([cli]/[ui]/marketplace).
+        let config_file = panel_dir.join("config.toml");
+        let grok_cli_config_file = grok_dir.join("config.toml");
         let worktrees_dir = grok_dir.join("worktrees");
-        let memory_dir = grok_dir.join("memory");
-        let sessions_dir = grok_dir.join("sessions");
+        let memory_dir = panel_dir.join("memory");
+        let sessions_dir = panel_dir.join("sessions");
 
         let (project_root, project_config_file) = if let Some(root) = project_root {
-            let cfg = root.join(".grok").join("config.toml");
+            let cfg = root.join(".grok").join("control-panel.toml");
             (Some(root.to_path_buf()), Some(cfg))
         } else {
             (None, None)
@@ -42,9 +49,11 @@ impl GrokPaths {
             home_dir,
             grok_dir,
             config_file,
+            grok_cli_config_file,
             worktrees_dir,
             memory_dir,
             sessions_dir,
+            panel_dir,
             project_config_file,
             project_root,
         })
@@ -52,6 +61,7 @@ impl GrokPaths {
 
     pub fn ensure_dirs(&self) -> Result<()> {
         std::fs::create_dir_all(&self.grok_dir)?;
+        std::fs::create_dir_all(&self.panel_dir)?;
         std::fs::create_dir_all(&self.worktrees_dir)?;
         std::fs::create_dir_all(&self.memory_dir)?;
         std::fs::create_dir_all(&self.sessions_dir)?;
@@ -59,33 +69,21 @@ impl GrokPaths {
     }
 }
 
-/// Locate the `grok` binary via PATH, common install locations, and cargo bin.
+/// Locate the `grok` binary via official install locations first, then PATH.
 pub fn discover_grok_binary() -> Result<PathBuf> {
-    if let Ok(p) = which("grok") {
-        return Ok(p);
-    }
-
-    let candidates = [
-        dirs_home().map(|h| h.join(".cargo").join("bin").join("grok")),
-        dirs_home().map(|h| h.join(".local").join("bin").join("grok")),
-        dirs_home().map(|h| h.join(".grok").join("bin").join("grok")),
-        Some(PathBuf::from("/usr/local/bin/grok")),
-        Some(PathBuf::from("/opt/homebrew/bin/grok")),
-    ];
-
-    for c in candidates.into_iter().flatten() {
+    // Prefer official ~/.grok/bin install (GUI apps often lack PATH entries).
+    for c in crate::env_bootstrap::preferred_grok_candidates() {
         if c.is_file() {
-            return Ok(c);
+            // Resolve symlinks when possible for stability.
+            return Ok(std::fs::canonicalize(&c).unwrap_or(c));
         }
     }
 
-    Err(ConfigError::BinaryNotFound)
-}
+    if let Ok(p) = which("grok") {
+        return Ok(std::fs::canonicalize(&p).unwrap_or(p));
+    }
 
-fn dirs_home() -> Option<PathBuf> {
-    directories::UserDirs::new()
-        .map(|u| u.home_dir().to_path_buf())
-        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+    Err(ConfigError::BinaryNotFound)
 }
 
 #[cfg(test)]
@@ -95,7 +93,8 @@ mod tests {
     #[test]
     fn discover_paths() {
         let paths = GrokPaths::discover(None).unwrap();
-        assert!(paths.config_file.ends_with("config.toml"));
+        assert!(paths.config_file.ends_with("control-panel/config.toml"));
+        assert!(paths.grok_cli_config_file.ends_with(".grok/config.toml"));
         assert!(paths.worktrees_dir.ends_with("worktrees"));
     }
 
@@ -105,7 +104,7 @@ mod tests {
         let paths = GrokPaths::discover(Some(root)).unwrap();
         assert_eq!(
             paths.project_config_file.unwrap(),
-            PathBuf::from("/tmp/myproject/.grok/config.toml")
+            PathBuf::from("/tmp/myproject/.grok/control-panel.toml")
         );
     }
 }

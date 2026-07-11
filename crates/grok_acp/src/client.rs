@@ -108,8 +108,18 @@ impl AcpClient {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
+        // GUI apps need an explicit PATH so grok can find tools/npx/git.
+        // Prefer full inheritance; still force PATH/HOME for Finder launches.
+        cmd.env("PATH", std::env::var("PATH").unwrap_or_else(|_| {
+            "/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin:/usr/local/bin".into()
+        }));
+        if let Ok(home) = std::env::var("HOME") {
+            cmd.env("HOME", home);
+        }
         if let Ok(key) = std::env::var("XAI_API_KEY") {
-            cmd.env("XAI_API_KEY", key);
+            if !key.is_empty() {
+                cmd.env("XAI_API_KEY", key);
+            }
         }
         for (k, v) in &opts.extra_env {
             cmd.env(k, v);

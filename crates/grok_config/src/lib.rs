@@ -10,9 +10,11 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{debug, info, warn};
 
+pub mod env_bootstrap;
 pub mod paths;
 pub mod sandbox;
 
+pub use env_bootstrap::{bootstrap_process_env, child_path_env, preferred_grok_candidates};
 pub use paths::{GrokPaths, discover_grok_binary};
 pub use sandbox::SandboxProfile;
 
@@ -274,6 +276,11 @@ pub fn discover_environment() -> Result<DiscoveryReport> {
     })
 }
 
+/// Path to the official Grok CLI config (do not overwrite from the panel).
+pub fn grok_cli_config_path() -> Result<PathBuf> {
+    Ok(GrokPaths::discover(None)?.grok_cli_config_file)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,9 +319,11 @@ mod tests {
             home_dir: dir.path().to_path_buf(),
             grok_dir: dir.path().to_path_buf(),
             config_file: path.clone(),
+            grok_cli_config_file: dir.path().join("cli-config.toml"),
             worktrees_dir: dir.path().join("worktrees"),
             memory_dir: dir.path().join("memory"),
             sessions_dir: dir.path().join("sessions"),
+            panel_dir: dir.path().to_path_buf(),
             project_config_file: None,
             project_root: None,
         };

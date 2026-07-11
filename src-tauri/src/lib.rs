@@ -47,6 +47,8 @@ pub fn run() {
             commands::get_config,
             commands::save_config,
             commands::capture_baseline,
+            commands::get_runtime_status,
+            commands::set_last_cwd,
             commands::start_session,
             commands::start_mock_session,
             commands::list_sessions,
