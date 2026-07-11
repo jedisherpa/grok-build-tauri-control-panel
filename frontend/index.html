@@ -124,22 +124,35 @@
               <p class="muted">Pixel bombs track thinking, tools, and turn status while you wait.</p>
             </div>
           </div>
-          <div id="thinking-strip" class="thinking-strip" aria-live="polite" aria-hidden="true">
-            <span id="thinking-bomb" class="px-bomb md mood-thinking" aria-hidden="true">
-              <img src="assets/logo.png" alt="" />
-            </span>
-            <div class="thinking-copy">
-              <div class="thinking-label">
-                <span id="thinking-phrase">lighting the fuse</span><span class="dots" aria-hidden="true"></span>
+          <!-- Primary turn status: one dock, facts first, bomb flavor second -->
+          <div id="turn-dock" class="turn-dock" aria-live="polite" aria-hidden="true">
+            <div class="turn-dock-main">
+              <span id="turn-bomb" class="px-bomb md mood-idle" aria-hidden="true">
+                <img src="assets/logo.png" alt="" />
+              </span>
+              <div class="turn-dock-copy">
+                <div class="turn-dock-title-row">
+                  <span id="turn-phase-label" class="turn-phase-label">Idle</span>
+                  <span id="turn-elapsed" class="turn-elapsed muted"></span>
+                  <span id="turn-flavor" class="turn-flavor muted"></span>
+                </div>
+                <div id="turn-detail" class="turn-detail muted">No active turn</div>
+                <div id="turn-preview" class="turn-preview" style="display:none"></div>
               </div>
-              <div id="thinking-sub" class="thinking-sub">waiting for the first boom of insight</div>
             </div>
-            <div class="fuse-meter" title="fuse"><i></i></div>
+            <ol id="turn-stages" class="turn-stages" aria-label="Turn progress">
+              <li data-stage="send" class="stage">Send</li>
+              <li data-stage="think" class="stage">Think</li>
+              <li data-stage="tools" class="stage">Tools</li>
+              <li data-stage="reply" class="stage">Reply</li>
+              <li data-stage="done" class="stage">Done</li>
+            </ol>
+            <div class="turn-dock-meter" title="activity"><i id="turn-meter-bar"></i></div>
           </div>
           <footer class="composer" id="composer">
             <div class="composer-meta">
               <span id="composer-session" class="muted">no session</span>
-              <span id="composer-mood" class="live-mood" style="display:none"></span>
+              <span id="composer-phase" class="composer-phase" style="display:none"></span>
               <span id="composer-model" class="muted"></span>
             </div>
             <div class="composer-row">
@@ -241,6 +254,16 @@
         </header>
 
         <div class="right-block">
+          <div class="section-label">
+            <span>Now</span>
+            <span id="now-elapsed" class="section-meta muted"></span>
+          </div>
+          <div id="now-panel" class="now-panel">
+            <div class="empty-hint">No live turn</div>
+          </div>
+        </div>
+
+        <div class="right-block">
           <div class="section-label">Agents</div>
           <div id="agent-list" class="agent-list">
             <div class="empty-hint">No active agents</div>
@@ -255,7 +278,7 @@
         </div>
 
         <div class="right-block grow">
-          <div class="section-label">Events</div>
+          <div class="section-label">Timeline</div>
           <div id="event-feed" class="event-feed"></div>
         </div>
 

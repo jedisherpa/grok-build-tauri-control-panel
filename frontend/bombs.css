@@ -273,93 +273,233 @@
   100% { transform: translateY(-8px) scale(1.4); opacity: 0; }
 }
 
-/* ── Thinking strip (Codex/Claude-style wait chrome) ─────────────────────── */
-.thinking-strip {
+/* ── Turn dock — one primary status surface (facts first) ────────────────── */
+.turn-dock {
   display: none;
-  align-items: center;
-  gap: 10px;
-  margin: 4px 0 14px;
-  padding: 10px 12px;
+  flex-direction: column;
+  gap: 8px;
+  flex-shrink: 0;
+  margin: 0 12px 8px;
+  padding: 10px 12px 8px;
   border-radius: 12px;
-  border: 1px solid color-mix(in srgb, var(--bomb-fuse) 28%, var(--border));
-  background:
-    linear-gradient(
-      105deg,
-      color-mix(in srgb, var(--bomb-fuse) 8%, transparent) 0%,
-      transparent 40%,
-      color-mix(in srgb, var(--accent) 5%, transparent) 100%
-    ),
-    var(--bg-soft);
-  box-shadow: inset 0 0 0 1px color-mix(in srgb, #000 35%, transparent);
-  animation: strip-glow 2.4s ease-in-out infinite;
+  border: 1px solid var(--border);
+  background: var(--bg-soft);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, #000 30%, transparent);
 }
-.thinking-strip.visible {
+.turn-dock.visible { display: flex; }
+.turn-dock.phase-think,
+.turn-dock.phase-send {
+  border-color: color-mix(in srgb, var(--bomb-fuse) 35%, var(--border));
+}
+.turn-dock.phase-tools {
+  border-color: color-mix(in srgb, var(--tool) 40%, var(--border));
+}
+.turn-dock.phase-reply {
+  border-color: color-mix(in srgb, var(--agent) 40%, var(--border));
+}
+.turn-dock.phase-wait {
+  border-color: color-mix(in srgb, var(--bomb-wait) 50%, var(--border));
+}
+.turn-dock.phase-error {
+  border-color: color-mix(in srgb, var(--bomb-err) 45%, var(--border));
+}
+.turn-dock.phase-done {
+  border-color: color-mix(in srgb, var(--bomb-ok) 40%, var(--border));
+}
+.turn-dock.stalled {
+  animation: strip-glow 1.6s ease-in-out infinite;
+}
+.turn-dock-main {
   display: flex;
+  align-items: flex-start;
+  gap: 10px;
 }
-.thinking-strip .thinking-copy {
+.turn-dock-copy {
   flex: 1;
   min-width: 0;
   display: flex;
   flex-direction: column;
   gap: 2px;
 }
-.thinking-strip .thinking-label {
+.turn-dock-title-row {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.turn-phase-label {
   font-family: var(--font);
-  font-size: 12px;
+  font-size: 13px;
+  font-weight: 600;
   color: var(--text);
   letter-spacing: 0.01em;
 }
-.thinking-strip .thinking-label .dots::after {
-  content: "";
-  display: inline-block;
-  width: 1.2em;
-  text-align: left;
-  animation: ellipsis-dots 1.2s steps(4, end) infinite;
-}
-.thinking-strip .thinking-sub {
-  font-size: 10.5px;
-  color: var(--muted);
+.turn-elapsed {
   font-family: var(--font);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+.turn-flavor {
+  font-size: 10px;
+  opacity: 0.55;
+  font-family: var(--font);
+  margin-left: auto;
+}
+.turn-detail {
+  font-family: var(--font);
+  font-size: 11px;
+  line-height: 1.35;
+  color: var(--muted);
+}
+.turn-preview {
+  margin-top: 4px;
+  font-family: var(--font);
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--agent);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+  border-left: 2px solid color-mix(in srgb, var(--agent) 50%, transparent);
+  padding-left: 8px;
 }
-.thinking-strip .fuse-meter {
-  width: 56px;
-  height: 6px;
+.turn-dock.phase-think .turn-preview { color: var(--bomb-fuse); border-color: color-mix(in srgb, var(--bomb-fuse) 50%, transparent); }
+
+/* Stage rail: Send → Think → Tools → Reply → Done */
+.turn-stages {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 4px;
+}
+.turn-stages .stage {
+  font-family: var(--font);
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  text-align: center;
+  padding: 4px 2px;
+  border-radius: 6px;
+  color: var(--dim);
+  background: #0a0d12;
+  border: 1px solid transparent;
+}
+.turn-stages .stage.done {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 30%, transparent);
+  background: color-mix(in srgb, var(--ok) 8%, #0a0d12);
+}
+.turn-stages .stage.active {
+  color: var(--bomb-fuse-hot);
+  border-color: color-mix(in srgb, var(--bomb-fuse) 45%, transparent);
+  background: color-mix(in srgb, var(--bomb-fuse) 12%, #0a0d12);
+  animation: stage-pulse 1.4s ease-in-out infinite;
+}
+.turn-stages .stage.error {
+  color: var(--err);
+  border-color: color-mix(in srgb, var(--err) 40%, transparent);
+}
+.turn-dock-meter {
+  height: 3px;
   border-radius: 2px;
   background: #0a0d12;
-  border: 1px solid var(--border);
   overflow: hidden;
-  flex-shrink: 0;
-  image-rendering: pixelated;
 }
-.thinking-strip .fuse-meter > i {
+.turn-dock-meter > i {
   display: block;
   height: 100%;
-  width: 35%;
-  background: linear-gradient(
-    90deg,
-    var(--bomb-fuse) 0%,
-    var(--bomb-fuse-hot) 50%,
-    #fff7ed 100%
-  );
-  animation: fuse-meter-run 1.5s linear infinite;
+  width: 40%;
+  background: linear-gradient(90deg, var(--bomb-fuse), var(--bomb-fuse-hot), #fff7ed);
+  animation: fuse-meter-run 1.4s linear infinite;
   box-shadow: 0 0 8px var(--bomb-fuse);
 }
+.turn-dock.phase-done .turn-dock-meter > i,
+.turn-dock.phase-error .turn-dock-meter > i,
+.turn-dock.phase-idle .turn-dock-meter > i {
+  animation: none;
+  width: 100%;
+}
+.turn-dock.phase-done .turn-dock-meter > i {
+  background: var(--ok);
+  box-shadow: none;
+}
+.turn-dock.phase-error .turn-dock-meter > i {
+  background: var(--err);
+  box-shadow: none;
+}
+
 @keyframes strip-glow {
   0%, 100% { border-color: color-mix(in srgb, var(--bomb-fuse) 22%, var(--border)); }
-  50% { border-color: color-mix(in srgb, var(--bomb-fuse) 45%, var(--border)); }
+  50% { border-color: color-mix(in srgb, var(--bomb-fuse) 50%, var(--border)); }
 }
 @keyframes fuse-meter-run {
   0% { transform: translateX(-100%); }
   100% { transform: translateX(220%); }
 }
-@keyframes ellipsis-dots {
-  0% { content: ""; }
-  25% { content: "."; }
-  50% { content: ".."; }
-  75%, 100% { content: "..."; }
+@keyframes stage-pulse {
+  0%, 100% { opacity: 0.85; }
+  50% { opacity: 1; }
+}
+
+/* Right rail "Now" panel */
+.now-panel {
+  font-size: 11px;
+  padding: 2px 0 4px;
+}
+.now-row {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+}
+.now-copy { min-width: 0; flex: 1; }
+.now-phase {
+  font-family: var(--font);
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--text);
+}
+.now-detail {
+  font-family: var(--font);
+  font-size: 10.5px;
+  line-height: 1.35;
+  margin-top: 2px;
+}
+.now-preview {
+  margin-top: 6px;
+  font-family: var(--font);
+  font-size: 10.5px;
+  color: var(--agent);
+  line-height: 1.35;
+  max-height: 2.7em;
+  overflow: hidden;
+  border-left: 2px solid color-mix(in srgb, var(--agent) 40%, transparent);
+  padding-left: 6px;
+}
+.now-tool {
+  margin-top: 6px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-family: var(--font);
+  font-size: 10.5px;
+  color: var(--tool);
+}
+.section-meta {
+  font-size: 10px;
+  text-transform: none;
+  letter-spacing: 0;
+  font-family: var(--font);
+  font-variant-numeric: tabular-nums;
+}
+.composer-phase {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-family: var(--font);
+  font-size: 11px;
+  color: var(--bomb-fuse);
 }
 
 /* ── Status pill with bomb ───────────────────────────────────────────────── */

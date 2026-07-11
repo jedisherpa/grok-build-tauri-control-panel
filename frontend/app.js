@@ -5,6 +5,8 @@ const $ = (id) => document.getElementById(id);
 
 const LOGO = "assets/logo.png";
 
+const STALL_MS = 25000; // no tokens/tools for this long → "waiting on agent"
+
 const state = {
   selectedSession: null,
   sessions: [],
@@ -14,69 +16,62 @@ const state = {
   loggingIn: false,
   devServer: null,
   transcriptBySession: new Map(), // id -> [{role, body, at}]
-  // bomb UI
-  turnPhase: "idle", // idle | thinking | running | tooling | stream | wait | boom | error
-  lastTool: null,
-  thinkingSince: null,
+  /** Factual turn state — drives the dock (not fluff). */
+  turn: emptyTurn(),
   phraseTimer: null,
   phraseIndex: 0,
+  lastEventKey: "", // de-dupe noisy timeline
 };
 
-// ── Pixel-bomb language ─────────────────────────────────────────────────
-const BOMB_PHRASES = {
-  thinking: [
-    "lighting the fuse",
-    "packing powder",
-    "defusing the problem",
-    "wiring the charge",
-    "counting down",
-    "thinking in pixels",
-    "polishing the casing",
-    "arming the plan",
-    "waiting for the boom of insight",
-    "snipping red wires only",
-    "shaking the pixel bomb",
-    "loading agent payload",
-  ],
-  tooling: [
-    "planting a charge",
-    "cutting a wire",
-    "detonating a tool",
-    "rigging the workbench",
-    "dropping a payload",
-    "running the blast plan",
-  ],
-  running: [
-    "fuse crackling",
-    "agent on the wire",
-    "charge is live",
-    "still cooking",
-    "stream is hot",
-  ],
-  stream: [
-    "words falling like sparks",
-    "streaming the boom",
-    "agent is talking",
-  ],
-  wait: [
-    "holding the pin",
-    "approval fuse lit",
-    "your move, bomb squad",
-  ],
-  boom: ["boom — turn complete", "charge spent", "clean detonation"],
-  error: ["dud fuse", "misfire", "smoke in the bay"],
-  idle: ["standby", "safe and sound"],
+function emptyTurn() {
+  return {
+    phase: "idle", // idle | send | think | tools | reply | wait | done | error
+    startedAt: null,
+    lastSignalAt: null,
+    promptChars: 0,
+    streamChars: 0,
+    thoughtChars: 0,
+    toolCount: 0,
+    lastTool: null,
+    lastToolStatus: null,
+    preview: "", // latest agent text snippet
+    thoughtPreview: "",
+    note: "",
+  };
+}
+
+// Flavor only — never the primary status line.
+const BOMB_FLAVOR = {
+  send: ["fuse lit", "payload armed"],
+  think: ["defusing the problem", "packing powder", "thinking in pixels"],
+  tools: ["planting a charge", "cutting a wire", "rigging tools"],
+  reply: ["words like sparks", "streaming the boom"],
+  wait: ["holding the pin", "your move"],
+  done: ["clean detonation", "charge spent"],
+  error: ["dud fuse", "misfire"],
+  idle: ["standby"],
 };
 
-const BOMB_SUB = {
-  thinking: "agent is planning · stream stays open",
-  tooling: "tool call in flight",
-  running: "session running",
-  stream: "receiving agent tokens",
-  wait: "waiting for your approval",
-  boom: "ready for the next charge",
-  error: "check the event feed",
-  idle: "no live fuse",
+const PHASE_LABEL = {
+  idle: "Idle",
+  send: "Sent",
+  think: "Thinking",
+  tools: "Using tools",
+  reply: "Writing reply",
+  wait: "Needs you",
+  done: "Done",
+  error: "Failed",
+};
+
+const PHASE_MOOD = {
+  idle: "idle",
+  send: "thinking",
+  think: "thinking",
+  tools: "tooling",
+  reply: "stream",
+  wait: "wait",
+  done: "boom",
+  error: "error",
 };
 
 function bombHtml(mood = "idle", size = "sm", extraClass = "") {
@@ -123,43 +118,301 @@ function anySessionBusy() {
   });
 }
 
+function turnActive() {
+  return ["send", "think", "tools", "reply", "wait"].includes(state.turn.phase);
+}
+
 function selectedBusy() {
+  if (turnActive()) return true;
   if (!state.selectedSession) return false;
   const s = state.sessions.find((x) => x.id === state.selectedSession);
-  if (!s) return state.turnPhase !== "idle" && state.turnPhase !== "boom";
+  if (!s) return false;
   const st = String(s.status || "").toLowerCase();
+  return st.includes("run") || st.includes("wait");
+}
+
+function formatElapsed(ms) {
+  if (ms == null || ms < 0) return "";
+  const sec = Math.floor(ms / 1000);
+  if (sec < 60) return `${sec}s`;
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  if (m < 60) return `${m}m ${s}s`;
+  const h = Math.floor(m / 60);
+  return `${h}h ${m % 60}m`;
+}
+
+function formatCount(n) {
+  if (!n) return "0";
+  if (n < 1000) return String(n);
+  return `${(n / 1000).toFixed(n < 10000 ? 1 : 0)}k`;
+}
+
+function clipPreview(text, n = 96) {
+  const t = String(text || "").replace(/\s+/g, " ").trim();
+  if (!t) return "";
+  return t.length <= n ? t : `…${t.slice(-n)}`;
+}
+
+function isNoiseAgentText(text) {
+  const t = String(text || "").trim().toLowerCase();
   return (
-    st.includes("run") ||
-    st.includes("wait") ||
-    ["thinking", "running", "tooling", "stream", "wait"].includes(state.turnPhase)
+    t.startsWith("prompt sent") ||
+    t === "turn complete" ||
+    t.startsWith("still generating after") ||
+    t.startsWith("[local/mock]")
   );
 }
 
-function setTurnPhase(phase, detail = "") {
-  state.turnPhase = phase;
-  if (phase === "thinking" || phase === "running" || phase === "tooling" || phase === "stream") {
-    if (!state.thinkingSince) state.thinkingSince = Date.now();
+/** Start or advance the turn with a concrete signal. */
+function noteTurn(phase, patch = {}) {
+  const t = state.turn;
+  const now = Date.now();
+  if (!t.startedAt && phase !== "idle" && phase !== "done") {
+    t.startedAt = now;
   }
-  if (phase === "idle" || phase === "boom" || phase === "error") {
-    state.thinkingSince = null;
+  // Don't go backwards: reply > tools > think > send (except wait/error/done)
+  const rank = { idle: 0, send: 1, think: 2, tools: 3, reply: 4, wait: 5, done: 6, error: 6 };
+  const cur = rank[t.phase] ?? 0;
+  const next = rank[phase] ?? 0;
+  if (phase === "wait" || phase === "error" || phase === "done" || phase === "idle") {
+    t.phase = phase;
+  } else if (next >= cur || t.phase === "wait") {
+    t.phase = phase;
   }
-  if (detail) state.lastTool = detail;
+  t.lastSignalAt = now;
+  Object.assign(t, patch);
+  if (phase === "idle") {
+    state.turn = emptyTurn();
+  }
   updateBombChrome();
 }
 
-function pickPhrase(phase) {
-  const list = BOMB_PHRASES[phase] || BOMB_PHRASES.idle;
+function setTurnPhase(phase, detail = "") {
+  // Back-compat wrapper used by older call sites
+  const map = {
+    thinking: "think",
+    running: "think",
+    tooling: "tools",
+    stream: "reply",
+    wait: "wait",
+    boom: "done",
+    error: "error",
+    idle: "idle",
+  };
+  const p = map[phase] || phase;
+  noteTurn(p, detail ? { lastTool: detail, note: detail } : {});
+}
+
+function flashBoomThenIdle(ms = 1200) {
+  noteTurn("done", { note: "Turn finished" });
+  setTimeout(() => {
+    if (state.turn.phase === "done") noteTurn("idle");
+  }, ms);
+}
+
+function pickFlavor(phase) {
+  const list = BOMB_FLAVOR[phase] || BOMB_FLAVOR.idle;
   return list[state.phraseIndex % list.length];
+}
+
+function stageState(stage, phase) {
+  const order = ["send", "think", "tools", "reply", "done"];
+  const pi = order.indexOf(phase === "wait" ? "tools" : phase === "error" ? "done" : phase);
+  const si = order.indexOf(stage);
+  if (si < 0) return "";
+  if (phase === "error" && stage === "done") return "error";
+  if (si < pi) return "done";
+  if (si === pi) return phase === "done" ? "done" : "active";
+  return "";
+}
+
+function buildTurnDetail() {
+  const t = state.turn;
+  const bits = [];
+  if (t.promptChars) bits.push(`prompt ${formatCount(t.promptChars)} chars`);
+  if (t.phase === "think" && !t.streamChars && !t.toolCount) {
+    bits.push("waiting for first token or tool");
+  }
+  if (t.thoughtChars) bits.push(`${formatCount(t.thoughtChars)} thought chars`);
+  if (t.streamChars) bits.push(`${formatCount(t.streamChars)} reply chars`);
+  if (t.toolCount) {
+    bits.push(
+      `${t.toolCount} tool${t.toolCount === 1 ? "" : "s"}${
+        t.lastTool ? ` · last ${t.lastTool}` : ""
+      }${t.lastToolStatus ? ` (${t.lastToolStatus})` : ""}`
+    );
+  }
+  if (t.phase === "wait") bits.push(t.note || "approval required");
+  if (t.phase === "error") bits.push(t.note || "see timeline");
+  if (t.phase === "done") bits.push(t.note || "ready for next message");
+
+  // Stall hint
+  if (turnActive() && t.lastSignalAt) {
+    const quiet = Date.now() - t.lastSignalAt;
+    if (quiet >= STALL_MS) {
+      bits.push(`no new signal for ${formatElapsed(quiet)}`);
+    }
+  }
+  return bits.join(" · ") || "Working…";
+}
+
+function updateBombChrome() {
+  const t = state.turn;
+  const busy = turnActive() || selectedBusy();
+  const anyBusy = anySessionBusy() || busy;
+  const phase = turnActive()
+    ? t.phase
+    : t.phase === "done" || t.phase === "error"
+      ? t.phase
+      : "idle";
+  const mood = PHASE_MOOD[phase] || "idle";
+  const stalled =
+    turnActive() && t.lastSignalAt && Date.now() - t.lastSignalAt >= STALL_MS;
+  const elapsed = t.startedAt ? formatElapsed(Date.now() - t.startedAt) : "";
+
+  // Brand: compact factual subline
+  const brand = $("brand-header");
+  if (brand) brand.classList.toggle("live", anyBusy);
+  const brandSub = $("brand-sub");
+  if (brandSub) {
+    if (turnActive()) {
+      brandSub.textContent = `${PHASE_LABEL[phase] || phase}${elapsed ? ` · ${elapsed}` : ""}`;
+    } else {
+      brandSub.textContent = "Grok Build panel";
+    }
+  }
+
+  // Primary turn dock (center, above composer)
+  const dock = $("turn-dock");
+  if (dock) {
+    const show = turnActive() || phase === "done" || phase === "error";
+    dock.classList.toggle("visible", show);
+    dock.classList.toggle("stalled", !!stalled);
+    dock.classList.toggle(`phase-${phase}`, true);
+    // clear other phase-* classes
+    ["idle", "send", "think", "tools", "reply", "wait", "done", "error"].forEach((p) => {
+      if (p !== phase) dock.classList.remove(`phase-${p}`);
+    });
+    dock.setAttribute("aria-hidden", show ? "false" : "true");
+
+    setBombMood($("turn-bomb"), stalled && phase !== "wait" ? "running" : mood);
+
+    const label = $("turn-phase-label");
+    if (label) {
+      label.textContent = stalled && phase !== "wait" ? "Still working" : PHASE_LABEL[phase] || phase;
+    }
+    const elEl = $("turn-elapsed");
+    if (elEl) elEl.textContent = elapsed || "";
+
+    const flavor = $("turn-flavor");
+    if (flavor) {
+      flavor.textContent = show && phase !== "idle" ? pickFlavor(phase) : "";
+    }
+
+    const detail = $("turn-detail");
+    if (detail) detail.textContent = show ? buildTurnDetail() : "No active turn";
+
+    const preview = $("turn-preview");
+    if (preview) {
+      const snip =
+        phase === "think" && t.thoughtPreview
+          ? t.thoughtPreview
+          : t.preview || t.thoughtPreview;
+      if (show && snip) {
+        preview.style.display = "block";
+        preview.textContent = snip;
+      } else {
+        preview.style.display = "none";
+        preview.textContent = "";
+      }
+    }
+
+    // Stages
+    document.querySelectorAll("#turn-stages .stage").forEach((el) => {
+      const st = el.getAttribute("data-stage");
+      el.classList.remove("active", "done", "error");
+      const cls = stageState(st, phase === "error" ? "error" : phase);
+      if (cls) el.classList.add(cls);
+    });
+  }
+
+  // Composer: one compact phase chip (not a second monologue)
+  const composer = $("composer");
+  if (composer) composer.classList.toggle("busy", turnActive());
+  const phaseChip = $("composer-phase");
+  if (phaseChip) {
+    if (turnActive()) {
+      phaseChip.style.display = "inline-flex";
+      phaseChip.innerHTML = `${bombHtml(mood, "xs")}<span>${escapeHtml(
+        PHASE_LABEL[phase] || phase
+      )}${elapsed ? ` · ${elapsed}` : ""}</span>`;
+    } else {
+      phaseChip.style.display = "none";
+      phaseChip.innerHTML = "";
+    }
+  }
+
+  // Right "Now" panel — mirror of dock facts
+  const nowPanel = $("now-panel");
+  const nowElapsed = $("now-elapsed");
+  if (nowElapsed) nowElapsed.textContent = turnActive() ? elapsed : "";
+  if (nowPanel) {
+    if (!turnActive() && phase !== "done" && phase !== "error") {
+      nowPanel.innerHTML = `<div class="empty-hint">No live turn</div>`;
+    } else {
+      nowPanel.innerHTML = `
+        <div class="now-row">
+          ${bombHtml(mood, "sm")}
+          <div class="now-copy">
+            <div class="now-phase">${escapeHtml(PHASE_LABEL[phase] || phase)}</div>
+            <div class="now-detail muted">${escapeHtml(buildTurnDetail())}</div>
+          </div>
+        </div>
+        ${
+          t.preview || t.thoughtPreview
+            ? `<div class="now-preview">${escapeHtml(t.preview || t.thoughtPreview)}</div>`
+            : ""
+        }
+        ${
+          t.lastTool
+            ? `<div class="now-tool">${bombHtml("tooling", "xs")}<span>${escapeHtml(
+                t.lastTool
+              )}${t.lastToolStatus ? ` · ${escapeHtml(t.lastToolStatus)}` : ""}</span></div>`
+            : ""
+        }`;
+    }
+  }
+
+  // Activity header bomb
+  setBombMood(
+    $("activity-bomb"),
+    anyBusy ? (phase === "tools" ? "tooling" : phase === "reply" ? "stream" : "running") : "idle"
+  );
+
+  // Status pill: host health only when idle; turn summary when busy
+  if (turnActive() && state.ready) {
+    const pill = $("status-pill");
+    if (pill && !pill.classList.contains("status-error")) {
+      setBombMood($("status-bomb"), mood);
+      const st = $("status-text");
+      if (st) {
+        st.textContent = `${PHASE_LABEL[phase] || phase}${elapsed ? ` · ${elapsed}` : ""}`;
+      }
+    }
+  }
 }
 
 function startPhraseCycle() {
   if (state.phraseTimer) return;
   state.phraseTimer = setInterval(() => {
-    if (!selectedBusy() && state.turnPhase === "idle") return;
+    if (!turnActive()) return;
     state.phraseIndex += 1;
-    const phraseEl = $("thinking-phrase");
-    if (phraseEl) phraseEl.textContent = pickPhrase(state.turnPhase);
-  }, 2200);
+    const flavor = $("turn-flavor");
+    if (flavor) flavor.textContent = pickFlavor(state.turn.phase);
+    // Refresh stall clock / elapsed
+    updateBombChrome();
+  }, 2000);
 }
 
 function stopPhraseCycle() {
@@ -167,84 +420,6 @@ function stopPhraseCycle() {
     clearInterval(state.phraseTimer);
     state.phraseTimer = null;
   }
-}
-
-function elapsedLabel() {
-  if (!state.thinkingSince) return "";
-  const sec = Math.floor((Date.now() - state.thinkingSince) / 1000);
-  if (sec < 60) return `${sec}s`;
-  const m = Math.floor(sec / 60);
-  const s = sec % 60;
-  return `${m}m ${s}s`;
-}
-
-function updateBombChrome() {
-  const busy = selectedBusy();
-  const anyBusy = anySessionBusy() || busy;
-  const phase = busy
-    ? state.turnPhase === "idle"
-      ? "running"
-      : state.turnPhase
-    : state.turnPhase === "boom" || state.turnPhase === "error"
-      ? state.turnPhase
-      : "idle";
-
-  // Brand fuse
-  const brand = $("brand-header");
-  if (brand) brand.classList.toggle("live", anyBusy);
-  const brandSub = $("brand-sub");
-  if (brandSub) {
-    brandSub.textContent = anyBusy ? "fuse is lit…" : "Grok Build panel";
-  }
-
-  // Thinking strip
-  const strip = $("thinking-strip");
-  if (strip) {
-    const show =
-      busy &&
-      ["thinking", "running", "tooling", "stream", "wait"].includes(phase);
-    strip.classList.toggle("visible", show);
-    strip.setAttribute("aria-hidden", show ? "false" : "true");
-    if (show) {
-      setBombMood($("thinking-bomb"), phase === "wait" ? "wait" : phase === "tooling" ? "tooling" : "thinking");
-      const phraseEl = $("thinking-phrase");
-      if (phraseEl) phraseEl.textContent = pickPhrase(phase);
-      const sub = $("thinking-sub");
-      if (sub) {
-        const el = elapsedLabel();
-        const base = BOMB_SUB[phase] || BOMB_SUB.thinking;
-        const toolBit = state.lastTool && phase === "tooling" ? ` · ${state.lastTool}` : "";
-        sub.textContent = el ? `${base}${toolBit} · ${el}` : `${base}${toolBit}`;
-      }
-      startPhraseCycle();
-    } else if (!anyBusy) {
-      stopPhraseCycle();
-    }
-  }
-
-  // Composer rail
-  const composer = $("composer");
-  if (composer) composer.classList.toggle("busy", busy);
-  const moodEl = $("composer-mood");
-  if (moodEl) {
-    if (busy) {
-      moodEl.style.display = "inline-flex";
-      moodEl.innerHTML = `${bombHtml(phase === "tooling" ? "tooling" : "thinking", "xs")} ${escapeHtml(pickPhrase(phase))}`;
-    } else {
-      moodEl.style.display = "none";
-      moodEl.innerHTML = "";
-    }
-  }
-
-  // Activity header bomb
-  setBombMood($("activity-bomb"), anyBusy ? (phase === "tooling" ? "tooling" : "running") : "idle");
-}
-
-function flashBoomThenIdle(ms = 900) {
-  setTurnPhase("boom");
-  setTimeout(() => {
-    if (state.turnPhase === "boom") setTurnPhase("idle");
-  }, ms);
 }
 
 function hasTauri() {
@@ -281,15 +456,20 @@ function setStatus(kind, text) {
   setBombMood($("status-bomb"), mood);
 }
 
-function pushEvent(text, cls = "", moodHint = null) {
+function pushEvent(text, cls = "", moodHint = null, opts = {}) {
   const feed = $("event-feed");
+  if (!feed) return;
+  const key = `${cls}|${text}`;
+  // Collapse spam (status flapping, token spam)
+  if (!opts.force && key === state.lastEventKey && cls !== "err") return;
+  state.lastEventKey = key;
   const line = document.createElement("div");
   line.className = `event-line ${cls}`;
-  const ts = new Date().toLocaleTimeString();
+  const ts = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
   const mood = moodHint || moodFromEventCls(cls);
   line.innerHTML = `${bombHtml(mood, "xs")}<span class="event-body"><span class="ts">${ts}</span>${escapeHtml(text)}</span>`;
   feed.prepend(line);
-  while (feed.children.length > 200) feed.lastChild.remove();
+  while (feed.children.length > 80) feed.lastChild.remove();
 }
 
 function escapeHtml(s) {
@@ -605,24 +785,48 @@ function handleControlEvent(ev) {
   if (type === "agent_message" || type === "agentMessage") {
     const raw = ev.text != null ? String(ev.text) : "";
     if (!raw) return;
-    // Thoughts are tagged with a leading 💭 from the ACP mapper.
+    // Drop legacy status lines that were mis-tagged as agent speech.
+    if (isNoiseAgentText(raw)) {
+      if (isSelected && turnActive()) {
+        noteTurn(state.turn.phase === "idle" ? "think" : state.turn.phase, {
+          note: raw.slice(0, 80),
+        });
+      }
+      return;
+    }
     const isThought = raw.startsWith("💭");
     const text = isThought ? raw.replace(/^💭\s*/, "") : raw;
     const role = isThought ? "thought" : "agent";
     appendTranscript(sid, role, text, nowIso(), { stream: true });
-    // Don't spam the event feed on every token — only first chunk / periodic.
-    const list = getTranscript(sid);
-    const last = list[list.length - 1];
-    if (last && (last.body || "").length <= text.length + 2) {
-      pushEvent(
-        `${isThought ? "thought" : "agent"} ${shortId(sid)}: ${text.slice(0, 80)}`,
-        "",
-        isThought ? "thinking" : "stream"
-      );
+    if (isSelected) {
+      const list = getTranscript(sid);
+      const body = list[list.length - 1]?.body || text;
+      if (isThought) {
+        noteTurn("think", {
+          thoughtChars: (state.turn.thoughtChars || 0) + text.length,
+          thoughtPreview: clipPreview(body),
+        });
+        // Timeline only on first thought chunk
+        if ((state.turn.thoughtChars || 0) <= text.length + 1) {
+          pushEvent(`thinking · ${shortId(sid)}`, "", "thinking");
+        }
+      } else {
+        const prev = state.turn.streamChars || 0;
+        noteTurn("reply", {
+          streamChars: prev + text.length,
+          preview: clipPreview(body),
+        });
+        // Timeline: first chunk + every ~400 chars
+        if (prev === 0 || Math.floor((prev + text.length) / 400) > Math.floor(prev / 400)) {
+          pushEvent(
+            `reply · ${formatCount(prev + text.length)} chars`,
+            "",
+            "stream"
+          );
+        }
+      }
     }
-    if (isSelected) setTurnPhase(isThought ? "thinking" : "stream");
   } else if (type === "tool_call" || type === "toolCall") {
-    // Tool call interrupts the agent stream bubble.
     endAgentStream(sid);
     const te = ev.event || ev;
     const tool = te.tool || te.name || "tool";
@@ -643,48 +847,76 @@ function handleControlEvent(ev) {
       `${tool} [${status}]\n${String(summary).slice(0, 400)}`
     );
     const st = String(status).toLowerCase();
-    const done = st.includes("done") || st.includes("complete") || st.includes("success");
-    pushEvent(`tool ${tool} · ${status}`, done ? "ok" : "", done ? "boom" : "tooling");
-    if (isSelected) setTurnPhase(done ? "running" : "tooling", tool);
+    const done =
+      st.includes("done") ||
+      st.includes("complete") ||
+      st.includes("success") ||
+      st.includes("completed");
+    pushEvent(`tool · ${tool} · ${status}`, done ? "ok" : "", done ? "boom" : "tooling", {
+      force: true,
+    });
+    if (isSelected) {
+      noteTurn("tools", {
+        toolCount: (state.turn.toolCount || 0) + (done ? 0 : 1),
+        lastTool: tool,
+        lastToolStatus: status,
+        note: String(summary).slice(0, 60),
+      });
+      // If tool finished and we already had reply chars, stay on tools until more reply
+      if (done && state.turn.streamChars) {
+        noteTurn("reply", { lastTool: tool, lastToolStatus: status });
+      }
+    }
   } else if (type === "plan_update" || type === "planUpdate") {
     const pe = ev.event || ev;
     const steps = (pe.steps || [])
       .map((s) => `  - [${s.status || "pending"}] ${s.description || s.id}`)
       .join("\n");
     appendTranscript(sid, "plan", `${pe.title || "plan"} (${pe.status || ""})\n${steps}`);
-    pushEvent(`plan update ${shortId(sid)}`, "", "thinking");
-    if (isSelected) setTurnPhase("thinking");
+    pushEvent(`plan · ${(pe.steps || []).length} steps`, "", "thinking");
+    if (isSelected) noteTurn("think", { note: pe.title || "plan update" });
   } else if (type === "session_created" || type === "sessionCreated") {
-    pushEvent(`session created ${shortId(sid)}`, "ok", "boom");
+    pushEvent(`session · ${shortId(sid)} ready`, "ok", "boom", { force: true });
     refreshSessions();
   } else if (type === "session_status_changed" || type === "sessionStatusChanged") {
     const st = String(ev.status || "").toLowerCase();
-    pushEvent(`status ${shortId(sid)} → ${ev.status}`, "", moodFromStatus(st));
+    // Quiet: only log meaningful transitions
+    if (st.includes("idle") || st.includes("fail") || st.includes("cancel") || st.includes("wait")) {
+      pushEvent(`session · ${shortId(sid)} → ${ev.status}`, "", moodFromStatus(st));
+    }
     if (isSelected) {
-      if (st.includes("run")) setTurnPhase(state.turnPhase === "tooling" ? "tooling" : "running");
-      else if (st.includes("wait") || st.includes("approv")) setTurnPhase("wait");
-      else if (st.includes("fail") || st.includes("error")) {
+      if (st.includes("wait") || st.includes("approv")) {
+        noteTurn("wait", { note: "Waiting for approval" });
+      } else if (st.includes("fail") || st.includes("error")) {
         endAgentStream(sid);
-        setTurnPhase("error");
-      } else if (st.includes("idle") || st.includes("complete") || st.includes("cancel")) {
+        noteTurn("error", { note: String(ev.status) });
+      } else if (st.includes("cancel")) {
         endAgentStream(sid);
-        if (st.includes("cancel")) setTurnPhase("error");
-        else flashBoomThenIdle();
+        noteTurn("error", { note: "Cancelled" });
+      } else if (st.includes("idle") || st.includes("complete")) {
+        endAgentStream(sid);
+        if (turnActive() || state.turn.streamChars || state.turn.toolCount) {
+          flashBoomThenIdle();
+        } else {
+          noteTurn("idle");
+        }
+      } else if (st.includes("run") && !turnActive()) {
+        noteTurn("think", { note: "Session running" });
       }
     }
     refreshSessions();
   } else if (type === "session_cancelled" || type === "sessionCancelled") {
     endAgentStream(sid);
     appendTranscript(sid, "system", "session cancelled");
-    pushEvent(`cancelled ${shortId(sid)}`, "", "error");
-    if (isSelected) setTurnPhase("error");
+    pushEvent(`cancelled · ${shortId(sid)}`, "", "error", { force: true });
+    if (isSelected) noteTurn("error", { note: "Cancelled" });
     refreshSessions();
   } else if (type === "error") {
     endAgentStream(sid || state.selectedSession);
     appendTranscript(sid || state.selectedSession, "error", ev.message || "error");
-    pushEvent(ev.message || "error", "err", "error");
+    pushEvent(ev.message || "error", "err", "error", { force: true });
     setStatus(state.ready ? "ready" : "error", ev.message || "error");
-    if (isSelected) setTurnPhase("error");
+    if (isSelected) noteTurn("error", { note: ev.message || "error" });
   } else if (type === "approval_required" || type === "approvalRequired") {
     endAgentStream(sid);
     appendTranscript(
@@ -692,27 +924,33 @@ function handleControlEvent(ev) {
       "system",
       `approval required: ${ev.tool || "?"} — ${ev.summary || ev.request_id || ""}`
     );
-    pushEvent(`approval · ${ev.tool || "?"}`, "err", "wait");
-    if (isSelected) setTurnPhase("wait", ev.tool || "approval");
+    pushEvent(`approval · ${ev.tool || "?"}`, "err", "wait", { force: true });
+    if (isSelected) {
+      noteTurn("wait", {
+        lastTool: ev.tool || "approval",
+        note: ev.summary || "approval required",
+      });
+    }
   } else if (type === "raw") {
-    // Fallback: surface any text-ish raw ACP payload so speech is never silent.
     const payload = ev.payload || ev;
     const maybe =
       payload?.update?.content?.text ||
       payload?.content?.text ||
       payload?.text ||
       (typeof payload?.message === "string" ? payload.message : null);
-    if (maybe && typeof maybe === "string" && maybe.trim()) {
+    if (maybe && typeof maybe === "string" && maybe.trim() && !isNoiseAgentText(maybe)) {
       appendTranscript(sid || state.selectedSession, "agent", maybe, nowIso(), {
         stream: true,
       });
-      if (isSelected) setTurnPhase("stream");
-    } else {
-      pushEvent(`raw ${shortId(sid || "")}`, "", "idle");
+      if (isSelected) {
+        noteTurn("reply", {
+          streamChars: (state.turn.streamChars || 0) + maybe.length,
+          preview: clipPreview(maybe),
+        });
+      }
     }
-  } else {
-    pushEvent(`${type} ${shortId(sid || "")}`, "", "idle");
   }
+  // swallow other low-value event types from timeline noise
 }
 
 // ── API actions ─────────────────────────────────────────────────────────
@@ -1010,18 +1248,32 @@ async function sendPrompt() {
     if (!prompt.trim()) throw new Error("Empty prompt");
     appendTranscript(state.selectedSession, "user", prompt);
     $("prompt").value = "";
-    state.phraseIndex = Math.floor(Math.random() * BOMB_PHRASES.thinking.length);
-    state.thinkingSince = Date.now();
-    setTurnPhase("thinking");
-    setStatus("thinking", "lighting the fuse…");
-    pushEvent(`prompt → ${shortId(state.selectedSession)}`, "ok", "thinking");
+    endAgentStream(state.selectedSession);
+    state.phraseIndex = 0;
+    state.turn = emptyTurn();
+    noteTurn("send", {
+      promptChars: prompt.length,
+      note: "On the wire",
+      startedAt: Date.now(),
+      lastSignalAt: Date.now(),
+    });
+    // Immediately advance to think — waiting for first real signal
+    noteTurn("think", { promptChars: prompt.length, note: "Waiting for first token or tool" });
+    startPhraseCycle();
+    pushEvent(
+      `you · ${formatCount(prompt.length)} chars → ${shortId(state.selectedSession)}`,
+      "ok",
+      "thinking",
+      { force: true }
+    );
     await invoke("send_prompt", { id: state.selectedSession, prompt });
-    // Stay in thinking/running until status events arrive
-    if (state.turnPhase === "thinking") setTurnPhase("running");
-    setStatus(state.ready ? "ready" : "error", state.ready ? "fuse lit · agent working" : "error");
+    // Keep think until agent_message / tool_call arrives
+    if (state.turn.phase === "send") {
+      noteTurn("think", { note: "Prompt accepted · waiting on agent" });
+    }
     updateBombChrome();
   } catch (e) {
-    setTurnPhase("error");
+    noteTurn("error", { note: e?.message || String(e) });
     toastError(e);
   }
 }
@@ -1318,11 +1570,12 @@ $("btn-send").onclick = sendPrompt;
 $("btn-cancel").onclick = async () => {
   try {
     if (!state.selectedSession) throw new Error("No session selected");
-    setTurnPhase("wait");
-    pushEvent("pulling the pin…", "", "wait");
+    noteTurn("wait", { note: "Cancel requested…" });
+    pushEvent("cancel · requested", "", "wait", { force: true });
     await invoke("cancel_session", { id: state.selectedSession });
     appendTranscript(state.selectedSession, "system", "cancel requested");
-    setTurnPhase("error");
+    endAgentStream(state.selectedSession);
+    noteTurn("error", { note: "Cancelled" });
     await refreshSessions();
   } catch (e) {
     toastError(e);
@@ -1525,9 +1778,11 @@ $("btn-shutdown").onclick = async () => {
   }
 };
 
-// Keep fuse meter / elapsed clock honest while waiting
+// Elapsed + stall clock
 setInterval(() => {
-  if (selectedBusy() || state.thinkingSince) updateBombChrome();
+  if (turnActive() || state.turn.phase === "done") updateBombChrome();
+  if (turnActive()) startPhraseCycle();
+  else stopPhraseCycle();
 }, 1000);
 
 async function boot() {
@@ -1541,10 +1796,10 @@ async function boot() {
     await refreshStatus();
     await refreshSessions();
     await refreshDevStatus();
-    setTurnPhase("idle");
-    pushEvent("Bomb Code ready — pixel bombs armed", "ok", "boom");
+    noteTurn("idle");
+    pushEvent("Bomb Code ready", "ok", "boom", { force: true });
     if (state.auth && !state.auth.loggedIn) {
-      pushEvent("Not signed in — click Log in with Grok", "", "wait");
+      pushEvent("Not signed in — Log in with Grok", "", "wait", { force: true });
     }
     updateBombChrome();
   } catch (e) {

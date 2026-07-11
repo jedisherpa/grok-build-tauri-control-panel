@@ -312,9 +312,8 @@ body {
 #view-chat {
   position: relative;
 }
-#thinking-strip {
+#turn-dock {
   flex-shrink: 0;
-  margin: 0 12px 8px;
 }
 .welcome { color: var(--muted); max-width: 42rem; }
 .welcome .banner {
