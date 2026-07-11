@@ -325,18 +325,90 @@ function getTranscript(sessionId) {
   return state.transcriptBySession.get(sessionId);
 }
 
-function appendTranscript(sessionId, role, body, at = nowIso()) {
+function appendTranscript(sessionId, role, body, at = nowIso(), opts = {}) {
   if (!sessionId) return;
   const list = getTranscript(sessionId);
-  list.push({ role, body, at });
+  const text = body == null ? "" : String(body);
+  const stream = !!opts.stream;
+
+  // Coalesce streaming agent chunks into one bubble (like a live terminal).
+  if (stream && (role === "agent" || role === "thought") && list.length) {
+    const last = list[list.length - 1];
+    if (last.role === role && last.streaming) {
+      last.body = (last.body || "") + text;
+      last.at = at;
+      if (sessionId === state.selectedSession) {
+        patchLastTranscriptBody(last);
+      }
+      return;
+    }
+  }
+
+  // Non-stream agent after stream → close previous stream bubble.
+  if (!stream && list.length) {
+    const last = list[list.length - 1];
+    if (last.streaming) last.streaming = false;
+  }
+
+  list.push({
+    role,
+    body: text,
+    at,
+    streaming: stream && (role === "agent" || role === "thought"),
+  });
   if (sessionId === state.selectedSession) {
     renderTranscript();
+  }
+}
+
+/** Fast path: update only the last agent bubble while streaming. */
+function patchLastTranscriptBody(entry) {
+  const root = $("transcript");
+  if (!root) {
+    renderTranscript();
+    return;
+  }
+  const blocks = root.querySelectorAll(".t-block");
+  const last = blocks[blocks.length - 1];
+  if (
+    !last ||
+    (!last.classList.contains("agent") && !last.classList.contains("thought"))
+  ) {
+    renderTranscript();
+    return;
+  }
+  const body = last.querySelector(".t-body");
+  const time = last.querySelector(".t-time");
+  if (!body) {
+    renderTranscript();
+    return;
+  }
+  body.textContent = entry.body || "";
+  if (time) time.textContent = entry.at || "";
+  last.classList.toggle("streaming", !!entry.streaming);
+  root.scrollTop = root.scrollHeight;
+}
+
+function endAgentStream(sessionId) {
+  if (!sessionId) return;
+  const list = getTranscript(sessionId);
+  if (!list.length) return;
+  const last = list[list.length - 1];
+  if (last.streaming) {
+    last.streaming = false;
+    if (sessionId === state.selectedSession) {
+      const root = $("transcript");
+      const blocks = root?.querySelectorAll(".t-block");
+      const el = blocks?.[blocks.length - 1];
+      el?.classList.remove("streaming");
+    }
   }
 }
 
 function roleBombMood(role) {
   if (role === "user") return "idle";
   if (role === "agent") return "stream";
+  if (role === "thought") return "thinking";
   if (role === "tool") return "tooling";
   if (role === "plan") return "thinking";
   if (role === "error") return "error";
@@ -390,15 +462,18 @@ function renderTranscript() {
           ? "you"
           : role === "agent"
             ? "grok"
-            : role === "tool"
-              ? "tool"
-              : role === "plan"
-                ? "plan"
-                : role === "error"
-                  ? "error"
-                  : "system";
-      return `<div class="t-block ${escapeHtml(role)}">
-  <div class="t-role">${bombHtml(roleBombMood(role), "xs")}<span>${label}</span></div>
+            : role === "thought"
+              ? "thinking"
+              : role === "tool"
+                ? "tool"
+                : role === "plan"
+                  ? "plan"
+                  : role === "error"
+                    ? "error"
+                    : "system";
+      const streamCls = e.streaming ? " streaming" : "";
+      return `<div class="t-block ${escapeHtml(role)}${streamCls}">
+  <div class="t-role">${bombHtml(roleBombMood(role), "xs")}<span>${label}</span>${e.streaming ? '<span class="stream-caret" aria-hidden="true"></span>' : ""}</div>
   <div class="t-body">${escapeHtml(e.body)}</div>
   <div class="t-time">${escapeHtml(e.at || "")}</div>
 </div>`;
@@ -528,10 +603,27 @@ function handleControlEvent(ev) {
   const isSelected = !sid || sid === state.selectedSession;
 
   if (type === "agent_message" || type === "agentMessage") {
-    appendTranscript(sid, "agent", ev.text || JSON.stringify(ev));
-    pushEvent(`agent ${shortId(sid)}: ${(ev.text || "").slice(0, 80)}`, "", "stream");
-    if (isSelected) setTurnPhase("stream");
+    const raw = ev.text != null ? String(ev.text) : "";
+    if (!raw) return;
+    // Thoughts are tagged with a leading 💭 from the ACP mapper.
+    const isThought = raw.startsWith("💭");
+    const text = isThought ? raw.replace(/^💭\s*/, "") : raw;
+    const role = isThought ? "thought" : "agent";
+    appendTranscript(sid, role, text, nowIso(), { stream: true });
+    // Don't spam the event feed on every token — only first chunk / periodic.
+    const list = getTranscript(sid);
+    const last = list[list.length - 1];
+    if (last && (last.body || "").length <= text.length + 2) {
+      pushEvent(
+        `${isThought ? "thought" : "agent"} ${shortId(sid)}: ${text.slice(0, 80)}`,
+        "",
+        isThought ? "thinking" : "stream"
+      );
+    }
+    if (isSelected) setTurnPhase(isThought ? "thinking" : "stream");
   } else if (type === "tool_call" || type === "toolCall") {
+    // Tool call interrupts the agent stream bubble.
+    endAgentStream(sid);
     const te = ev.event || ev;
     const tool = te.tool || te.name || "tool";
     const summary = te.args_summary || te.argsSummary || te.result_summary || "";
@@ -571,24 +663,30 @@ function handleControlEvent(ev) {
     if (isSelected) {
       if (st.includes("run")) setTurnPhase(state.turnPhase === "tooling" ? "tooling" : "running");
       else if (st.includes("wait") || st.includes("approv")) setTurnPhase("wait");
-      else if (st.includes("fail") || st.includes("error")) setTurnPhase("error");
-      else if (st.includes("idle") || st.includes("complete") || st.includes("cancel")) {
+      else if (st.includes("fail") || st.includes("error")) {
+        endAgentStream(sid);
+        setTurnPhase("error");
+      } else if (st.includes("idle") || st.includes("complete") || st.includes("cancel")) {
+        endAgentStream(sid);
         if (st.includes("cancel")) setTurnPhase("error");
         else flashBoomThenIdle();
       }
     }
     refreshSessions();
   } else if (type === "session_cancelled" || type === "sessionCancelled") {
+    endAgentStream(sid);
     appendTranscript(sid, "system", "session cancelled");
     pushEvent(`cancelled ${shortId(sid)}`, "", "error");
     if (isSelected) setTurnPhase("error");
     refreshSessions();
   } else if (type === "error") {
+    endAgentStream(sid || state.selectedSession);
     appendTranscript(sid || state.selectedSession, "error", ev.message || "error");
     pushEvent(ev.message || "error", "err", "error");
     setStatus(state.ready ? "ready" : "error", ev.message || "error");
     if (isSelected) setTurnPhase("error");
   } else if (type === "approval_required" || type === "approvalRequired") {
+    endAgentStream(sid);
     appendTranscript(
       sid,
       "system",
@@ -596,6 +694,22 @@ function handleControlEvent(ev) {
     );
     pushEvent(`approval · ${ev.tool || "?"}`, "err", "wait");
     if (isSelected) setTurnPhase("wait", ev.tool || "approval");
+  } else if (type === "raw") {
+    // Fallback: surface any text-ish raw ACP payload so speech is never silent.
+    const payload = ev.payload || ev;
+    const maybe =
+      payload?.update?.content?.text ||
+      payload?.content?.text ||
+      payload?.text ||
+      (typeof payload?.message === "string" ? payload.message : null);
+    if (maybe && typeof maybe === "string" && maybe.trim()) {
+      appendTranscript(sid || state.selectedSession, "agent", maybe, nowIso(), {
+        stream: true,
+      });
+      if (isSelected) setTurnPhase("stream");
+    } else {
+      pushEvent(`raw ${shortId(sid || "")}`, "", "idle");
+    }
   } else {
     pushEvent(`${type} ${shortId(sid || "")}`, "", "idle");
   }

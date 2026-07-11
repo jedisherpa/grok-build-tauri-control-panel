@@ -385,11 +385,6 @@ impl AcpClient {
         if let Some(bus) = &self.event_bus {
             bus.emit_status(self.control_session_id, SessionStatus::Running)
                 .await;
-            bus.emit(ControlEvent::AgentMessage {
-                session_id: self.control_session_id,
-                text: format!("prompt sent ({} chars) — generating…", prompt.len()),
-                at: Utc::now(),
-            });
         }
 
         // Mock clients: no transport — accept and return.
@@ -397,7 +392,10 @@ impl AcpClient {
             if let Some(bus) = &self.event_bus {
                 bus.emit(ControlEvent::AgentMessage {
                     session_id: self.control_session_id,
-                    text: format!("[local/mock] received prompt ({} chars)", prompt.len()),
+                    text: format!(
+                        "[mock] Got it — working on your prompt ({} chars).",
+                        prompt.len()
+                    ),
                     at: Utc::now(),
                 });
                 bus.emit_status(self.control_session_id, SessionStatus::Idle)
@@ -433,11 +431,6 @@ impl AcpClient {
                         info!("session/prompt completed");
                         if let Some(bus) = bus {
                             bus.emit_status(control_id, SessionStatus::Idle).await;
-                            bus.emit(ControlEvent::AgentMessage {
-                                session_id: control_id,
-                                text: "turn complete".into(),
-                                at: Utc::now(),
-                            });
                         }
                     }
                     Err(e) => {
@@ -464,16 +457,11 @@ impl AcpClient {
                         timeout_secs = prompt_timeout.as_secs(),
                         "session/prompt still open after timeout; continuing via stream"
                     );
-                    if let Some(bus) = bus {
-                        bus.emit(ControlEvent::AgentMessage {
-                            session_id: control_id,
-                            text: format!(
-                                "still generating after {} min — stream remains active",
-                                prompt_timeout.as_secs() / 60
-                            ),
-                            at: Utc::now(),
-                        });
-                    }
+                    // Soft timeout only — do not invent agent speech.
+                    debug!(
+                        "prompt still open after {} min",
+                        prompt_timeout.as_secs() / 60
+                    );
                 }
             }
         });
@@ -694,31 +682,56 @@ impl AcpClient {
     }
 
     async fn map_session_update(&self, bus: &EventBus, sid: Uuid, params: &Value) {
-        let update_type = params
+        // ACP SessionNotification: { sessionId, update: SessionUpdate }
+        // Some agents also flatten update fields onto params.
+        let update = params.get("update").unwrap_or(params);
+
+        let update_type = update
             .get("sessionUpdate")
-            .or_else(|| params.get("type"))
+            .or_else(|| update.get("type"))
+            .or_else(|| update.get("kind"))
             .and_then(|v| v.as_str())
             .unwrap_or("");
 
-        match update_type {
-            "tool_call" | "toolCall" => {
+        let update_type_norm = update_type
+            .replace('-', "_")
+            .chars()
+            .flat_map(|c| {
+                // agentMessageChunk → agent_message_chunk-ish lowercase
+                if c.is_uppercase() {
+                    vec!['_', c.to_ascii_lowercase()]
+                } else {
+                    vec![c]
+                }
+            })
+            .collect::<String>()
+            .trim_start_matches('_')
+            .to_string();
+
+        match update_type_norm.as_str() {
+            "tool_call" | "toolcall" => {
                 bus.emit_tool_call(
                     sid,
                     ToolCallEvent {
-                        id: params
+                        id: update
                             .get("toolCallId")
-                            .or_else(|| params.get("id"))
-                            .map(|v| v.to_string())
+                            .or_else(|| update.get("id"))
+                            .map(|v| match v {
+                                Value::String(s) => s.clone(),
+                                other => other.to_string(),
+                            })
                             .unwrap_or_else(|| Uuid::new_v4().to_string()),
-                        tool: params
+                        tool: update
                             .get("title")
-                            .or_else(|| params.get("toolName"))
+                            .or_else(|| update.get("toolName"))
+                            .or_else(|| update.get("name"))
                             .and_then(|v| v.as_str())
                             .unwrap_or("tool")
                             .to_string(),
-                        args_summary: params
+                        args_summary: update
                             .get("rawInput")
-                            .or_else(|| params.get("arguments"))
+                            .or_else(|| update.get("arguments"))
+                            .or_else(|| update.get("input"))
                             .map(|v| v.to_string())
                             .unwrap_or_default(),
                         status: ToolCallStatus::Running,
@@ -727,34 +740,143 @@ impl AcpClient {
                     },
                 );
             }
-            "agent_message_chunk" | "message" | "agent_message" => {
-                if let Some(text) = params
-                    .get("content")
-                    .and_then(|c| c.get("text"))
+            "tool_call_update" | "toolcallupdate" => {
+                let status = update
+                    .get("status")
                     .and_then(|v| v.as_str())
-                    .or_else(|| params.get("text").and_then(|v| v.as_str()))
-                {
-                    bus.emit(ControlEvent::AgentMessage {
-                        session_id: sid,
-                        text: text.to_string(),
+                    .unwrap_or("running");
+                let tool_status = match status {
+                    "completed" | "done" | "success" => ToolCallStatus::Completed,
+                    "failed" | "error" => ToolCallStatus::Failed,
+                    "denied" | "rejected" => ToolCallStatus::Denied,
+                    "pending" => ToolCallStatus::Pending,
+                    _ => ToolCallStatus::Running,
+                };
+                bus.emit_tool_call(
+                    sid,
+                    ToolCallEvent {
+                        id: update
+                            .get("toolCallId")
+                            .or_else(|| update.get("id"))
+                            .map(|v| match v {
+                                Value::String(s) => s.clone(),
+                                other => other.to_string(),
+                            })
+                            .unwrap_or_else(|| Uuid::new_v4().to_string()),
+                        tool: update
+                            .get("title")
+                            .or_else(|| update.get("toolName"))
+                            .or_else(|| update.get("name"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("tool")
+                            .to_string(),
+                        args_summary: update
+                            .get("rawInput")
+                            .or_else(|| update.get("arguments"))
+                            .map(|v| v.to_string())
+                            .unwrap_or_default(),
+                        status: tool_status,
+                        result_summary: extract_text_content(update.get("content"))
+                            .or_else(|| {
+                                update
+                                    .get("rawOutput")
+                                    .map(|v| v.to_string())
+                            }),
                         at: Utc::now(),
-                    });
+                    },
+                );
+            }
+            "agent_message_chunk"
+            | "agent_message"
+            | "message"
+            | "agentmessagechunk"
+            | "agentmessage" => {
+                if let Some(text) = extract_agent_text(update) {
+                    if !text.is_empty() {
+                        bus.emit(ControlEvent::AgentMessage {
+                            session_id: sid,
+                            text,
+                            at: Utc::now(),
+                        });
+                    }
+                } else {
+                    debug!(?update, "agent message chunk with no extractable text");
                 }
             }
+            "agent_thought_chunk" | "agent_thought" | "agentthoughtchunk" | "thought" => {
+                if let Some(text) = extract_agent_text(update) {
+                    if !text.is_empty() {
+                        // Surface thoughts in the transcript so the user sees reasoning stream.
+                        bus.emit(ControlEvent::AgentMessage {
+                            session_id: sid,
+                            text: format!("💭 {text}"),
+                            at: Utc::now(),
+                        });
+                    }
+                }
+            }
+            "user_message_chunk" | "usermessagechunk" => {
+                // Echo of user prompt while streaming — optional; skip to avoid dup.
+            }
             "plan" => {
+                let steps = update
+                    .get("entries")
+                    .or_else(|| update.get("steps"))
+                    .and_then(|v| v.as_array())
+                    .map(|arr| {
+                        arr.iter()
+                            .enumerate()
+                            .map(|(i, s)| PlanStep {
+                                id: s
+                                    .get("id")
+                                    .and_then(|v| v.as_str())
+                                    .map(str::to_string)
+                                    .unwrap_or_else(|| i.to_string()),
+                                description: s
+                                    .get("content")
+                                    .or_else(|| s.get("description"))
+                                    .or_else(|| s.get("text"))
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                status: s
+                                    .get("status")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("pending")
+                                    .to_string(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 bus.emit_plan_update(
                     sid,
                     PlanUpdateEvent {
                         plan_id: None,
-                        title: None,
-                        steps: Vec::new(),
+                        title: update
+                            .get("title")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string),
+                        steps,
                         status: "updated".into(),
                         at: Utc::now(),
                     },
                 );
             }
-            "available_commands_update" => {}
+            "available_commands_update" | "availablecommandsupdate" | "current_mode_update"
+            | "currentmodeupdate" => {}
             other => {
+                // Last-resort: if content looks like text, still surface it.
+                if let Some(text) = extract_agent_text(update) {
+                    if !text.is_empty() {
+                        info!(other, "treating unmapped update as agent text");
+                        bus.emit(ControlEvent::AgentMessage {
+                            session_id: sid,
+                            text,
+                            at: Utc::now(),
+                        });
+                        return;
+                    }
+                }
                 debug!(other, "unmapped session update");
                 bus.emit(ControlEvent::Raw {
                     session_id: Some(sid),
@@ -763,7 +885,64 @@ impl AcpClient {
             }
         }
     }
+}
 
+/// Pull plain text from ACP ContentBlock shapes (and common variants).
+fn extract_text_content(content: Option<&Value>) -> Option<String> {
+    let content = content?;
+    if let Some(s) = content.as_str() {
+        return Some(s.to_string());
+    }
+    if let Some(t) = content.get("text").and_then(|v| v.as_str()) {
+        return Some(t.to_string());
+    }
+    if let Some(t) = content.get("thought").and_then(|v| v.as_str()) {
+        return Some(t.to_string());
+    }
+    if let Some(arr) = content.as_array() {
+        let mut out = String::new();
+        for item in arr {
+            if let Some(t) = extract_text_content(Some(item)) {
+                out.push_str(&t);
+            }
+        }
+        if !out.is_empty() {
+            return Some(out);
+        }
+    }
+    // Nested: { role, content: [...] } or { content: "..." }
+    if let Some(inner) = content.get("content") {
+        if let Some(t) = extract_text_content(Some(inner)) {
+            return Some(t);
+        }
+    }
+    None
+}
+
+/// Extract streamed agent text from a session update object.
+fn extract_agent_text(update: &Value) -> Option<String> {
+    if let Some(t) = extract_text_content(update.get("content")) {
+        return Some(t);
+    }
+    if let Some(t) = update.get("text").and_then(|v| v.as_str()) {
+        return Some(t.to_string());
+    }
+    if let Some(t) = update.get("message").and_then(|v| v.as_str()) {
+        return Some(t.to_string());
+    }
+    if let Some(t) = update.get("delta").and_then(|v| v.as_str()) {
+        return Some(t.to_string());
+    }
+    // content may be top-level array of blocks
+    if update.get("type").and_then(|v| v.as_str()) == Some("text") {
+        if let Some(t) = update.get("text").and_then(|v| v.as_str()) {
+            return Some(t.to_string());
+        }
+    }
+    None
+}
+
+impl AcpClient {
     pub async fn shutdown(&self) -> Result<()> {
         let _ = self.cancel().await;
         let mut child_guard = self.child.lock().await;
@@ -804,5 +983,45 @@ mod tests {
         let c = AcpClient::mock_for_tests("sess-1", None);
         let err = c.send_prompt("   ").await.unwrap_err();
         assert!(matches!(err, AcpError::Protocol(_)));
+    }
+
+    #[test]
+    fn extracts_nested_acp_message_chunk() {
+        let params = json!({
+            "sessionId": "s1",
+            "update": {
+                "sessionUpdate": "agent_message_chunk",
+                "content": { "type": "text", "text": "Hello from agent" }
+            }
+        });
+        let update = params.get("update").unwrap();
+        assert_eq!(
+            extract_agent_text(update).as_deref(),
+            Some("Hello from agent")
+        );
+    }
+
+    #[test]
+    fn extracts_content_block_array() {
+        let update = json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": [
+                { "type": "text", "text": "Hi " },
+                { "type": "text", "text": "there" }
+            ]
+        });
+        assert_eq!(extract_agent_text(&update).as_deref(), Some("Hi there"));
+    }
+
+    #[test]
+    fn extracts_thought_chunk() {
+        let update = json!({
+            "sessionUpdate": "agent_thought_chunk",
+            "content": { "type": "text", "text": "I should check tests" }
+        });
+        assert_eq!(
+            extract_agent_text(&update).as_deref(),
+            Some("I should check tests")
+        );
     }
 }

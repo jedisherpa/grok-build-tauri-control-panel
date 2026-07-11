@@ -333,10 +333,14 @@ body {
 }
 .t-block.user { border-color: var(--user); }
 .t-block.agent { border-color: var(--agent); }
+.t-block.thought { border-color: color-mix(in srgb, var(--bomb-fuse, #fb923c) 70%, var(--dim)); }
 .t-block.tool { border-color: var(--tool); }
 .t-block.system { border-color: var(--dim); }
 .t-block.error { border-color: var(--err); }
 .t-block.plan { border-color: var(--accent); }
+.t-block.streaming {
+  background: color-mix(in srgb, var(--agent) 4%, transparent);
+}
 
 .t-role {
   font-size: 10px;
@@ -347,6 +351,7 @@ body {
 }
 .t-block.user .t-role { color: var(--user); }
 .t-block.agent .t-role { color: var(--agent); }
+.t-block.thought .t-role { color: var(--bomb-fuse, #fb923c); }
 .t-block.tool .t-role { color: var(--tool); }
 .t-block.error .t-role { color: var(--err); }
 
@@ -355,8 +360,28 @@ body {
   word-break: break-word;
   color: var(--text);
 }
+.t-block.thought .t-body {
+  color: var(--muted);
+  font-style: italic;
+}
 .t-body.dim { color: var(--muted); }
 .t-time { color: var(--dim); font-size: 10px; margin-top: 4px; }
+
+/* Live typing caret while agent speech streams */
+.stream-caret {
+  display: inline-block;
+  width: 6px;
+  height: 10px;
+  margin-left: 4px;
+  background: var(--agent);
+  animation: caret-blink 0.9s steps(1) infinite;
+  vertical-align: middle;
+  border-radius: 1px;
+}
+@keyframes caret-blink {
+  0%, 50% { opacity: 1; }
+  51%, 100% { opacity: 0; }
+}
 
 .composer {
   border-top: 1px solid var(--border);
