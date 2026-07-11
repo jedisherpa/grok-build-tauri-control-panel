@@ -5,16 +5,17 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Bomb Code</title>
     <link rel="stylesheet" href="styles.css" />
+    <link rel="stylesheet" href="bombs.css" />
   </head>
   <body>
     <div id="app">
       <!-- LEFT: threads + menus -->
       <aside class="col col-left">
-        <header class="col-header brand">
+        <header class="col-header brand" id="brand-header">
           <img class="logo" src="assets/logo.png" alt="Bomb Code" width="28" height="28" />
           <div>
             <div class="title">Bomb Code</div>
-            <div class="sub">Grok Build panel</div>
+            <div class="sub" id="brand-sub">Grok Build panel</div>
           </div>
         </header>
 
@@ -67,7 +68,10 @@
             <div id="auth-hint" class="auth-hint muted"></div>
           </div>
           <div id="status-pill" class="status-pill status-unknown">
-            <span class="dot"></span>
+            <span class="dot" aria-hidden="true"></span>
+            <span id="status-bomb" class="px-bomb sm mood-idle" aria-hidden="true">
+              <img src="assets/logo.png" alt="" />
+            </span>
             <span id="status-text">Starting…</span>
           </div>
         </div>
@@ -110,16 +114,32 @@
         <section id="view-chat" class="view active">
           <div id="transcript" class="transcript" aria-live="polite">
             <div class="welcome">
-              <pre class="banner">  ╔══════════════════════════════════════╗
+              <div class="welcome-hero">
+                <span class="px-bomb xl mood-ready" aria-hidden="true"><img src="assets/logo.png" alt="" /></span>
+                <pre class="banner">  ╔══════════════════════════════════════╗
   ║              bomb code               ║
   ╚══════════════════════════════════════╝</pre>
+              </div>
               <p>Select a thread or start a new ACP session.</p>
-              <p class="muted">Center stream mirrors Grok Build in the terminal.</p>
+              <p class="muted">Pixel bombs track thinking, tools, and turn status while you wait.</p>
             </div>
           </div>
-          <footer class="composer">
+          <div id="thinking-strip" class="thinking-strip" aria-live="polite" aria-hidden="true">
+            <span id="thinking-bomb" class="px-bomb md mood-thinking" aria-hidden="true">
+              <img src="assets/logo.png" alt="" />
+            </span>
+            <div class="thinking-copy">
+              <div class="thinking-label">
+                <span id="thinking-phrase">lighting the fuse</span><span class="dots" aria-hidden="true"></span>
+              </div>
+              <div id="thinking-sub" class="thinking-sub">waiting for the first boom of insight</div>
+            </div>
+            <div class="fuse-meter" title="fuse"><i></i></div>
+          </div>
+          <footer class="composer" id="composer">
             <div class="composer-meta">
               <span id="composer-session" class="muted">no session</span>
+              <span id="composer-mood" class="live-mood" style="display:none"></span>
               <span id="composer-model" class="muted"></span>
             </div>
             <div class="composer-row">
@@ -211,7 +231,12 @@
       <!-- RIGHT: agents / activity -->
       <aside class="col col-right">
         <header class="col-header">
-          <div class="title">Activity</div>
+          <div class="title">
+            <span id="activity-bomb" class="px-bomb sm mood-idle" aria-hidden="true">
+              <img src="assets/logo.png" alt="" />
+            </span>
+            Activity
+          </div>
           <button id="btn-refresh" class="icon-btn" title="Refresh">↻</button>
         </header>
 

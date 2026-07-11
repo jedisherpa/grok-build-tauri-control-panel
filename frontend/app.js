@@ -1,6 +1,9 @@
 // Bomb Code — three-column Grok Build control panel.
+// Pixel-bomb visual language: moods for thinking / tools / boom / wait.
 
 const $ = (id) => document.getElementById(id);
+
+const LOGO = "assets/logo.png";
 
 const state = {
   selectedSession: null,
@@ -11,7 +14,238 @@ const state = {
   loggingIn: false,
   devServer: null,
   transcriptBySession: new Map(), // id -> [{role, body, at}]
+  // bomb UI
+  turnPhase: "idle", // idle | thinking | running | tooling | stream | wait | boom | error
+  lastTool: null,
+  thinkingSince: null,
+  phraseTimer: null,
+  phraseIndex: 0,
 };
+
+// ── Pixel-bomb language ─────────────────────────────────────────────────
+const BOMB_PHRASES = {
+  thinking: [
+    "lighting the fuse",
+    "packing powder",
+    "defusing the problem",
+    "wiring the charge",
+    "counting down",
+    "thinking in pixels",
+    "polishing the casing",
+    "arming the plan",
+    "waiting for the boom of insight",
+    "snipping red wires only",
+    "shaking the pixel bomb",
+    "loading agent payload",
+  ],
+  tooling: [
+    "planting a charge",
+    "cutting a wire",
+    "detonating a tool",
+    "rigging the workbench",
+    "dropping a payload",
+    "running the blast plan",
+  ],
+  running: [
+    "fuse crackling",
+    "agent on the wire",
+    "charge is live",
+    "still cooking",
+    "stream is hot",
+  ],
+  stream: [
+    "words falling like sparks",
+    "streaming the boom",
+    "agent is talking",
+  ],
+  wait: [
+    "holding the pin",
+    "approval fuse lit",
+    "your move, bomb squad",
+  ],
+  boom: ["boom — turn complete", "charge spent", "clean detonation"],
+  error: ["dud fuse", "misfire", "smoke in the bay"],
+  idle: ["standby", "safe and sound"],
+};
+
+const BOMB_SUB = {
+  thinking: "agent is planning · stream stays open",
+  tooling: "tool call in flight",
+  running: "session running",
+  stream: "receiving agent tokens",
+  wait: "waiting for your approval",
+  boom: "ready for the next charge",
+  error: "check the event feed",
+  idle: "no live fuse",
+};
+
+function bombHtml(mood = "idle", size = "sm", extraClass = "") {
+  return `<span class="px-bomb ${size} mood-${mood} ${extraClass}" aria-hidden="true"><img src="${LOGO}" alt="" /></span>`;
+}
+
+function moodFromStatus(status) {
+  const s = String(status || "").toLowerCase();
+  if (s.includes("run") || s.includes("generat") || s.includes("busy")) return "running";
+  if (s.includes("wait") || s.includes("approv")) return "wait";
+  if (s.includes("fail") || s.includes("error")) return "error";
+  if (s.includes("cancel")) return "error";
+  if (s.includes("idle") || s.includes("ready") || s.includes("complete")) return "ready";
+  return "idle";
+}
+
+function moodFromEventCls(cls) {
+  if (cls === "err") return "error";
+  if (cls === "ok") return "boom";
+  return "idle";
+}
+
+function setBombMood(el, mood) {
+  if (!el) return;
+  const moods = [
+    "idle",
+    "ready",
+    "thinking",
+    "running",
+    "tooling",
+    "stream",
+    "boom",
+    "error",
+    "wait",
+  ];
+  el.classList.remove(...moods.map((m) => `mood-${m}`));
+  el.classList.add(`mood-${mood}`);
+}
+
+function anySessionBusy() {
+  return state.sessions.some((s) => {
+    const st = String(s.status || "").toLowerCase();
+    return st.includes("run") || st.includes("wait");
+  });
+}
+
+function selectedBusy() {
+  if (!state.selectedSession) return false;
+  const s = state.sessions.find((x) => x.id === state.selectedSession);
+  if (!s) return state.turnPhase !== "idle" && state.turnPhase !== "boom";
+  const st = String(s.status || "").toLowerCase();
+  return (
+    st.includes("run") ||
+    st.includes("wait") ||
+    ["thinking", "running", "tooling", "stream", "wait"].includes(state.turnPhase)
+  );
+}
+
+function setTurnPhase(phase, detail = "") {
+  state.turnPhase = phase;
+  if (phase === "thinking" || phase === "running" || phase === "tooling" || phase === "stream") {
+    if (!state.thinkingSince) state.thinkingSince = Date.now();
+  }
+  if (phase === "idle" || phase === "boom" || phase === "error") {
+    state.thinkingSince = null;
+  }
+  if (detail) state.lastTool = detail;
+  updateBombChrome();
+}
+
+function pickPhrase(phase) {
+  const list = BOMB_PHRASES[phase] || BOMB_PHRASES.idle;
+  return list[state.phraseIndex % list.length];
+}
+
+function startPhraseCycle() {
+  if (state.phraseTimer) return;
+  state.phraseTimer = setInterval(() => {
+    if (!selectedBusy() && state.turnPhase === "idle") return;
+    state.phraseIndex += 1;
+    const phraseEl = $("thinking-phrase");
+    if (phraseEl) phraseEl.textContent = pickPhrase(state.turnPhase);
+  }, 2200);
+}
+
+function stopPhraseCycle() {
+  if (state.phraseTimer) {
+    clearInterval(state.phraseTimer);
+    state.phraseTimer = null;
+  }
+}
+
+function elapsedLabel() {
+  if (!state.thinkingSince) return "";
+  const sec = Math.floor((Date.now() - state.thinkingSince) / 1000);
+  if (sec < 60) return `${sec}s`;
+  const m = Math.floor(sec / 60);
+  const s = sec % 60;
+  return `${m}m ${s}s`;
+}
+
+function updateBombChrome() {
+  const busy = selectedBusy();
+  const anyBusy = anySessionBusy() || busy;
+  const phase = busy
+    ? state.turnPhase === "idle"
+      ? "running"
+      : state.turnPhase
+    : state.turnPhase === "boom" || state.turnPhase === "error"
+      ? state.turnPhase
+      : "idle";
+
+  // Brand fuse
+  const brand = $("brand-header");
+  if (brand) brand.classList.toggle("live", anyBusy);
+  const brandSub = $("brand-sub");
+  if (brandSub) {
+    brandSub.textContent = anyBusy ? "fuse is lit…" : "Grok Build panel";
+  }
+
+  // Thinking strip
+  const strip = $("thinking-strip");
+  if (strip) {
+    const show =
+      busy &&
+      ["thinking", "running", "tooling", "stream", "wait"].includes(phase);
+    strip.classList.toggle("visible", show);
+    strip.setAttribute("aria-hidden", show ? "false" : "true");
+    if (show) {
+      setBombMood($("thinking-bomb"), phase === "wait" ? "wait" : phase === "tooling" ? "tooling" : "thinking");
+      const phraseEl = $("thinking-phrase");
+      if (phraseEl) phraseEl.textContent = pickPhrase(phase);
+      const sub = $("thinking-sub");
+      if (sub) {
+        const el = elapsedLabel();
+        const base = BOMB_SUB[phase] || BOMB_SUB.thinking;
+        const toolBit = state.lastTool && phase === "tooling" ? ` · ${state.lastTool}` : "";
+        sub.textContent = el ? `${base}${toolBit} · ${el}` : `${base}${toolBit}`;
+      }
+      startPhraseCycle();
+    } else if (!anyBusy) {
+      stopPhraseCycle();
+    }
+  }
+
+  // Composer rail
+  const composer = $("composer");
+  if (composer) composer.classList.toggle("busy", busy);
+  const moodEl = $("composer-mood");
+  if (moodEl) {
+    if (busy) {
+      moodEl.style.display = "inline-flex";
+      moodEl.innerHTML = `${bombHtml(phase === "tooling" ? "tooling" : "thinking", "xs")} ${escapeHtml(pickPhrase(phase))}`;
+    } else {
+      moodEl.style.display = "none";
+      moodEl.innerHTML = "";
+    }
+  }
+
+  // Activity header bomb
+  setBombMood($("activity-bomb"), anyBusy ? (phase === "tooling" ? "tooling" : "running") : "idle");
+}
+
+function flashBoomThenIdle(ms = 900) {
+  setTurnPhase("boom");
+  setTimeout(() => {
+    if (state.turnPhase === "boom") setTurnPhase("idle");
+  }, ms);
+}
 
 function hasTauri() {
   return !!(window.__TAURI__?.core?.invoke);
@@ -35,16 +269,25 @@ function shortId(id) {
 
 function setStatus(kind, text) {
   const pill = $("status-pill");
-  pill.className = `status-pill status-${kind}`;
+  const k = kind || "unknown";
+  pill.className = `status-pill status-${k}`;
   $("status-text").textContent = text;
+  // Map runtime status → bomb mood
+  let mood = "idle";
+  if (k === "ready") mood = anySessionBusy() || selectedBusy() ? "running" : "ready";
+  else if (k === "error") mood = "error";
+  else if (k === "thinking" || k === "running") mood = "thinking";
+  else if (k === "unknown") mood = "idle";
+  setBombMood($("status-bomb"), mood);
 }
 
-function pushEvent(text, cls = "") {
+function pushEvent(text, cls = "", moodHint = null) {
   const feed = $("event-feed");
   const line = document.createElement("div");
   line.className = `event-line ${cls}`;
   const ts = new Date().toLocaleTimeString();
-  line.innerHTML = `<span class="ts">${ts}</span>${escapeHtml(text)}`;
+  const mood = moodHint || moodFromEventCls(cls);
+  line.innerHTML = `${bombHtml(mood, "xs")}<span class="event-body"><span class="ts">${ts}</span>${escapeHtml(text)}</span>`;
   feed.prepend(line);
   while (feed.children.length > 200) feed.lastChild.remove();
 }
@@ -91,19 +334,33 @@ function appendTranscript(sessionId, role, body, at = nowIso()) {
   }
 }
 
+function roleBombMood(role) {
+  if (role === "user") return "idle";
+  if (role === "agent") return "stream";
+  if (role === "tool") return "tooling";
+  if (role === "plan") return "thinking";
+  if (role === "error") return "error";
+  if (role === "system") return "ready";
+  return "idle";
+}
+
 function renderTranscript() {
   const root = $("transcript");
   const sid = state.selectedSession;
   if (!sid) {
     root.innerHTML = `<div class="welcome">
-<pre class="banner">  ╔══════════════════════════════════════╗
+<div class="welcome-hero">
+  ${bombHtml("ready", "xl")}
+  <pre class="banner">  ╔══════════════════════════════════════╗
   ║              bomb code               ║
   ╚══════════════════════════════════════╝</pre>
+</div>
 <p>Select a thread or start a new ACP session.</p>
-<p class="muted">Center stream mirrors Grok Build in the terminal.</p>
+<p class="muted">Pixel bombs track thinking, tools, and turn status while you wait.</p>
 </div>`;
     $("composer-session").textContent = "no session";
     $("composer-model").textContent = "";
+    updateBombChrome();
     return;
   }
 
@@ -114,10 +371,14 @@ function renderTranscript() {
   const entries = getTranscript(sid);
   if (!entries.length) {
     root.innerHTML = `<div class="welcome">
-<pre class="banner">session ${escapeHtml(shortId(sid))}</pre>
+<div class="welcome-hero">
+  ${bombHtml("ready", "lg")}
+  <pre class="banner">session ${escapeHtml(shortId(sid))}</pre>
+</div>
 <p class="muted">${escapeHtml(sess?.cwd || "")}</p>
-<p>Connected. Type a prompt below.</p>
+<p>Connected. Type a prompt — the fuse lights while Grok works.</p>
 </div>`;
+    updateBombChrome();
     return;
   }
 
@@ -137,13 +398,14 @@ function renderTranscript() {
                   ? "error"
                   : "system";
       return `<div class="t-block ${escapeHtml(role)}">
-  <div class="t-role">${label}</div>
+  <div class="t-role">${bombHtml(roleBombMood(role), "xs")}<span>${label}</span></div>
   <div class="t-body">${escapeHtml(e.body)}</div>
   <div class="t-time">${escapeHtml(e.at || "")}</div>
 </div>`;
     })
     .join("");
   root.scrollTop = root.scrollHeight;
+  updateBombChrome();
 }
 
 // ── Threads / agents ────────────────────────────────────────────────────
@@ -171,11 +433,12 @@ function renderThreads() {
           : status.includes("fail") || status.includes("cancel")
             ? "failed"
             : "idle";
+      const bombMood = isMock ? "idle" : moodFromStatus(status);
       const cwd = s.cwd || "";
       const shortCwd = cwd.length > 28 ? "…" + cwd.slice(-27) : cwd;
       return `<div class="thread-item ${selected}" data-id="${escapeHtml(id)}">
-  <div class="name">${escapeHtml(mode)} · ${escapeHtml(shortId(id))}</div>
-  <div class="meta"><span class="badge ${badgeCls}">${escapeHtml(status)}</span>
+  <div class="name">${bombHtml(bombMood, "xs")} ${escapeHtml(mode)} · ${escapeHtml(shortId(id))}</div>
+  <div class="meta"><span class="badge ${badgeCls}">${bombHtml(bombMood, "xs")}${escapeHtml(status)}</span>
   <span>${escapeHtml(isMock ? "mock" : model || "—")}</span></div>
   <div class="meta">${escapeHtml(shortCwd)}</div>
 </div>`;
@@ -185,6 +448,7 @@ function renderThreads() {
   root.querySelectorAll(".thread-item").forEach((el) => {
     el.onclick = () => selectSession(el.dataset.id);
   });
+  updateBombChrome();
 }
 
 function renderAgents() {
@@ -201,9 +465,11 @@ function renderAgents() {
         : status.includes("fail") || status.includes("cancel")
           ? "failed"
           : "idle";
-      return `<div class="agent-card">
-  <div class="name">${escapeHtml(String(s.mode || "acp").toUpperCase())} · ${escapeHtml(shortId(s.id))}</div>
-  <div class="meta"><span class="badge ${badgeCls}">${escapeHtml(status)}</span>
+      const bombMood = moodFromStatus(status);
+      const runCls = status.includes("run") ? "running" : "";
+      return `<div class="agent-card ${runCls}">
+  <div class="name">${bombHtml(bombMood, "sm")}${escapeHtml(String(s.mode || "acp").toUpperCase())} · ${escapeHtml(shortId(s.id))}</div>
+  <div class="meta"><span class="badge ${badgeCls}">${bombHtml(bombMood, "xs")}${escapeHtml(status)}</span>
   <span class="muted">${escapeHtml(s.model || "")}</span></div>
   <div class="path">${escapeHtml(s.cwd || "")}</div>
   ${
@@ -214,6 +480,7 @@ function renderAgents() {
 </div>`;
     })
     .join("");
+  updateBombChrome();
 }
 
 function renderTools() {
@@ -224,12 +491,21 @@ function renderTools() {
   }
   root.innerHTML = state.tools
     .slice(0, 40)
-    .map(
-      (t) => `<div class="tool-card">
-  <div class="tool-name">${escapeHtml(t.tool || "tool")} · ${escapeHtml(t.status || "")}</div>
+    .map((t) => {
+      const st = String(t.status || "").toLowerCase();
+      const mood = st.includes("run") || st.includes("start")
+        ? "tooling"
+        : st.includes("fail") || st.includes("error")
+          ? "error"
+          : st.includes("done") || st.includes("complete") || st.includes("ok")
+            ? "boom"
+            : "tooling";
+      const runCls = mood === "tooling" ? "running" : "";
+      return `<div class="tool-card ${runCls}">
+  <div class="tool-name">${bombHtml(mood, "xs")}${escapeHtml(t.tool || "tool")} · ${escapeHtml(t.status || "")}</div>
   <div class="tool-sum">${escapeHtml(t.summary || t.id || "")}</div>
-</div>`
-    )
+</div>`;
+    })
     .join("");
 }
 
@@ -244,15 +520,17 @@ function selectSession(id) {
 // ── Live events from backend ────────────────────────────────────────────
 function handleControlEvent(ev) {
   if (!ev || typeof ev !== "object") {
-    pushEvent(String(ev));
+    pushEvent(String(ev), "", "idle");
     return;
   }
   const type = ev.type || "event";
   const sid = ev.session_id || ev.sessionId;
+  const isSelected = !sid || sid === state.selectedSession;
 
   if (type === "agent_message" || type === "agentMessage") {
     appendTranscript(sid, "agent", ev.text || JSON.stringify(ev));
-    pushEvent(`agent ${shortId(sid)}: ${(ev.text || "").slice(0, 80)}`);
+    pushEvent(`agent ${shortId(sid)}: ${(ev.text || "").slice(0, 80)}`, "", "stream");
+    if (isSelected) setTurnPhase("stream");
   } else if (type === "tool_call" || type === "toolCall") {
     const te = ev.event || ev;
     const tool = te.tool || te.name || "tool";
@@ -272,37 +550,54 @@ function handleControlEvent(ev) {
       "tool",
       `${tool} [${status}]\n${String(summary).slice(0, 400)}`
     );
-    pushEvent(`tool ${tool} · ${status}`);
+    const st = String(status).toLowerCase();
+    const done = st.includes("done") || st.includes("complete") || st.includes("success");
+    pushEvent(`tool ${tool} · ${status}`, done ? "ok" : "", done ? "boom" : "tooling");
+    if (isSelected) setTurnPhase(done ? "running" : "tooling", tool);
   } else if (type === "plan_update" || type === "planUpdate") {
     const pe = ev.event || ev;
     const steps = (pe.steps || [])
       .map((s) => `  - [${s.status || "pending"}] ${s.description || s.id}`)
       .join("\n");
     appendTranscript(sid, "plan", `${pe.title || "plan"} (${pe.status || ""})\n${steps}`);
-    pushEvent(`plan update ${shortId(sid)}`);
+    pushEvent(`plan update ${shortId(sid)}`, "", "thinking");
+    if (isSelected) setTurnPhase("thinking");
   } else if (type === "session_created" || type === "sessionCreated") {
-    pushEvent(`session created ${shortId(sid)}`, "ok");
+    pushEvent(`session created ${shortId(sid)}`, "ok", "boom");
     refreshSessions();
   } else if (type === "session_status_changed" || type === "sessionStatusChanged") {
-    pushEvent(`status ${shortId(sid)} → ${ev.status}`);
+    const st = String(ev.status || "").toLowerCase();
+    pushEvent(`status ${shortId(sid)} → ${ev.status}`, "", moodFromStatus(st));
+    if (isSelected) {
+      if (st.includes("run")) setTurnPhase(state.turnPhase === "tooling" ? "tooling" : "running");
+      else if (st.includes("wait") || st.includes("approv")) setTurnPhase("wait");
+      else if (st.includes("fail") || st.includes("error")) setTurnPhase("error");
+      else if (st.includes("idle") || st.includes("complete") || st.includes("cancel")) {
+        if (st.includes("cancel")) setTurnPhase("error");
+        else flashBoomThenIdle();
+      }
+    }
     refreshSessions();
   } else if (type === "session_cancelled" || type === "sessionCancelled") {
     appendTranscript(sid, "system", "session cancelled");
-    pushEvent(`cancelled ${shortId(sid)}`);
+    pushEvent(`cancelled ${shortId(sid)}`, "", "error");
+    if (isSelected) setTurnPhase("error");
     refreshSessions();
   } else if (type === "error") {
     appendTranscript(sid || state.selectedSession, "error", ev.message || "error");
-    pushEvent(ev.message || "error", "err");
+    pushEvent(ev.message || "error", "err", "error");
     setStatus(state.ready ? "ready" : "error", ev.message || "error");
+    if (isSelected) setTurnPhase("error");
   } else if (type === "approval_required" || type === "approvalRequired") {
     appendTranscript(
       sid,
       "system",
       `approval required: ${ev.tool || "?"} — ${ev.summary || ev.request_id || ""}`
     );
-    pushEvent(`approval · ${ev.tool || "?"}`, "err");
+    pushEvent(`approval · ${ev.tool || "?"}`, "err", "wait");
+    if (isSelected) setTurnPhase("wait", ev.tool || "approval");
   } else {
-    pushEvent(`${type} ${shortId(sid || "")}`);
+    pushEvent(`${type} ${shortId(sid || "")}`, "", "idle");
   }
 }
 
@@ -601,9 +896,18 @@ async function sendPrompt() {
     if (!prompt.trim()) throw new Error("Empty prompt");
     appendTranscript(state.selectedSession, "user", prompt);
     $("prompt").value = "";
+    state.phraseIndex = Math.floor(Math.random() * BOMB_PHRASES.thinking.length);
+    state.thinkingSince = Date.now();
+    setTurnPhase("thinking");
+    setStatus("thinking", "lighting the fuse…");
+    pushEvent(`prompt → ${shortId(state.selectedSession)}`, "ok", "thinking");
     await invoke("send_prompt", { id: state.selectedSession, prompt });
-    pushEvent(`prompt → ${shortId(state.selectedSession)}`, "ok");
+    // Stay in thinking/running until status events arrive
+    if (state.turnPhase === "thinking") setTurnPhase("running");
+    setStatus(state.ready ? "ready" : "error", state.ready ? "fuse lit · agent working" : "error");
+    updateBombChrome();
   } catch (e) {
+    setTurnPhase("error");
     toastError(e);
   }
 }
@@ -900,8 +1204,11 @@ $("btn-send").onclick = sendPrompt;
 $("btn-cancel").onclick = async () => {
   try {
     if (!state.selectedSession) throw new Error("No session selected");
+    setTurnPhase("wait");
+    pushEvent("pulling the pin…", "", "wait");
     await invoke("cancel_session", { id: state.selectedSession });
     appendTranscript(state.selectedSession, "system", "cancel requested");
+    setTurnPhase("error");
     await refreshSessions();
   } catch (e) {
     toastError(e);
@@ -1104,20 +1411,28 @@ $("btn-shutdown").onclick = async () => {
   }
 };
 
+// Keep fuse meter / elapsed clock honest while waiting
+setInterval(() => {
+  if (selectedBusy() || state.thinkingSince) updateBombChrome();
+}, 1000);
+
 async function boot() {
   if (hasTauri() && window.__TAURI__.event) {
     await window.__TAURI__.event.listen("control-event", (e) => handleControlEvent(e.payload));
   } else {
     setStatus("error", "Not inside Tauri — use the .app");
+    setBombMood($("status-bomb"), "error");
   }
   try {
     await refreshStatus();
     await refreshSessions();
     await refreshDevStatus();
-    pushEvent("Bomb Code ready", "ok");
+    setTurnPhase("idle");
+    pushEvent("Bomb Code ready — pixel bombs armed", "ok", "boom");
     if (state.auth && !state.auth.loggedIn) {
-      pushEvent("Not signed in — click Log in with Grok");
+      pushEvent("Not signed in — click Log in with Grok", "", "wait");
     }
+    updateBombChrome();
   } catch (e) {
     toastError(e);
   }
