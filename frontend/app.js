@@ -128,14 +128,18 @@ $("btn-start-acp").onclick = async () => {
     const highRisk = mcpNames.filter((n) =>
       /playwright|browser|grok-build|custom|^x$/i.test(n)
     );
+    const rawModel = $("model").value.trim();
+    const model =
+      !rawModel || rawModel.toLowerCase() === "default" ? null : rawModel;
     const opts = {
       mode: "acp",
-      model: $("model").value.trim() || null,
+      model,
       planMode: $("plan-mode").checked,
       alwaysApprove: $("always-approve").checked,
+      // Only attach explicitly named MCP servers; auto-attach can break session/new.
       mcpServerNames: mcpNames,
       approvedHighRiskMcp: highRisk,
-      includeAutoMcp: true,
+      includeAutoMcp: mcpNames.length === 0 ? false : true,
       mcpServers: [],
       rules: [],
       permissionAllow: [],

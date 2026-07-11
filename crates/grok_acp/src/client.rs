@@ -20,7 +20,7 @@ use grok_events::{
 use crate::error::{AcpError, Result};
 use crate::messages::{
     AuthenticateParams, ClientCapabilities, ClientInfo, FsCapabilities, InitializeParams,
-    JsonRpcNotification, PromptContent, SessionNewParams, SessionPromptParams,
+    JsonRpcNotification, PromptContent, SessionPromptParams,
 };
 use crate::transport::NdjsonTransport;
 
@@ -56,6 +56,7 @@ pub struct AcpClientConfig {
     pub client_name: String,
     pub client_version: String,
     pub request_timeout: Duration,
+    /// Preferred auth method; may be overridden by agent-advertised methods.
     pub auth_method_id: String,
 }
 
@@ -67,7 +68,8 @@ impl AcpClientConfig {
             client_name: "GrokBuildTauriControlPanel".into(),
             client_version: env!("CARGO_PKG_VERSION").into(),
             request_timeout: Duration::from_secs(120),
-            auth_method_id: "xai.api_key".into(),
+            // Grok Build advertises cached_token + grok.com (not xai.api_key).
+            auth_method_id: "cached_token".into(),
         }
     }
 }
@@ -78,6 +80,7 @@ pub struct AcpClient {
     transport: RwLock<Option<Arc<NdjsonTransport>>>,
     session_id: RwLock<Option<String>>,
     agent_capabilities: RwLock<Option<Value>>,
+    auth_methods: RwLock<Vec<String>>,
     event_bus: Option<Arc<EventBus>>,
     control_session_id: Uuid,
     notification_rx: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<JsonRpcNotification>>>,
@@ -147,6 +150,7 @@ impl AcpClient {
             transport: RwLock::new(Some(transport)),
             session_id: RwLock::new(None),
             agent_capabilities: RwLock::new(None),
+            auth_methods: RwLock::new(Vec::new()),
             event_bus,
             control_session_id,
             notification_rx: Mutex::new(Some(notif_rx)),
@@ -176,6 +180,7 @@ impl AcpClient {
             transport: RwLock::new(None),
             session_id: RwLock::new(Some(session_id.to_string())),
             agent_capabilities: RwLock::new(None),
+            auth_methods: RwLock::new(Vec::new()),
             event_bus,
             control_session_id: Uuid::new_v4(),
             notification_rx: Mutex::new(None),
@@ -199,42 +204,97 @@ impl AcpClient {
     }
 
     async fn initialize(&self) -> Result<()> {
-        let params = InitializeParams {
-            client_info: ClientInfo {
+        let params = InitializeParams::new(
+            ClientInfo {
                 name: self.config.client_name.clone(),
                 version: self.config.client_version.clone(),
             },
-            client_capabilities: ClientCapabilities {
+            ClientCapabilities {
                 fs: FsCapabilities {
                     read_text_file: true,
                     write_text_file: true,
                 },
                 terminal: true,
             },
-        };
+        );
         let result = self
             .request_timeout("initialize", Some(serde_json::to_value(params)?))
             .await?;
         *self.agent_capabilities.write().await = result.get("agentCapabilities").cloned();
-        info!("ACP initialize complete");
+
+        // Cache advertised auth methods (e.g. cached_token, grok.com).
+        let methods = result
+            .get("authMethods")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|m| m.get("id").and_then(|id| id.as_str()).map(str::to_string))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        info!(?methods, "ACP initialize complete");
+        *self.auth_methods.write().await = methods;
         Ok(())
     }
 
+    fn pick_auth_method(&self, advertised: &[String]) -> String {
+        // Prefer cached CLI login, then first advertised method.
+        const PREFERRED: &[&str] = &["cached_token", "grok.com", "xai.api_key"];
+        if advertised.is_empty() {
+            return self.config.auth_method_id.clone();
+        }
+        for p in PREFERRED {
+            if advertised.iter().any(|m| m == *p) {
+                return (*p).to_string();
+            }
+        }
+        advertised
+            .first()
+            .cloned()
+            .unwrap_or_else(|| self.config.auth_method_id.clone())
+    }
+
     async fn authenticate(&self) -> Result<()> {
+        let advertised = self.auth_methods.read().await.clone();
+        let method_id = self.pick_auth_method(&advertised);
+        info!(%method_id, "ACP authenticate");
+
         let params = AuthenticateParams {
-            method_id: self.config.auth_method_id.clone(),
-            meta: Some(json!({ "headless": false })),
+            method_id: method_id.clone(),
+            meta: Some(json!({ "headless": true })),
         };
         match self
             .request_timeout("authenticate", Some(serde_json::to_value(params)?))
             .await
         {
             Ok(_) => {
-                info!("ACP authenticate complete");
+                info!(%method_id, "ACP authenticate complete");
                 Ok(())
             }
             Err(AcpError::Rpc { code, message }) => {
-                // Some agents skip auth or use different method IDs
+                // Retry alternate advertised methods once.
+                for alt in &advertised {
+                    if alt == &method_id {
+                        continue;
+                    }
+                    let params = AuthenticateParams {
+                        method_id: alt.clone(),
+                        meta: Some(json!({ "headless": true })),
+                    };
+                    match self
+                        .request_timeout("authenticate", Some(serde_json::to_value(params)?))
+                        .await
+                    {
+                        Ok(_) => {
+                            info!(method_id = %alt, "ACP authenticate complete (fallback)");
+                            return Ok(());
+                        }
+                        Err(AcpError::Rpc { code: c, message: m }) => {
+                            warn!(code = c, %m, method = %alt, "auth fallback failed");
+                        }
+                        Err(e) => return Err(e),
+                    }
+                }
                 warn!(code, %message, "authenticate returned RPC error; continuing");
                 Ok(())
             }
@@ -243,24 +303,40 @@ impl AcpClient {
     }
 
     async fn session_new(&self, opts: &SpawnOptions) -> Result<()> {
-        let mode = if opts.always_approve {
-            Some("always_approve".to_string())
-        } else if opts.plan_mode {
-            Some("plan".to_string())
-        } else {
-            None
-        };
+        // Start with minimal valid params; Grok rejects unknown fields/values.
+        let model = opts.model.clone().filter(|m| {
+            let t = m.trim();
+            !t.is_empty() && !t.eq_ignore_ascii_case("default") && !t.eq_ignore_ascii_case("mock")
+        });
 
-        let params = SessionNewParams {
-            cwd: self.config.cwd.display().to_string(),
-            mcp_servers: opts.mcp_servers.clone(),
-            rules: opts.rules.clone(),
-            model: opts.model.clone(),
-            mode,
+        // First attempt: cwd + mcpServers only (most compatible).
+        let mut params = json!({
+            "cwd": self.config.cwd.display().to_string(),
+            "mcpServers": opts.mcp_servers,
+        });
+        if let Some(ref m) = model {
+            params["model"] = json!(m);
+        }
+
+        let result = match self
+            .request_timeout("session/new", Some(params.clone()))
+            .await
+        {
+            Ok(r) => r,
+            Err(AcpError::Rpc { code, message }) if !opts.mcp_servers.is_empty() => {
+                // Retry without MCP if attach payload was invalid.
+                warn!(code, %message, "session/new with MCP failed; retrying without MCP");
+                let mut bare = json!({
+                    "cwd": self.config.cwd.display().to_string(),
+                    "mcpServers": [],
+                });
+                if let Some(ref m) = model {
+                    bare["model"] = json!(m);
+                }
+                self.request_timeout("session/new", Some(bare)).await?
+            }
+            Err(e) => return Err(e),
         };
-        let result = self
-            .request_timeout("session/new", Some(serde_json::to_value(params)?))
-            .await?;
 
         let sid = result
             .get("sessionId")
@@ -271,6 +347,13 @@ impl AcpClient {
 
         *self.session_id.write().await = Some(sid.clone());
         info!(%sid, "ACP session/new complete");
+
+        // Best-effort plan / always-approve mode after session exists.
+        if opts.always_approve {
+            let _ = self.set_mode("always_approve").await;
+        } else if opts.plan_mode {
+            let _ = self.set_mode("plan").await;
+        }
 
         if let Some(bus) = &self.event_bus {
             bus.emit_status(self.control_session_id, SessionStatus::Idle)
