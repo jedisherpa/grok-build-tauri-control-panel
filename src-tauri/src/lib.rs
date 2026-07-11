@@ -5,7 +5,7 @@ mod devserver;
 mod state;
 
 use tauri::{Emitter, Manager};
-use tracing::info;
+use tracing::{info, warn};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -22,6 +22,9 @@ pub fn run() {
             let app_handle = app.handle().clone();
             let state = tauri::async_runtime::block_on(AppState::initialize())?;
             let bus = state.event_bus.clone();
+            let bus_persist = state.event_bus.clone();
+            let persistence = state.persistence.clone();
+            let db_path = persistence.path().display().to_string();
             app.manage(state);
 
             // Forward backend events to the frontend
@@ -40,7 +43,23 @@ pub fn run() {
                 }
             });
 
-            info!("Grok Build Control Panel backend ready");
+            // Durable thread memory — survive reboot / app updates
+            tauri::async_runtime::spawn(async move {
+                let mut rx = bus_persist.subscribe();
+                loop {
+                    match rx.recv().await {
+                        Ok(ev) => {
+                            commands::persist_control_event(&persistence, &ev);
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            warn!(n, "persistence event bus lagged");
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
+
+            info!(db = %db_path, "Bomb Code backend ready (SQLite thread memory)");
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -64,7 +83,9 @@ pub fn run() {
             commands::start_session,
             commands::start_mock_session,
             commands::list_sessions,
+            commands::list_threads,
             commands::get_session,
+            commands::get_session_transcript,
             commands::send_prompt,
             commands::cancel_session,
             commands::remove_session,

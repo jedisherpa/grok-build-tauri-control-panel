@@ -1,6 +1,10 @@
-//! SQLite-backed session persistence for crash recovery.
+//! SQLite-backed session + transcript memory for Bomb Code.
+//!
+//! Survives app quit, reboot, and updates under:
+//! `~/.grok/control-panel/sessions/control_panel.db`
 
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection};
@@ -24,6 +28,7 @@ pub enum PersistenceError {
 pub type Result<T> = std::result::Result<T, PersistenceError>;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SessionRecord {
     pub id: Uuid,
     pub cwd: String,
@@ -35,6 +40,9 @@ pub struct SessionRecord {
     pub metadata_json: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    /// Populated by list queries (not stored as column — computed).
+    #[serde(default)]
+    pub message_count: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,8 +54,39 @@ pub struct TranscriptChunk {
     pub at: DateTime<Utc>,
 }
 
+/// Frontend-friendly transcript row.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TranscriptEntry {
+    pub role: String,
+    pub body: String,
+    pub at: String,
+    pub seq: u64,
+}
+
+/// Thread list row (live or restored from disk).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadDto {
+    pub id: String,
+    pub cwd: String,
+    pub mode: String,
+    pub model: String,
+    pub status: String,
+    /// True when an ACP/headless process is currently attached in this process.
+    pub live: bool,
+    pub message_count: u64,
+    pub created_at: String,
+    pub updated_at: String,
+    pub worktree: Option<String>,
+    pub mcp_servers: Vec<String>,
+    pub label: Option<String>,
+}
+
 pub struct Persistence {
     path: PathBuf,
+    /// Serialize writes — multiple event-loop tasks may append concurrently.
+    write_lock: Mutex<()>,
 }
 
 impl Persistence {
@@ -56,13 +95,24 @@ impl Persistence {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let db = Self { path };
+        let db = Self {
+            path,
+            write_lock: Mutex::new(()),
+        };
         db.migrate()?;
+        info!(path = %db.path.display(), "session memory database open");
         Ok(db)
     }
 
     fn conn(&self) -> Result<Connection> {
-        Ok(Connection::open(&self.path)?)
+        let conn = Connection::open(&self.path)?;
+        // Reasonable durability for a desktop app.
+        let _ = conn.execute_batch(
+            "PRAGMA journal_mode=WAL;
+             PRAGMA synchronous=NORMAL;
+             PRAGMA foreign_keys=ON;",
+        );
+        Ok(conn)
     }
 
     fn migrate(&self) -> Result<()> {
@@ -87,8 +137,13 @@ impl Persistence {
                 kind TEXT NOT NULL,
                 payload TEXT NOT NULL,
                 at TEXT NOT NULL,
-                PRIMARY KEY (session_id, seq)
+                PRIMARY KEY (session_id, seq),
+                FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
             );
+            CREATE INDEX IF NOT EXISTS idx_transcripts_session_seq
+                ON transcripts(session_id, seq);
+            CREATE INDEX IF NOT EXISTS idx_sessions_updated
+                ON sessions(updated_at DESC);
             CREATE TABLE IF NOT EXISTS kv (
                 key TEXT PRIMARY KEY,
                 value TEXT NOT NULL
@@ -98,7 +153,12 @@ impl Persistence {
         Ok(())
     }
 
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     pub fn upsert_session(&self, rec: &SessionRecord) -> Result<()> {
+        let _g = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
         let conn = self.conn()?;
         conn.execute(
             r#"
@@ -130,10 +190,30 @@ impl Persistence {
         Ok(())
     }
 
+    /// Update status + touch updated_at without rewriting full metadata.
+    pub fn update_session_status(&self, id: Uuid, status: &str) -> Result<()> {
+        let _g = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let conn = self.conn()?;
+        let n = conn.execute(
+            "UPDATE sessions SET status=?1, updated_at=?2 WHERE id=?3",
+            params![status, Utc::now().to_rfc3339(), id.to_string()],
+        )?;
+        if n == 0 {
+            return Err(PersistenceError::NotFound(id.to_string()));
+        }
+        Ok(())
+    }
+
     pub fn list_sessions(&self) -> Result<Vec<SessionRecord>> {
         let conn = self.conn()?;
         let mut stmt = conn.prepare(
-            "SELECT id, cwd, mode, model, status, worktree, acp_session_id, metadata_json, created_at, updated_at FROM sessions ORDER BY updated_at DESC",
+            r#"
+            SELECT s.id, s.cwd, s.mode, s.model, s.status, s.worktree, s.acp_session_id,
+                   s.metadata_json, s.created_at, s.updated_at,
+                   (SELECT COUNT(*) FROM transcripts t WHERE t.session_id = s.id) AS msg_count
+            FROM sessions s
+            ORDER BY s.updated_at DESC
+            "#,
         )?;
         let rows = stmt.query_map([], |row| {
             Ok(SessionRecord {
@@ -147,6 +227,7 @@ impl Persistence {
                 metadata_json: row.get(7)?,
                 created_at: parse_dt(&row.get::<_, String>(8)?),
                 updated_at: parse_dt(&row.get::<_, String>(9)?),
+                message_count: row.get::<_, i64>(10)? as u64,
             })
         })?;
         let mut out = Vec::new();
@@ -159,7 +240,12 @@ impl Persistence {
     pub fn get_session(&self, id: Uuid) -> Result<SessionRecord> {
         let conn = self.conn()?;
         conn.query_row(
-            "SELECT id, cwd, mode, model, status, worktree, acp_session_id, metadata_json, created_at, updated_at FROM sessions WHERE id=?1",
+            r#"
+            SELECT id, cwd, mode, model, status, worktree, acp_session_id, metadata_json,
+                   created_at, updated_at,
+                   (SELECT COUNT(*) FROM transcripts t WHERE t.session_id = sessions.id)
+            FROM sessions WHERE id=?1
+            "#,
             params![id.to_string()],
             |row| {
                 Ok(SessionRecord {
@@ -173,6 +259,7 @@ impl Persistence {
                     metadata_json: row.get(7)?,
                     created_at: parse_dt(&row.get::<_, String>(8)?),
                     updated_at: parse_dt(&row.get::<_, String>(9)?),
+                    message_count: row.get::<_, i64>(10)? as u64,
                 })
             },
         )
@@ -180,17 +267,46 @@ impl Persistence {
     }
 
     pub fn delete_session(&self, id: Uuid) -> Result<()> {
+        let _g = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
         let conn = self.conn()?;
-        conn.execute("DELETE FROM sessions WHERE id=?1", params![id.to_string()])?;
         conn.execute(
             "DELETE FROM transcripts WHERE session_id=?1",
             params![id.to_string()],
         )?;
+        conn.execute("DELETE FROM sessions WHERE id=?1", params![id.to_string()])?;
         Ok(())
     }
 
-    pub fn append_transcript(&self, chunk: &TranscriptChunk) -> Result<()> {
+    pub fn next_seq(&self, session_id: Uuid) -> Result<u64> {
         let conn = self.conn()?;
+        let max: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(seq), 0) FROM transcripts WHERE session_id=?1",
+            params![session_id.to_string()],
+            |r| r.get(0),
+        )?;
+        Ok((max as u64).saturating_add(1))
+    }
+
+    pub fn append_transcript(&self, chunk: &TranscriptChunk) -> Result<()> {
+        let _g = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let conn = self.conn()?;
+        // Ensure parent session row exists so we never orphan history.
+        let exists: i64 = conn.query_row(
+            "SELECT COUNT(1) FROM sessions WHERE id=?1",
+            params![chunk.session_id.to_string()],
+            |r| r.get(0),
+        )?;
+        if exists == 0 {
+            let now = Utc::now().to_rfc3339();
+            conn.execute(
+                r#"
+                INSERT OR IGNORE INTO sessions
+                  (id, cwd, mode, model, status, worktree, acp_session_id, metadata_json, created_at, updated_at)
+                VALUES (?1, '', 'acp', '', 'unknown', NULL, NULL, '{}', ?2, ?2)
+                "#,
+                params![chunk.session_id.to_string(), now],
+            )?;
+        }
         conn.execute(
             "INSERT OR REPLACE INTO transcripts (session_id, seq, kind, payload, at) VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
@@ -201,7 +317,31 @@ impl Persistence {
                 chunk.at.to_rfc3339(),
             ],
         )?;
+        // Touch session
+        let _ = conn.execute(
+            "UPDATE sessions SET updated_at=?1 WHERE id=?2",
+            params![Utc::now().to_rfc3339(), chunk.session_id.to_string()],
+        );
         Ok(())
+    }
+
+    /// Append a transcript line with auto-incrementing seq.
+    pub fn append_message(
+        &self,
+        session_id: Uuid,
+        kind: &str,
+        payload: impl Into<String>,
+        at: DateTime<Utc>,
+    ) -> Result<u64> {
+        let seq = self.next_seq(session_id)?;
+        self.append_transcript(&TranscriptChunk {
+            session_id,
+            seq,
+            kind: kind.to_string(),
+            payload: payload.into(),
+            at,
+        })?;
+        Ok(seq)
     }
 
     pub fn transcripts(&self, session_id: Uuid) -> Result<Vec<TranscriptChunk>> {
@@ -211,7 +351,8 @@ impl Persistence {
         )?;
         let rows = stmt.query_map(params![session_id.to_string()], |row| {
             Ok(TranscriptChunk {
-                session_id: Uuid::parse_str(&row.get::<_, String>(0)?).unwrap_or_else(|_| Uuid::nil()),
+                session_id: Uuid::parse_str(&row.get::<_, String>(0)?)
+                    .unwrap_or_else(|_| Uuid::nil()),
                 seq: row.get::<_, i64>(1)? as u64,
                 kind: row.get(2)?,
                 payload: row.get(3)?,
@@ -225,6 +366,19 @@ impl Persistence {
         Ok(out)
     }
 
+    pub fn transcript_entries(&self, session_id: Uuid) -> Result<Vec<TranscriptEntry>> {
+        let chunks = self.transcripts(session_id)?;
+        Ok(chunks
+            .into_iter()
+            .map(|c| TranscriptEntry {
+                role: kind_to_role(&c.kind),
+                body: c.payload,
+                at: c.at.to_rfc3339(),
+                seq: c.seq,
+            })
+            .collect())
+    }
+
     pub fn export_markdown(&self, session_id: Uuid) -> Result<String> {
         let session = self.get_session(session_id)?;
         let chunks = self.transcripts(session_id)?;
@@ -233,12 +387,16 @@ impl Persistence {
             session.id, session.cwd, session.mode, session.model, session.status
         );
         for c in chunks {
-            md.push_str(&format!("### [{}] {}\n\n```\n{}\n```\n\n", c.at, c.kind, c.payload));
+            md.push_str(&format!(
+                "### [{}] {}\n\n```\n{}\n```\n\n",
+                c.at, c.kind, c.payload
+            ));
         }
         Ok(md)
     }
 
     pub fn set_kv(&self, key: &str, value: &str) -> Result<()> {
+        let _g = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
         let conn = self.conn()?;
         conn.execute(
             "INSERT INTO kv (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
@@ -258,14 +416,27 @@ impl Persistence {
         }
     }
 
-    pub fn path(&self) -> &Path {
-        &self.path
-    }
-
     pub fn checkpoint(&self) -> Result<()> {
         info!(path = %self.path.display(), "persistence checkpoint");
         self.set_kv("last_checkpoint", &Utc::now().to_rfc3339())?;
+        // Truncate WAL for a clean snapshot on disk.
+        if let Ok(conn) = self.conn() {
+            let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+        }
         Ok(())
+    }
+
+}
+
+fn kind_to_role(kind: &str) -> String {
+    match kind {
+        "prompt" | "user" => "user".into(),
+        "agent" | "message" | "assistant" => "agent".into(),
+        "thought" => "thought".into(),
+        "tool" | "tool_call" => "tool".into(),
+        "plan" => "plan".into(),
+        "error" => "error".into(),
+        _ => "system".into(),
     }
 }
 
@@ -281,34 +452,67 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
-    fn session_roundtrip() {
+    fn session_and_transcript_roundtrip() {
         let dir = tempdir().unwrap();
         let db = Persistence::open(dir.path().join("t.db")).unwrap();
         let id = Uuid::new_v4();
         let rec = SessionRecord {
             id,
-            cwd: "/tmp".into(),
+            cwd: "/tmp/proj".into(),
             mode: "acp".into(),
-            model: "grok".into(),
+            model: "grok-4".into(),
             status: "idle".into(),
             worktree: None,
             acp_session_id: Some("s1".into()),
             metadata_json: "{}".into(),
             created_at: Utc::now(),
             updated_at: Utc::now(),
+            message_count: 0,
         };
         db.upsert_session(&rec).unwrap();
-        db.append_transcript(&TranscriptChunk {
-            session_id: id,
-            seq: 1,
-            kind: "message".into(),
-            payload: "hello".into(),
-            at: Utc::now(),
-        })
-        .unwrap();
+        db.append_message(id, "prompt", "hello world", Utc::now())
+            .unwrap();
+        db.append_message(id, "agent", "hi back", Utc::now()).unwrap();
         let loaded = db.get_session(id).unwrap();
-        assert_eq!(loaded.cwd, "/tmp");
-        let md = db.export_markdown(id).unwrap();
-        assert!(md.contains("hello"));
+        assert_eq!(loaded.cwd, "/tmp/proj");
+        assert_eq!(loaded.message_count, 2);
+        let entries = db.transcript_entries(id).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].role, "user");
+        assert_eq!(entries[1].role, "agent");
+        let list = db.list_sessions().unwrap();
+        assert_eq!(list[0].message_count, 2);
+    }
+
+    #[test]
+    fn survives_reopen() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("mem.db");
+        let id = Uuid::new_v4();
+        {
+            let db = Persistence::open(&path).unwrap();
+            db.upsert_session(&SessionRecord {
+                id,
+                cwd: "/Users/me/app".into(),
+                mode: "acp".into(),
+                model: "grok".into(),
+                status: "idle".into(),
+                worktree: None,
+                acp_session_id: None,
+                metadata_json: "{}".into(),
+                created_at: Utc::now(),
+                updated_at: Utc::now(),
+                message_count: 0,
+            })
+            .unwrap();
+            db.append_message(id, "prompt", "build a game", Utc::now())
+                .unwrap();
+            db.append_message(id, "agent", "sure, starting…", Utc::now())
+                .unwrap();
+        }
+        let db2 = Persistence::open(&path).unwrap();
+        let entries = db2.transcript_entries(id).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert!(entries[1].body.contains("starting"));
     }
 }

@@ -17,7 +17,8 @@ use grok_mcp::{
 };
 use grok_memory::MemoryEntry;
 use grok_permissions::{builtin_presets, PermissionController, PermissionDecision, PermissionPreset};
-use grok_persistence::SessionRecord;
+use grok_events::ControlEvent;
+use grok_persistence::{SessionRecord, ThreadDto, TranscriptEntry};
 use grok_scheduler::{ScheduleKind, ScheduledJob};
 use grok_worktree::{CreateWorktreeRequest, WorktreeInfo};
 
@@ -289,10 +290,11 @@ fn sanitize_folder_name(name: &str) -> Result<String, String> {
     for c in trimmed.chars() {
         if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
             out.push(c.to_ascii_lowercase());
-        } else if c.is_whitespace() || c == '/' || c == '\\' {
-            if !out.ends_with('-') && !out.is_empty() {
-                out.push('-');
-            }
+        } else if (c.is_whitespace() || c == '/' || c == '\\')
+            && !out.ends_with('-')
+            && !out.is_empty()
+        {
+            out.push('-');
         }
         // drop other punctuation
     }
@@ -387,6 +389,12 @@ pub async fn list_sessions(
     Ok(state.registry.list_sessions())
 }
 
+/// Live + SQLite-restored threads for the UI thread list.
+#[tauri::command]
+pub async fn list_threads(state: State<'_, AppState>) -> Result<Vec<ThreadDto>, String> {
+    Ok(build_thread_list(&state))
+}
+
 #[tauri::command]
 pub async fn get_session(
     state: State<'_, AppState>,
@@ -394,6 +402,16 @@ pub async fn get_session(
 ) -> Result<AgentHandleSnapshot, String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
     state.registry.get_snapshot(id).map_err(err)
+}
+
+/// Load transcript history from SQLite (works for live and restored threads).
+#[tauri::command]
+pub async fn get_session_transcript(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Vec<TranscriptEntry>, String> {
+    let id = Uuid::parse_str(&id).map_err(err)?;
+    state.persistence.transcript_entries(id).map_err(err)
 }
 
 #[tauri::command]
@@ -404,27 +422,28 @@ pub async fn send_prompt(
 ) -> Result<(), String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
     state.registry.send_prompt(id, &prompt).await.map_err(err)?;
-    let _ = state.persistence.append_transcript(&grok_persistence::TranscriptChunk {
-        session_id: id,
-        seq: Utc::now().timestamp_millis() as u64,
-        kind: "prompt".into(),
-        payload: prompt,
-        at: Utc::now(),
-    });
+    // User message — durable immediately (agent side streams via event bus).
+    let _ = state
+        .persistence
+        .append_message(id, "prompt", prompt, Utc::now());
+    persist_session(&state, id).await;
     Ok(())
 }
 
 #[tauri::command]
 pub async fn cancel_session(state: State<'_, AppState>, id: String) -> Result<(), String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
-    state.registry.cancel_session(id).await.map_err(err)
+    state.registry.cancel_session(id).await.map_err(err)?;
+    persist_session(&state, id).await;
+    Ok(())
 }
 
 #[tauri::command]
 pub async fn remove_session(state: State<'_, AppState>, id: String) -> Result<(), String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
-    state.registry.remove_session(id).await.map_err(err)?;
-    let _ = state.persistence.delete_session(id);
+    // Live handle may be gone after reboot — still wipe SQLite memory.
+    let _ = state.registry.remove_session(id).await;
+    state.persistence.delete_session(id).map_err(err)?;
     Ok(())
 }
 
@@ -910,8 +929,177 @@ async fn persist_session(state: &AppState, id: Uuid) {
             metadata_json,
             created_at: snap.metadata.created_at,
             updated_at: Utc::now(),
+            message_count: 0,
         };
         let _ = state.persistence.upsert_session(&rec);
+    }
+}
+
+fn build_thread_list(state: &AppState) -> Vec<ThreadDto> {
+    let live = state.registry.list_sessions();
+    let mut live_ids = std::collections::HashSet::new();
+    let mut out: Vec<ThreadDto> = Vec::new();
+
+    for m in live {
+        live_ids.insert(m.id);
+        let mode = match m.mode {
+            grok_control_core::AgentMode::Acp => "acp",
+            grok_control_core::AgentMode::Headless => "headless",
+        };
+        let status = format!("{:?}", m.status).to_lowercase();
+        let msg_count = state
+            .persistence
+            .get_session(m.id)
+            .map(|r| r.message_count)
+            .unwrap_or(0);
+        out.push(ThreadDto {
+            id: m.id.to_string(),
+            cwd: m.cwd,
+            mode: mode.into(),
+            model: m.model,
+            status,
+            live: true,
+            message_count: msg_count,
+            created_at: m.created_at.to_rfc3339(),
+            updated_at: m.last_activity.to_rfc3339(),
+            worktree: m.worktree,
+            mcp_servers: m.mcp_servers,
+            label: m.label,
+        });
+    }
+
+    if let Ok(saved) = state.persistence.list_sessions() {
+        for rec in saved {
+            if live_ids.contains(&rec.id) {
+                continue;
+            }
+            // After reboot ACP is gone — never show stale "running".
+            let status = match rec.status.to_lowercase().as_str() {
+                "running" | "starting" | "cancelling" | "waitingapproval" => "saved".into(),
+                other => other.to_string(),
+            };
+            let mcp = extract_mcp_from_meta(&rec.metadata_json);
+            out.push(ThreadDto {
+                id: rec.id.to_string(),
+                cwd: rec.cwd,
+                mode: rec.mode,
+                model: rec.model,
+                status,
+                live: false,
+                message_count: rec.message_count,
+                created_at: rec.created_at.to_rfc3339(),
+                updated_at: rec.updated_at.to_rfc3339(),
+                worktree: rec.worktree,
+                mcp_servers: mcp,
+                label: None,
+            });
+        }
+    }
+
+    out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+    out
+}
+
+fn extract_mcp_from_meta(json: &str) -> Vec<String> {
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|v| {
+            v.pointer("/metadata/mcpServers")
+                .or_else(|| v.pointer("/metadata/mcp_servers"))
+                .cloned()
+        })
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default()
+}
+
+/// Called from the event-bus persistence task (best-effort, never panics).
+pub fn persist_control_event(db: &grok_persistence::Persistence, ev: &ControlEvent) {
+    use ControlEvent::*;
+    let res: Result<(), grok_persistence::PersistenceError> = (|| match ev {
+        AgentMessage {
+            session_id,
+            text,
+            at,
+        } => {
+            if text.trim().is_empty() {
+                return Ok(());
+            }
+            let lower = text.to_lowercase();
+            if lower.starts_with("prompt sent") || lower == "turn complete" {
+                return Ok(());
+            }
+            let kind = if text.starts_with('💭') {
+                "thought"
+            } else {
+                "agent"
+            };
+            let body = text.strip_prefix('💭').unwrap_or(text).trim_start();
+            db.append_message(*session_id, kind, body, *at).map(|_| ())
+        }
+        ToolCall { session_id, event } => {
+            let payload = serde_json::json!({
+                "id": event.id,
+                "tool": event.tool,
+                "status": event.status,
+                "args": event.args_summary,
+                "result": event.result_summary,
+            })
+            .to_string();
+            db.append_message(*session_id, "tool", payload, event.at)
+                .map(|_| ())?;
+            let _ = db.update_session_status(*session_id, "running");
+            Ok(())
+        }
+        PlanUpdate { session_id, event } => {
+            let payload = serde_json::to_string(event).unwrap_or_else(|_| "{}".into());
+            db.append_message(*session_id, "plan", payload, event.at)
+                .map(|_| ())
+        }
+        SessionStatusChanged {
+            session_id, status, ..
+        } => {
+            let s = format!("{status:?}").to_lowercase();
+            db.update_session_status(*session_id, &s)
+        }
+        SessionCancelled { session_id, at } => {
+            let _ = db.update_session_status(*session_id, "cancelled");
+            db.append_message(*session_id, "system", "session cancelled", *at)
+                .map(|_| ())
+        }
+        SessionCompleted { session_id, at } => {
+            let _ = db.update_session_status(*session_id, "completed");
+            db.append_message(*session_id, "system", "session completed", *at)
+                .map(|_| ())
+        }
+        ApprovalRequired {
+            session_id,
+            tool,
+            summary,
+            at,
+            ..
+        } => {
+            let _ = db.update_session_status(*session_id, "waitingapproval");
+            db.append_message(
+                *session_id,
+                "system",
+                format!("approval required: {tool} — {summary}"),
+                *at,
+            )
+            .map(|_| ())
+        }
+        Error {
+            session_id: Some(session_id),
+            message,
+            at,
+        } => {
+            let _ = db.update_session_status(*session_id, "failed");
+            db.append_message(*session_id, "error", message.clone(), *at)
+                .map(|_| ())
+        }
+        _ => Ok(()),
+    })();
+    if let Err(e) = res {
+        tracing::debug!(error = %e, "persist_control_event skipped/failed");
     }
 }
 

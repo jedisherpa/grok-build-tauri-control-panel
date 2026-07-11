@@ -16,6 +16,7 @@ const state = {
   loggingIn: false,
   devServer: null,
   transcriptBySession: new Map(), // id -> [{role, body, at}]
+  transcriptLoaded: new Set(), // ids hydrated from SQLite
   /** Factual turn state — drives the dock (not fluff). */
   turn: emptyTurn(),
   phraseTimer: null,
@@ -671,7 +672,9 @@ function renderThreads() {
     return;
   }
   const sorted = [...state.sessions].sort((a, b) =>
-    String(b.createdAt || b.created_at || "").localeCompare(String(a.createdAt || a.created_at || ""))
+    String(b.updatedAt || b.updated_at || b.createdAt || b.created_at || "").localeCompare(
+      String(a.updatedAt || a.updated_at || a.createdAt || a.created_at || "")
+    )
   );
   root.innerHTML = sorted
     .map((s) => {
@@ -680,6 +683,7 @@ function renderThreads() {
       const mode = String(s.mode || "acp").toLowerCase();
       const model = s.model || "";
       const isMock = model === "mock";
+      const live = s.live !== false && !status.includes("saved");
       const selected = id === state.selectedSession ? "selected" : "";
       const badgeCls = isMock
         ? "mock"
@@ -687,14 +691,22 @@ function renderThreads() {
           ? "running"
           : status.includes("fail") || status.includes("cancel")
             ? "failed"
-            : "idle";
+            : status.includes("saved")
+              ? "saved"
+              : "idle";
       const bombMood = isMock ? "idle" : moodFromStatus(status);
       const cwd = s.cwd || "";
       const shortCwd = cwd.length > 28 ? "…" + cwd.slice(-27) : cwd;
-      return `<div class="thread-item ${selected}" data-id="${escapeHtml(id)}">
+      const msgs = s.messageCount ?? s.message_count ?? 0;
+      const liveTag = live
+        ? ""
+        : `<span class="badge saved" title="Restored from disk">saved</span>`;
+      return `<div class="thread-item ${selected}${live ? "" : " restored"}" data-id="${escapeHtml(id)}">
   <div class="name">${bombHtml(bombMood, "xs")} ${escapeHtml(mode)} · ${escapeHtml(shortId(id))}</div>
   <div class="meta"><span class="badge ${badgeCls}">${bombHtml(bombMood, "xs")}${escapeHtml(status)}</span>
-  <span>${escapeHtml(isMock ? "mock" : model || "—")}</span></div>
+  ${liveTag}
+  <span>${escapeHtml(isMock ? "mock" : model || "—")}</span>
+  ${msgs ? `<span class="muted">${msgs} msg</span>` : ""}</div>
   <div class="meta">${escapeHtml(shortCwd)}</div>
 </div>`;
     })
@@ -708,11 +720,12 @@ function renderThreads() {
 
 function renderAgents() {
   const root = $("agent-list");
-  if (!state.sessions.length) {
-    root.innerHTML = `<div class="empty-hint">No active agents</div>`;
+  const live = state.sessions.filter((s) => s.live !== false && !String(s.status || "").includes("saved"));
+  if (!live.length) {
+    root.innerHTML = `<div class="empty-hint">No live agents · saved threads stay in Threads</div>`;
     return;
   }
-  root.innerHTML = state.sessions
+  root.innerHTML = live
     .map((s) => {
       const status = String(s.status || "?").toLowerCase();
       const badgeCls = status.includes("run")
@@ -764,12 +777,63 @@ function renderTools() {
     .join("");
 }
 
-function selectSession(id) {
+async function selectSession(id) {
   state.selectedSession = id;
   renderThreads();
-  renderTranscript();
   const sess = state.sessions.find((s) => s.id === id);
-  if (sess?.cwd && !$("cwd").value) $("cwd").value = sess.cwd;
+  if (sess?.cwd) $("cwd").value = sess.cwd;
+  // Hydrate transcript from SQLite once (reboot / update memory).
+  await loadTranscriptFromDb(id);
+  renderTranscript();
+}
+
+/** Load durable thread history from ~/.grok/control-panel/sessions/control_panel.db */
+async function loadTranscriptFromDb(id, { force = false } = {}) {
+  if (!id) return;
+  if (!force && state.transcriptLoaded.has(id)) return;
+  try {
+    const rows = await invoke("get_session_transcript", { id });
+    if (!Array.isArray(rows)) {
+      state.transcriptLoaded.add(id);
+      return;
+    }
+    const existing = getTranscript(id);
+    // Prefer live in-memory if it already has more messages (active stream).
+    if (!force && existing.length > rows.length) {
+      state.transcriptLoaded.add(id);
+      return;
+    }
+    const mapped = rows.map((r) => ({
+      role: r.role || "system",
+      body: formatStoredBody(r.role, r.body),
+      at: r.at || "",
+      streaming: false,
+    }));
+    state.transcriptBySession.set(id, mapped);
+    state.transcriptLoaded.add(id);
+  } catch (e) {
+    // Older builds / empty DB — ignore
+    state.transcriptLoaded.add(id);
+  }
+}
+
+function formatStoredBody(role, body) {
+  if (role !== "tool" && role !== "plan") return body == null ? "" : String(body);
+  try {
+    const j = JSON.parse(body);
+    if (role === "tool") {
+      return `${j.tool || "tool"} [${j.status || ""}]\n${j.args || j.result || ""}`.trim();
+    }
+    if (role === "plan") {
+      const steps = (j.steps || [])
+        .map((s) => `  - [${s.status || "pending"}] ${s.description || s.id || ""}`)
+        .join("\n");
+      return `${j.title || "plan"} (${j.status || ""})\n${steps}`.trim();
+    }
+  } catch (_) {
+    /* plain text */
+  }
+  return body == null ? "" : String(body);
 }
 
 // ── Live events from backend ────────────────────────────────────────────
@@ -1170,7 +1234,13 @@ async function logoutGrok() {
 
 async function refreshSessions() {
   try {
-    const list = await invoke("list_sessions");
+    // Prefer list_threads (live + SQLite). Fall back to live-only list_sessions.
+    let list;
+    try {
+      list = await invoke("list_threads");
+    } catch (_) {
+      list = await invoke("list_sessions");
+    }
     state.sessions = Array.isArray(list) ? list : [];
     renderThreads();
     renderAgents();
@@ -1179,6 +1249,9 @@ async function refreshSessions() {
     }
     if (!state.selectedSession && state.sessions.length) {
       state.selectedSession = state.sessions[0].id;
+    }
+    if (state.selectedSession) {
+      await loadTranscriptFromDb(state.selectedSession);
     }
     renderTranscript();
   } catch (e) {
@@ -1798,6 +1871,16 @@ async function boot() {
     await refreshDevStatus();
     noteTurn("idle");
     pushEvent("Bomb Code ready", "ok", "boom", { force: true });
+    if (state.sessions.length) {
+      const saved = state.sessions.filter((s) => s.live === false || String(s.status).includes("saved")).length;
+      const live = state.sessions.length - saved;
+      pushEvent(
+        `memory · ${state.sessions.length} thread${state.sessions.length === 1 ? "" : "s"} (${live} live · ${saved} saved)`,
+        "ok",
+        "ready",
+        { force: true }
+      );
+    }
     if (state.auth && !state.auth.loggedIn) {
       pushEvent("Not signed in — Log in with Grok", "", "wait", { force: true });
     }

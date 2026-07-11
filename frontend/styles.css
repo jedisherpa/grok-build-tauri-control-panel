@@ -133,6 +133,11 @@ body {
 .badge.idle { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); }
 .badge.failed, .badge.cancelled { color: var(--err); border-color: color-mix(in srgb, var(--err) 40%, var(--border)); }
 .badge.mock { color: var(--warn); }
+.badge.saved {
+  color: var(--muted);
+  border-color: color-mix(in srgb, var(--muted) 35%, var(--border));
+}
+.thread-item.restored { opacity: 0.92; }
 
 .empty-hint { color: var(--dim); font-size: 12px; padding: 8px 6px; }
 
