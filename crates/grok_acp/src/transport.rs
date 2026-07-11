@@ -91,6 +91,17 @@ impl NdjsonTransport {
     }
 
     pub async fn request(&self, method: &str, params: Option<Value>) -> Result<Value> {
+        let rx = self.send_request(method, params).await?;
+        let resp = rx.await.map_err(|_| AcpError::ChannelClosed)?;
+        Self::unwrap_response(resp)
+    }
+
+    /// Send a request and return the oneshot receiver (caller applies timeout policy).
+    pub async fn send_request(
+        &self,
+        method: &str,
+        params: Option<Value>,
+    ) -> Result<oneshot::Receiver<JsonRpcResponse>> {
         let id = Uuid::new_v4().to_string();
         let req = JsonRpcRequest {
             jsonrpc: "2.0".into(),
@@ -111,8 +122,10 @@ impl NdjsonTransport {
             stdin.write_all(line.as_bytes()).await?;
             stdin.flush().await?;
         }
+        Ok(rx)
+    }
 
-        let resp = rx.await.map_err(|_| AcpError::ChannelClosed)?;
+    pub fn unwrap_response(resp: JsonRpcResponse) -> Result<Value> {
         if let Some(err) = resp.error {
             return Err(AcpError::Rpc {
                 code: err.code,
@@ -120,6 +133,21 @@ impl NdjsonTransport {
             });
         }
         Ok(resp.result.unwrap_or(Value::Null))
+    }
+
+    /// Wait for a pending response with an explicit timeout.
+    pub async fn request_with_timeout(
+        &self,
+        method: &str,
+        params: Option<Value>,
+        timeout: std::time::Duration,
+    ) -> Result<Value> {
+        let rx = self.send_request(method, params).await?;
+        let resp = tokio::time::timeout(timeout, rx)
+            .await
+            .map_err(|_| AcpError::Timeout(method.to_string()))?
+            .map_err(|_| AcpError::ChannelClosed)?;
+        Self::unwrap_response(resp)
     }
 
     pub async fn notify(&self, method: &str, params: Option<Value>) -> Result<()> {

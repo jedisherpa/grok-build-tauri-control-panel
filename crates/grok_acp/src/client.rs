@@ -55,7 +55,10 @@ pub struct AcpClientConfig {
     pub cwd: PathBuf,
     pub client_name: String,
     pub client_version: String,
+    /// Timeout for short control RPCs (initialize, auth, session/new, cancel).
     pub request_timeout: Duration,
+    /// Max wait for a full agent turn on session/prompt (long coding jobs).
+    pub prompt_timeout: Duration,
     /// Preferred auth method; may be overridden by agent-advertised methods.
     pub auth_method_id: String,
 }
@@ -68,6 +71,8 @@ impl AcpClientConfig {
             client_name: "BombCode".into(),
             client_version: env!("CARGO_PKG_VERSION").into(),
             request_timeout: Duration::from_secs(120),
+            // Long agent turns stream via notifications; still cap runaway jobs.
+            prompt_timeout: Duration::from_secs(60 * 60 * 2), // 2 hours
             // Grok Build advertises cached_token + grok.com (not xai.api_key).
             auth_method_id: "cached_token".into(),
         }
@@ -197,10 +202,9 @@ impl AcpClient {
 
     async fn request_timeout(&self, method: &str, params: Option<Value>) -> Result<Value> {
         let transport = self.transport().await?;
-        let timeout = self.config.request_timeout;
-        tokio::time::timeout(timeout, transport.request(method, params))
+        transport
+            .request_with_timeout(method, params, self.config.request_timeout)
             .await
-            .map_err(|_| AcpError::Timeout(method.to_string()))?
     }
 
     async fn initialize(&self) -> Result<()> {
@@ -383,7 +387,7 @@ impl AcpClient {
                 .await;
             bus.emit(ControlEvent::AgentMessage {
                 session_id: self.control_session_id,
-                text: format!("[local] received prompt ({} chars)", prompt.len()),
+                text: format!("prompt sent ({} chars) — generating…", prompt.len()),
                 at: Utc::now(),
             });
         }
@@ -391,6 +395,11 @@ impl AcpClient {
         // Mock clients: no transport — accept and return.
         if self.transport.read().await.is_none() {
             if let Some(bus) = &self.event_bus {
+                bus.emit(ControlEvent::AgentMessage {
+                    session_id: self.control_session_id,
+                    text: format!("[local/mock] received prompt ({} chars)", prompt.len()),
+                    at: Utc::now(),
+                });
                 bus.emit_status(self.control_session_id, SessionStatus::Idle)
                     .await;
             }
@@ -404,9 +413,72 @@ impl AcpClient {
                 text: prompt.to_string(),
             }],
         };
+        let params_val = serde_json::to_value(params)?;
+        let transport = self.transport().await?;
 
-        self.request_timeout("session/prompt", Some(serde_json::to_value(params)?))
+        // Fire the RPC immediately; do not block the UI on the full agent turn.
+        // Grok streams work via notifications while session/prompt stays open.
+        let rx = transport
+            .send_request("session/prompt", Some(params_val))
             .await?;
+
+        let bus = self.event_bus.clone();
+        let control_id = self.control_session_id;
+        let prompt_timeout = self.config.prompt_timeout;
+
+        tokio::spawn(async move {
+            match tokio::time::timeout(prompt_timeout, rx).await {
+                Ok(Ok(resp)) => match NdjsonTransport::unwrap_response(resp) {
+                    Ok(_) => {
+                        info!("session/prompt completed");
+                        if let Some(bus) = bus {
+                            bus.emit_status(control_id, SessionStatus::Idle).await;
+                            bus.emit(ControlEvent::AgentMessage {
+                                session_id: control_id,
+                                text: "turn complete".into(),
+                                at: Utc::now(),
+                            });
+                        }
+                    }
+                    Err(e) => {
+                        warn!(error = %e, "session/prompt RPC error");
+                        if let Some(bus) = bus {
+                            bus.emit_error(Some(control_id), format!("acp error: {e}"));
+                            bus.emit_status(control_id, SessionStatus::Failed).await;
+                        }
+                    }
+                },
+                Ok(Err(_)) => {
+                    warn!("session/prompt response channel closed");
+                    if let Some(bus) = bus {
+                        bus.emit_error(
+                            Some(control_id),
+                            "acp error: prompt response channel closed",
+                        );
+                        bus.emit_status(control_id, SessionStatus::Failed).await;
+                    }
+                }
+                Err(_) => {
+                    // Soft timeout: agent may still be running; keep session Running.
+                    warn!(
+                        timeout_secs = prompt_timeout.as_secs(),
+                        "session/prompt still open after timeout; continuing via stream"
+                    );
+                    if let Some(bus) = bus {
+                        bus.emit(ControlEvent::AgentMessage {
+                            session_id: control_id,
+                            text: format!(
+                                "still generating after {} min — stream remains active",
+                                prompt_timeout.as_secs() / 60
+                            ),
+                            at: Utc::now(),
+                        });
+                    }
+                }
+            }
+        });
+
+        // Return as soon as the request is on the wire.
         Ok(())
     }
 
@@ -715,5 +787,22 @@ mod tests {
     async fn mock_client_has_session() {
         let c = AcpClient::mock_for_tests("sess-1", None);
         assert_eq!(c.session_id().await.as_deref(), Some("sess-1"));
+    }
+
+    #[tokio::test]
+    async fn mock_send_prompt_returns_without_blocking() {
+        let c = AcpClient::mock_for_tests("sess-1", None);
+        // Must not hang waiting for a full agent turn.
+        tokio::time::timeout(Duration::from_secs(1), c.send_prompt("long job prompt"))
+            .await
+            .expect("send_prompt should return immediately")
+            .expect("mock prompt ok");
+    }
+
+    #[tokio::test]
+    async fn empty_prompt_rejected() {
+        let c = AcpClient::mock_for_tests("sess-1", None);
+        let err = c.send_prompt("   ").await.unwrap_err();
+        assert!(matches!(err, AcpError::Protocol(_)));
     }
 }
