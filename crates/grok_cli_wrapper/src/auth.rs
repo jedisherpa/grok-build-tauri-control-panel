@@ -27,9 +27,10 @@ pub struct AuthStatus {
     pub message: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum LoginPhase {
+    #[default]
     Starting,
     /// Browser open; show confirm code; accept paste-back code.
     AwaitingBrowser,
@@ -666,12 +667,6 @@ async fn open_url(url: &str) -> Result<()> {
     {
         let _ = url;
         Ok(())
-    }
-}
-
-impl Default for LoginPhase {
-    fn default() -> Self {
-        Self::Starting
     }
 }
 
