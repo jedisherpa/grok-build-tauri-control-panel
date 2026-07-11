@@ -313,6 +313,7 @@ function renderAuth(auth) {
   const loginBtn = $("btn-login");
   const logoutBtn = $("btn-logout");
   const hint = $("auth-hint");
+  const panel = $("auth-code-panel");
   if (!auth) {
     label.textContent = "Auth unknown";
     return;
@@ -323,15 +324,87 @@ function renderAuth(auth) {
     label.title = auth.message || name;
     loginBtn.style.display = "none";
     logoutBtn.style.display = "block";
+    if (panel) panel.style.display = "none";
     hint.textContent = auth.authMode ? `via ${auth.authMode}` : "Signed in";
+    state.loggingIn = false;
   } else {
     label.textContent = "Not signed in";
     loginBtn.style.display = "block";
     logoutBtn.style.display = "none";
     loginBtn.disabled = !!state.loggingIn;
-    loginBtn.textContent = state.loggingIn ? "Waiting for browser…" : "Log in with Grok";
-    hint.textContent = "Opens Grok / xAI sign-in in your browser.";
+    loginBtn.textContent = state.loggingIn ? "Login in progress…" : "Log in with Grok";
+    if (!state.loggingIn) {
+      hint.textContent = "Opens Grok / xAI sign-in. You’ll confirm a code in the browser.";
+      if (panel) panel.style.display = "none";
+    }
   }
+}
+
+function renderLoginSession(st) {
+  if (!st) return;
+  const panel = $("auth-code-panel");
+  const codeEl = $("auth-confirm-code");
+  const hint = $("auth-hint");
+  const loginBtn = $("btn-login");
+
+  if (st.status?.loggedIn || st.phase === "completed") {
+    state.loggingIn = false;
+    renderAuth(st.status);
+    if (panel) panel.style.display = "none";
+    pushEvent(st.status?.message || "Signed in with Grok", "ok");
+    return;
+  }
+
+  if (st.phase === "failed" && !st.active) {
+    state.loggingIn = false;
+    loginBtn.disabled = false;
+    loginBtn.textContent = "Log in with Grok";
+    if (panel) panel.style.display = "none";
+    hint.textContent = st.instructions || "Login failed — try again.";
+    return;
+  }
+
+  state.loggingIn = true;
+  loginBtn.disabled = true;
+  loginBtn.textContent = "Login in progress…";
+  if (panel) panel.style.display = "flex";
+  if (st.confirmCode) {
+    codeEl.textContent = st.confirmCode;
+  } else {
+    codeEl.textContent = "…";
+  }
+  hint.textContent = st.instructions || "";
+  if (st.loginUrl) {
+    $("btn-open-login-url").dataset.url = st.loginUrl;
+  }
+}
+
+let loginPollTimer = null;
+function stopLoginPoll() {
+  if (loginPollTimer) {
+    clearInterval(loginPollTimer);
+    loginPollTimer = null;
+  }
+}
+
+function startLoginPoll() {
+  stopLoginPoll();
+  loginPollTimer = setInterval(async () => {
+    try {
+      const st = await invoke("grok_login_status");
+      renderLoginSession(st);
+      if (st.status?.loggedIn || st.phase === "completed") {
+        stopLoginPoll();
+        state.loggingIn = false;
+        await refreshStatus();
+      } else if (st.phase === "failed" && !st.active) {
+        stopLoginPoll();
+        state.loggingIn = false;
+      }
+    } catch (e) {
+      /* ignore poll errors */
+    }
+  }, 1000);
 }
 
 async function refreshAuth() {
@@ -366,57 +439,81 @@ async function loginWithGrok() {
   state.loggingIn = true;
   renderAuth(state.auth || { loggedIn: false });
   pushEvent("Starting Grok login…");
-  $("auth-hint").textContent = "Browser should open — complete sign-in, then wait…";
+  $("auth-hint").textContent = "Starting login…";
+  $("auth-paste-code").value = "";
   try {
-    // Prefer device-code: reliably prints URL for GUI apps
-    let result;
+    let st;
     try {
-      result = await invoke("login_with_device");
+      st = await invoke("start_grok_login");
     } catch (e1) {
-      pushEvent(`device login failed, trying oauth: ${e1.message || e1}`, "err");
-      result = await invoke("login_with_grok");
+      pushEvent(`device login start failed: ${e1.message || e1}`, "err");
+      st = await invoke("start_grok_login_oauth");
     }
-    if (result.loginUrl) {
-      pushEvent(`Login URL opened`, "ok");
-      $("auth-hint").textContent = result.userCode
-        ? `Code: ${result.userCode} — finish in browser`
-        : "Complete sign-in in the browser window.";
+    renderLoginSession(st);
+    if (st.confirmCode) {
+      pushEvent(`Confirm code in browser: ${st.confirmCode}`, "ok");
     }
-    renderAuth(result.status);
-    if (result.status?.loggedIn) {
-      pushEvent(result.status.message || "Signed in", "ok");
-      appendTranscript(
-        state.selectedSession,
-        "system",
-        result.status.message || "Signed in with Grok"
-      );
+    if (st.loginUrl) {
+      pushEvent("Login page opened", "ok");
+    }
+    startLoginPoll();
+  } catch (e) {
+    state.loggingIn = false;
+    toastError(e);
+    $("auth-hint").textContent = String(e.message || e);
+    $("btn-login").disabled = false;
+    $("btn-login").textContent = "Log in with Grok";
+  }
+}
+
+async function submitLoginCode() {
+  const code = $("auth-paste-code").value.trim();
+  if (!code) {
+    $("auth-hint").textContent = "Paste the code from the browser first.";
+    return;
+  }
+  $("auth-hint").textContent = "Submitting code…";
+  try {
+    const st = await invoke("submit_grok_login_code", { code });
+    renderLoginSession(st);
+    if (st.status?.loggedIn || st.phase === "completed") {
+      stopLoginPoll();
+      state.loggingIn = false;
+      pushEvent(st.status?.message || "Signed in", "ok");
+      await refreshStatus();
     } else {
-      // Poll a few times — user may still be finishing browser flow
-      for (let i = 0; i < 30; i++) {
-        await new Promise((r) => setTimeout(r, 2000));
-        const auth = await invoke("get_auth_status");
-        renderAuth(auth);
-        if (auth.loggedIn) {
-          pushEvent(auth.message || "Signed in", "ok");
-          break;
-        }
-        $("auth-hint").textContent = `Waiting for browser sign-in… (${i + 1}/30)`;
-      }
+      $("auth-hint").textContent =
+        st.instructions || "Code submitted — finish any remaining steps in the browser.";
+      startLoginPoll();
     }
-    await refreshStatus();
   } catch (e) {
     toastError(e);
     $("auth-hint").textContent = String(e.message || e);
-  } finally {
-    state.loggingIn = false;
-    await refreshAuth().catch(() => {});
   }
+}
+
+async function cancelLogin() {
+  try {
+    await invoke("cancel_grok_login");
+  } catch (_) {
+    /* ignore */
+  }
+  stopLoginPoll();
+  state.loggingIn = false;
+  $("auth-code-panel").style.display = "none";
+  $("auth-paste-code").value = "";
+  $("btn-login").disabled = false;
+  $("btn-login").textContent = "Log in with Grok";
+  $("auth-hint").textContent = "Login cancelled.";
+  await refreshAuth().catch(() => {});
 }
 
 async function logoutGrok() {
   try {
+    stopLoginPoll();
     const status = await invoke("logout_grok");
     renderAuth(status);
+    $("auth-code-panel").style.display = "none";
     pushEvent("Signed out", "ok");
     await refreshStatus();
   } catch (e) {
@@ -516,6 +613,26 @@ $("btn-new-session").onclick = startAcp;
 $("btn-start-acp").onclick = startAcp;
 $("btn-login").onclick = loginWithGrok;
 $("btn-logout").onclick = logoutGrok;
+$("btn-submit-code").onclick = submitLoginCode;
+$("btn-cancel-login").onclick = cancelLogin;
+$("btn-open-login-url").onclick = async () => {
+  try {
+    const url = await invoke("open_grok_login_url");
+    if (!url && $("btn-open-login-url").dataset.url) {
+      window.open($("btn-open-login-url").dataset.url, "_blank");
+    }
+  } catch (e) {
+    const u = $("btn-open-login-url").dataset.url;
+    if (u) window.open(u, "_blank");
+    else toastError(e);
+  }
+};
+$("auth-paste-code").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    submitLoginCode();
+  }
+});
 
 // ── Dev server / live preview ───────────────────────────────────────────
 function renderDevStatus(st) {

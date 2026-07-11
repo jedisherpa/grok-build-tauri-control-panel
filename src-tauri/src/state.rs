@@ -7,7 +7,7 @@ use anyhow::{Context, Result};
 use tokio::sync::RwLock;
 use tracing::{info, warn};
 
-use grok_cli_wrapper::GrokCli;
+use grok_cli_wrapper::{GrokCli, LoginManager};
 use grok_config::{discover_environment, GrokConfig, GrokPaths};
 use grok_control_core::SessionRegistry;
 use grok_events::{shared_bus, EventBus};
@@ -33,6 +33,7 @@ pub struct AppState {
     pub scheduler: Arc<Scheduler>,
     pub persistence: Arc<Persistence>,
     pub dev_server: Arc<DevServerManager>,
+    pub login: Arc<LoginManager>,
 }
 
 impl AppState {
@@ -151,6 +152,7 @@ impl AppState {
         }
 
         let dev_server = DevServerManager::new();
+        let login = LoginManager::new(grok_cli.grok_path.clone());
 
         Ok(Self {
             paths,
@@ -165,6 +167,7 @@ impl AppState {
             scheduler,
             persistence,
             dev_server,
+            login,
         })
     }
 }

@@ -63,7 +63,53 @@ pub async fn get_auth_status() -> Result<grok_cli_wrapper::AuthStatus, String> {
     Ok(grok_cli_wrapper::GrokCli::auth_status())
 }
 
-/// Opens Grok OAuth in the browser (`grok login --oauth`) and waits for completion.
+/// Start interactive login (device-code). Returns immediately with URL + confirm code.
+#[tauri::command]
+pub async fn start_grok_login(
+    state: State<'_, AppState>,
+) -> Result<grok_cli_wrapper::LoginSessionState, String> {
+    state.login.start_device_login().await.map_err(err)
+}
+
+/// Fallback OAuth browser login start.
+#[tauri::command]
+pub async fn start_grok_login_oauth(
+    state: State<'_, AppState>,
+) -> Result<grok_cli_wrapper::LoginSessionState, String> {
+    state.login.start_oauth_login().await.map_err(err)
+}
+
+/// Poll login session (phase, confirm code, logged-in status).
+#[tauri::command]
+pub async fn grok_login_status(
+    state: State<'_, AppState>,
+) -> Result<grok_cli_wrapper::LoginSessionState, String> {
+    Ok(state.login.state().await)
+}
+
+/// Paste a verification code from the browser into the running login process.
+#[tauri::command]
+pub async fn submit_grok_login_code(
+    state: State<'_, AppState>,
+    code: String,
+) -> Result<grok_cli_wrapper::LoginSessionState, String> {
+    state.login.submit_code(&code).await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn open_grok_login_url(
+    state: State<'_, AppState>,
+) -> Result<Option<String>, String> {
+    state.login.open_login_url().await.map_err(err)
+}
+
+#[tauri::command]
+pub async fn cancel_grok_login(state: State<'_, AppState>) -> Result<(), String> {
+    state.login.cancel().await;
+    Ok(())
+}
+
+/// Legacy blocking helpers (still available).
 #[tauri::command]
 pub async fn login_with_grok(
     state: State<'_, AppState>,
@@ -75,7 +121,6 @@ pub async fn login_with_grok(
         .map_err(err)
 }
 
-/// Device-code login (prints/opens URL with user_code). Best for GUI.
 #[tauri::command]
 pub async fn login_with_device(
     state: State<'_, AppState>,
@@ -89,6 +134,7 @@ pub async fn login_with_device(
 
 #[tauri::command]
 pub async fn logout_grok(state: State<'_, AppState>) -> Result<grok_cli_wrapper::AuthStatus, String> {
+    state.login.cancel().await;
     state.grok_cli.logout().await.map_err(err)
 }
 

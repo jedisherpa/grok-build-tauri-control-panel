@@ -16,7 +16,7 @@ pub mod auth;
 pub mod inspect;
 pub mod spawn_opts;
 
-pub use auth::{AuthStatus, LoginResult};
+pub use auth::{AuthStatus, LoginManager, LoginPhase, LoginResult, LoginSessionState};
 pub use inspect::{GrokInspect, InspectReport};
 pub use spawn_opts::HeadlessSpawnOptions;
 

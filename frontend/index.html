@@ -53,6 +53,17 @@
               <button id="btn-login" class="btn primary" title="Sign in with Grok (browser)">Log in with Grok</button>
               <button id="btn-logout" class="btn ghost danger" title="Sign out" style="display:none">Log out</button>
             </div>
+            <div id="auth-code-panel" class="auth-code-panel" style="display:none">
+              <div class="auth-code-label muted">Confirm this code in browser</div>
+              <div id="auth-confirm-code" class="auth-confirm-code">————</div>
+              <button id="btn-open-login-url" class="btn ghost" type="button">Open login page</button>
+              <div class="auth-code-label muted" style="margin-top:8px">Or paste code from browser</div>
+              <input id="auth-paste-code" type="text" placeholder="Paste code here" autocomplete="off" spellcheck="false" />
+              <div class="auth-code-row">
+                <button id="btn-submit-code" class="btn primary" type="button">Submit code</button>
+                <button id="btn-cancel-login" class="btn ghost danger" type="button">Cancel</button>
+              </div>
+            </div>
             <div id="auth-hint" class="auth-hint muted"></div>
           </div>
           <div id="status-pill" class="status-pill status-unknown">
