@@ -361,9 +361,11 @@ body {
 img.logo {
   width: 28px;
   height: 28px;
-  border-radius: 8px;
-  border: 1px solid var(--border-hi);
+  /* iOS app icon continuous corner ~22% of side */
+  border-radius: 22.37%;
+  border: none;
   object-fit: cover;
-  background: #000;
+  background: transparent;
   display: block;
+  overflow: hidden;
 }
