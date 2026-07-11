@@ -17,29 +17,29 @@ Rust **Tauri 2** desktop control panel for [Grok Build](https://x.ai) — multi-
 - **Diff engine** — before/after capture and summaries
 - **Minimal frontend** — sessions, worktrees, extensions, memory, scheduler, system
 
-## Quick start
+## Quick start (use it now)
 
-### Prerequisites
-
-- Rust stable (1.78+)
-- Tauri 2 system deps ([Tauri prerequisites](https://v2.tauri.app/start/prerequisites/))
-- Optional: `grok` CLI on `PATH` and `XAI_API_KEY`
-
-### Build
+With Grok Build CLI already installed:
 
 ```bash
-cargo check --workspace
-cargo test --workspace
-cargo tauri build
+cd ~/grok-build-tauri-control-panel
+./scripts/install.sh   # builds + installs to /Applications + opens
+# later:
+./scripts/run.sh
 ```
 
-### Develop
+See **[QUICKSTART.md](./QUICKSTART.md)** for first ACP session, MCP setup, and config paths.
+
+### Develop / rebuild
 
 ```bash
+./scripts/run.sh --dev
+# or
 cargo tauri dev
+cargo tauri build --bundles app
 ```
 
-Without a live `grok` binary, use **Start Mock Session** in the UI to exercise the registry and event bridge.
+The app discovers `~/.grok/bin/grok` even when launched from Finder (PATH is bootstrapped).
 
 ## Workspace layout
 
