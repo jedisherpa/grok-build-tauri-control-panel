@@ -210,6 +210,22 @@
           <div class="section-label">Events</div>
           <div id="event-feed" class="event-feed"></div>
         </div>
+
+        <div class="dev-dock">
+          <div class="dev-dock-info">
+            <div class="dev-dock-title">Live preview</div>
+            <div id="dev-status" class="dev-status muted">Stopped</div>
+            <a id="dev-url" class="dev-url" href="#" target="_blank" rel="noreferrer" style="display:none"></a>
+          </div>
+          <div class="dev-dock-actions">
+            <button id="btn-dev-server" class="btn primary" title="Start a live dev/preview server for the session project">
+              Dev Server
+            </button>
+            <button id="btn-dev-open" class="btn ghost" title="Open preview in browser" style="display:none">Open</button>
+            <button id="btn-dev-folder" class="btn ghost" title="Reveal project folder">Folder</button>
+            <button id="btn-dev-stop" class="btn danger ghost" title="Stop dev server" style="display:none">Stop</button>
+          </div>
+        </div>
       </aside>
     </div>
     <script src="app.js"></script>

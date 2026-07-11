@@ -1,6 +1,7 @@
 //! Tauri application library — state, commands, and event bridge.
 
 mod commands;
+mod devserver;
 mod state;
 
 use tauri::{Emitter, Manager};
@@ -104,6 +105,12 @@ pub fn run() {
             commands::list_persisted_sessions,
             commands::persistence_checkpoint,
             commands::shutdown_all,
+            commands::detect_dev_server,
+            commands::start_dev_server,
+            commands::stop_dev_server,
+            commands::dev_server_status,
+            commands::open_dev_server,
+            commands::reveal_project,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -9,6 +9,7 @@ const state = {
   ready: false,
   auth: null,
   loggingIn: false,
+  devServer: null,
   transcriptBySession: new Map(), // id -> [{role, body, at}]
 };
 
@@ -515,6 +516,131 @@ $("btn-new-session").onclick = startAcp;
 $("btn-start-acp").onclick = startAcp;
 $("btn-login").onclick = loginWithGrok;
 $("btn-logout").onclick = logoutGrok;
+
+// ── Dev server / live preview ───────────────────────────────────────────
+function renderDevStatus(st) {
+  state.devServer = st;
+  const el = $("dev-status");
+  const urlEl = $("dev-url");
+  const openBtn = $("btn-dev-open");
+  const stopBtn = $("btn-dev-stop");
+  const startBtn = $("btn-dev-server");
+  if (!st || !st.running) {
+    el.textContent = st?.message || "Stopped";
+    el.className = "dev-status muted";
+    urlEl.style.display = "none";
+    openBtn.style.display = "none";
+    stopBtn.style.display = "none";
+    startBtn.textContent = "Dev Server";
+    startBtn.disabled = false;
+    return;
+  }
+  el.textContent = st.message || `Running · ${st.url || ""}`;
+  el.className = "dev-status running";
+  if (st.url) {
+    urlEl.style.display = "block";
+    urlEl.textContent = st.url;
+    urlEl.href = st.url;
+  }
+  openBtn.style.display = "inline-block";
+  stopBtn.style.display = "inline-block";
+  startBtn.textContent = "Restart";
+}
+
+function previewArgs() {
+  const cwd = $("cwd")?.value?.trim?.() || null;
+  return {
+    cwd: cwd || null,
+    sessionId: state.selectedSession || null,
+  };
+}
+
+async function refreshDevStatus() {
+  try {
+    const st = await invoke("dev_server_status");
+    renderDevStatus(st);
+    return st;
+  } catch (e) {
+    /* ignore if backend old */
+  }
+}
+
+async function startDevServer() {
+  const btn = $("btn-dev-server");
+  btn.disabled = true;
+  btn.textContent = "Starting…";
+  $("dev-status").textContent = "Detecting project…";
+  try {
+    const args = previewArgs();
+    if (!args.cwd && !args.sessionId) {
+      throw new Error("Select a session or set project cwd first");
+    }
+    let detect = null;
+    try {
+      detect = await invoke("detect_dev_server", args);
+      pushEvent(`preview: ${detect.label || detect.kind}`, "ok");
+      $("dev-status").textContent = `Starting ${detect.label || detect.kind}…`;
+    } catch (e) {
+      pushEvent(`detect: ${e.message || e}`, "err");
+    }
+    const st = await invoke("start_dev_server", {
+      ...args,
+      openBrowser: true,
+    });
+    renderDevStatus(st);
+    pushEvent(st.message || "Dev server started", "ok");
+    appendTranscript(
+      state.selectedSession,
+      "system",
+      `dev server: ${st.url || st.message || "started"}\n${st.command || ""}`
+    );
+  } catch (e) {
+    toastError(e);
+    $("dev-status").textContent = String(e.message || e);
+    btn.textContent = "Dev Server";
+  } finally {
+    btn.disabled = false;
+    await refreshDevStatus();
+  }
+}
+
+async function stopDevServer() {
+  try {
+    const st = await invoke("stop_dev_server");
+    renderDevStatus(st);
+    pushEvent("Dev server stopped");
+  } catch (e) {
+    toastError(e);
+  }
+}
+
+async function openDevServer() {
+  try {
+    const url = await invoke("open_dev_server");
+    pushEvent(`Opened ${url}`, "ok");
+  } catch (e) {
+    // fallback: open link if we have it
+    if (state.devServer?.url) {
+      window.open(state.devServer.url, "_blank");
+    } else {
+      toastError(e);
+    }
+  }
+}
+
+async function revealProject() {
+  try {
+    await invoke("reveal_project", previewArgs());
+    pushEvent("Opened project folder", "ok");
+  } catch (e) {
+    toastError(e);
+  }
+}
+
+$("btn-dev-server").onclick = startDevServer;
+$("btn-dev-stop").onclick = stopDevServer;
+$("btn-dev-open").onclick = openDevServer;
+$("btn-dev-folder").onclick = revealProject;
 $("btn-send").onclick = sendPrompt;
 $("btn-cancel").onclick = async () => {
   try {
@@ -732,6 +858,7 @@ async function boot() {
   try {
     await refreshStatus();
     await refreshSessions();
+    await refreshDevStatus();
     pushEvent("Bomb Code ready", "ok");
     if (state.auth && !state.auth.loggedIn) {
       pushEvent("Not signed in — click Log in with Grok");

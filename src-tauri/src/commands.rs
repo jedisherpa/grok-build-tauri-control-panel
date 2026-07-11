@@ -785,3 +785,81 @@ async fn persist_session(state: &AppState, id: Uuid) {
 fn _status_idle() -> SessionStatus {
     SessionStatus::Idle
 }
+
+// ── Dev server / live preview ────────────────────────────────────────────
+
+fn resolve_preview_cwd(state: &AppState, cwd: Option<String>, session_id: Option<String>) -> Result<PathBuf, String> {
+    if let Some(id) = session_id {
+        let uuid = Uuid::parse_str(&id).map_err(err)?;
+        let snap = state.registry.get_snapshot(uuid).map_err(err)?;
+        return Ok(PathBuf::from(snap.metadata.cwd));
+    }
+    if let Some(c) = cwd {
+        let p = PathBuf::from(c);
+        if p.is_dir() {
+            return Ok(p);
+        }
+        return Err(format!("cwd is not a directory: {}", p.display()));
+    }
+    if let Ok(Some(last)) = state.persistence.get_kv("last_cwd") {
+        let p = PathBuf::from(last);
+        if p.is_dir() {
+            return Ok(p);
+        }
+    }
+    Err("No project path — select a session or set cwd".into())
+}
+
+#[tauri::command]
+pub async fn detect_dev_server(
+    state: State<'_, AppState>,
+    cwd: Option<String>,
+    session_id: Option<String>,
+) -> Result<crate::devserver::DetectedProject, String> {
+    let path = resolve_preview_cwd(&state, cwd, session_id)?;
+    crate::devserver::DevServerManager::detect(&path)
+}
+
+#[tauri::command]
+pub async fn start_dev_server(
+    state: State<'_, AppState>,
+    cwd: Option<String>,
+    session_id: Option<String>,
+    open_browser: Option<bool>,
+) -> Result<crate::devserver::DevServerStatus, String> {
+    let path = resolve_preview_cwd(&state, cwd, session_id)?;
+    let _ = state.persistence.set_kv("last_cwd", &path.display().to_string());
+    state
+        .dev_server
+        .start(&path, open_browser.unwrap_or(true))
+        .await
+}
+
+#[tauri::command]
+pub async fn stop_dev_server(
+    state: State<'_, AppState>,
+) -> Result<crate::devserver::DevServerStatus, String> {
+    Ok(state.dev_server.stop().await)
+}
+
+#[tauri::command]
+pub async fn dev_server_status(
+    state: State<'_, AppState>,
+) -> Result<crate::devserver::DevServerStatus, String> {
+    Ok(state.dev_server.status().await)
+}
+
+#[tauri::command]
+pub async fn open_dev_server(state: State<'_, AppState>) -> Result<String, String> {
+    state.dev_server.open_in_browser().await
+}
+
+#[tauri::command]
+pub async fn reveal_project(
+    state: State<'_, AppState>,
+    cwd: Option<String>,
+    session_id: Option<String>,
+) -> Result<(), String> {
+    let path = resolve_preview_cwd(&state, cwd, session_id)?;
+    crate::devserver::DevServerManager::reveal_project(&path).await
+}

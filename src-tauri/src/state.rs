@@ -18,6 +18,8 @@ use grok_persistence::Persistence;
 use grok_scheduler::{JobHandler, Scheduler, ScheduledJob};
 use grok_worktree::WorktreeManager;
 
+use crate::devserver::DevServerManager;
+
 pub struct AppState {
     pub paths: GrokPaths,
     pub config: Arc<RwLock<GrokConfig>>,
@@ -30,6 +32,7 @@ pub struct AppState {
     pub memory: Arc<MemoryService>,
     pub scheduler: Arc<Scheduler>,
     pub persistence: Arc<Persistence>,
+    pub dev_server: Arc<DevServerManager>,
 }
 
 impl AppState {
@@ -147,6 +150,8 @@ impl AppState {
             Err(e) => warn!(error = %e, "environment discovery failed"),
         }
 
+        let dev_server = DevServerManager::new();
+
         Ok(Self {
             paths,
             config,
@@ -159,6 +164,7 @@ impl AppState {
             memory,
             scheduler,
             persistence,
+            dev_server,
         })
     }
 }

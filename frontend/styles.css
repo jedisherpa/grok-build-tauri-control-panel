@@ -366,6 +366,53 @@ body {
   word-break: break-word;
 }
 
+/* Bottom-right live preview dock */
+.dev-dock {
+  flex-shrink: 0;
+  border-top: 1px solid var(--border);
+  padding: 10px;
+  background: linear-gradient(180deg, #12151c 0%, #0e1218 100%);
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.dev-dock-title {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  color: var(--dim);
+}
+.dev-status {
+  font-family: var(--font);
+  font-size: 11px;
+  margin-top: 2px;
+  word-break: break-word;
+}
+.dev-status.running { color: var(--ok); }
+.dev-url {
+  display: block;
+  font-family: var(--font);
+  font-size: 11px;
+  color: var(--accent);
+  text-decoration: none;
+  margin-top: 4px;
+  word-break: break-all;
+}
+.dev-url:hover { text-decoration: underline; }
+.dev-dock-actions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+.dev-dock-actions .btn {
+  width: 100%;
+  font-size: 11px;
+  padding: 7px 8px;
+}
+#btn-dev-server {
+  grid-column: 1 / -1;
+}
+
 @media (max-width: 1100px) {
   :root { --left: 200px; --right: 240px; }
 }
