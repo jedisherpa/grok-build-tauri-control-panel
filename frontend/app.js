@@ -1,111 +1,334 @@
-// Production control-panel frontend (Tauri 2 withGlobalTauri).
+// Three-column Grok Build control panel UI.
 
 const $ = (id) => document.getElementById(id);
-let selectedSession = null;
-let sessionsCache = [];
-let runtimeReady = false;
+
+const state = {
+  selectedSession: null,
+  sessions: [],
+  tools: [], // recent tool calls
+  ready: false,
+  transcriptBySession: new Map(), // id -> [{role, body, at}]
+};
 
 function hasTauri() {
-  return !!(window.__TAURI__ && window.__TAURI__.core && window.__TAURI__.core.invoke);
+  return !!(window.__TAURI__?.core?.invoke);
 }
 
 async function invoke(cmd, args = {}) {
   if (!hasTauri()) {
-    throw new Error("Tauri bridge unavailable — open via the desktop app, not a browser.");
+    throw new Error("Open via the desktop app (Tauri bridge missing).");
   }
   return window.__TAURI__.core.invoke(cmd, args);
 }
 
-function log(el, data) {
-  el.textContent = typeof data === "string" ? data : JSON.stringify(data, null, 2);
+function nowIso() {
+  return new Date().toISOString();
 }
 
-function appendEvent(ev) {
-  const el = $("events");
-  const line = typeof ev === "string" ? ev : JSON.stringify(ev);
-  el.textContent = `${new Date().toISOString()} ${line}\n` + el.textContent;
+function shortId(id) {
+  if (!id) return "—";
+  return String(id).slice(0, 8);
 }
 
 function setStatus(kind, text) {
-  const bar = $("status-bar");
-  bar.className = `status-bar status-${kind}`;
+  const pill = $("status-pill");
+  pill.className = `status-pill status-${kind}`;
   $("status-text").textContent = text;
+}
+
+function pushEvent(text, cls = "") {
+  const feed = $("event-feed");
+  const line = document.createElement("div");
+  line.className = `event-line ${cls}`;
+  const ts = new Date().toLocaleTimeString();
+  line.innerHTML = `<span class="ts">${ts}</span>${escapeHtml(text)}`;
+  feed.prepend(line);
+  while (feed.children.length > 200) feed.lastChild.remove();
+}
+
+function escapeHtml(s) {
+  return String(s)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 function toastError(e) {
   const msg = e?.message || String(e);
-  appendEvent({ type: "error", message: msg });
-  setStatus(runtimeReady ? "ready" : "error", msg);
+  pushEvent(msg, "err");
+  setStatus(state.ready ? "ready" : "error", msg);
 }
 
-// Tabs
-document.querySelectorAll(".tab").forEach((btn) => {
+// ── Navigation ──────────────────────────────────────────────────────────
+document.querySelectorAll(".nav-item").forEach((btn) => {
   btn.addEventListener("click", () => {
-    document.querySelectorAll(".tab").forEach((b) => b.classList.remove("active"));
-    document.querySelectorAll(".panel").forEach((p) => p.classList.remove("active"));
+    document.querySelectorAll(".nav-item").forEach((b) => b.classList.remove("active"));
+    document.querySelectorAll(".view").forEach((v) => v.classList.remove("active"));
     btn.classList.add("active");
-    $(btn.dataset.tab).classList.add("active");
+    const view = $(`view-${btn.dataset.view}`);
+    if (view) view.classList.add("active");
   });
 });
 
-async function refreshStatus() {
-  try {
-    const s = await invoke("get_runtime_status");
-    runtimeReady = !!s.ready;
-    setStatus(s.ready ? "ready" : "error", s.message);
-    if (s.defaultCwd && !$("cwd").value) {
-      $("cwd").value = s.defaultCwd;
-      $("repo").value = s.defaultCwd;
-    }
-    log($("system-log"), s);
-    return s;
-  } catch (e) {
-    setStatus("error", String(e.message || e));
-    throw e;
+// ── Transcript (center) ─────────────────────────────────────────────────
+function getTranscript(sessionId) {
+  if (!state.transcriptBySession.has(sessionId)) {
+    state.transcriptBySession.set(sessionId, []);
+  }
+  return state.transcriptBySession.get(sessionId);
+}
+
+function appendTranscript(sessionId, role, body, at = nowIso()) {
+  if (!sessionId) return;
+  const list = getTranscript(sessionId);
+  list.push({ role, body, at });
+  if (sessionId === state.selectedSession) {
+    renderTranscript();
   }
 }
 
-function renderSessions(list) {
-  sessionsCache = Array.isArray(list) ? list : [];
-  $("session-count").textContent = String(sessionsCache.length);
-  const root = $("sessions-list");
-  if (!sessionsCache.length) {
-    root.textContent = "No sessions yet. Start an ACP session to code.";
+function renderTranscript() {
+  const root = $("transcript");
+  const sid = state.selectedSession;
+  if (!sid) {
+    root.innerHTML = `<div class="welcome">
+<pre class="banner">  ╔══════════════════════════════════════╗
+  ║         grok build · control         ║
+  ╚══════════════════════════════════════╝</pre>
+<p>Select a thread or start a new ACP session.</p>
+<p class="muted">Center stream mirrors the terminal: messages, tools, plans.</p>
+</div>`;
+    $("composer-session").textContent = "no session";
+    $("composer-model").textContent = "";
     return;
   }
-  root.innerHTML = "";
-  // newest first
-  const sorted = [...sessionsCache].sort(
-    (a, b) => String(b.created_at || "").localeCompare(String(a.created_at || ""))
-  );
-  for (const s of sorted) {
-    const id = s.id;
-    const div = document.createElement("div");
-    div.className = "session-item" + (selectedSession === id ? " selected" : "");
-    div.innerHTML = `<div><strong>${(s.mode || "?").toUpperCase()}</strong> · ${s.status || "?"} · ${
-      s.model || ""
-    }</div>
-      <div class="meta">${id}<br/>${s.cwd || ""}${
-      s.mcp_servers?.length ? `<br/>mcp: ${s.mcp_servers.join(", ")}` : ""
-    }</div>`;
-    div.onclick = () => {
-      selectedSession = id;
-      $("selected-label").textContent = id.slice(0, 8) + "…";
-      renderSessions(sessionsCache);
-    };
-    root.appendChild(div);
+
+  const sess = state.sessions.find((s) => s.id === sid);
+  $("composer-session").textContent = `${shortId(sid)} · ${sess?.status || "?"}`;
+  $("composer-model").textContent = sess?.model || "";
+
+  const entries = getTranscript(sid);
+  if (!entries.length) {
+    root.innerHTML = `<div class="welcome">
+<pre class="banner">session ${escapeHtml(shortId(sid))}</pre>
+<p class="muted">${escapeHtml(sess?.cwd || "")}</p>
+<p>Connected. Type a prompt below.</p>
+</div>`;
+    return;
   }
+
+  root.innerHTML = entries
+    .map((e) => {
+      const role = e.role || "system";
+      const label =
+        role === "user"
+          ? "you"
+          : role === "agent"
+            ? "grok"
+            : role === "tool"
+              ? "tool"
+              : role === "plan"
+                ? "plan"
+                : role === "error"
+                  ? "error"
+                  : "system";
+      return `<div class="t-block ${escapeHtml(role)}">
+  <div class="t-role">${label}</div>
+  <div class="t-body">${escapeHtml(e.body)}</div>
+  <div class="t-time">${escapeHtml(e.at || "")}</div>
+</div>`;
+    })
+    .join("");
+  root.scrollTop = root.scrollHeight;
+}
+
+// ── Threads / agents ────────────────────────────────────────────────────
+function renderThreads() {
+  const root = $("thread-list");
+  if (!state.sessions.length) {
+    root.innerHTML = `<div class="empty-hint">No sessions yet</div>`;
+    return;
+  }
+  const sorted = [...state.sessions].sort((a, b) =>
+    String(b.createdAt || b.created_at || "").localeCompare(String(a.createdAt || a.created_at || ""))
+  );
+  root.innerHTML = sorted
+    .map((s) => {
+      const id = s.id;
+      const status = String(s.status || "unknown").toLowerCase();
+      const mode = String(s.mode || "acp").toLowerCase();
+      const model = s.model || "";
+      const isMock = model === "mock";
+      const selected = id === state.selectedSession ? "selected" : "";
+      const badgeCls = isMock
+        ? "mock"
+        : status.includes("run")
+          ? "running"
+          : status.includes("fail") || status.includes("cancel")
+            ? "failed"
+            : "idle";
+      const cwd = s.cwd || "";
+      const shortCwd = cwd.length > 28 ? "…" + cwd.slice(-27) : cwd;
+      return `<div class="thread-item ${selected}" data-id="${escapeHtml(id)}">
+  <div class="name">${escapeHtml(mode)} · ${escapeHtml(shortId(id))}</div>
+  <div class="meta"><span class="badge ${badgeCls}">${escapeHtml(status)}</span>
+  <span>${escapeHtml(isMock ? "mock" : model || "—")}</span></div>
+  <div class="meta">${escapeHtml(shortCwd)}</div>
+</div>`;
+    })
+    .join("");
+
+  root.querySelectorAll(".thread-item").forEach((el) => {
+    el.onclick = () => selectSession(el.dataset.id);
+  });
+}
+
+function renderAgents() {
+  const root = $("agent-list");
+  if (!state.sessions.length) {
+    root.innerHTML = `<div class="empty-hint">No active agents</div>`;
+    return;
+  }
+  root.innerHTML = state.sessions
+    .map((s) => {
+      const status = String(s.status || "?").toLowerCase();
+      const badgeCls = status.includes("run")
+        ? "running"
+        : status.includes("fail") || status.includes("cancel")
+          ? "failed"
+          : "idle";
+      return `<div class="agent-card">
+  <div class="name">${escapeHtml(String(s.mode || "acp").toUpperCase())} · ${escapeHtml(shortId(s.id))}</div>
+  <div class="meta"><span class="badge ${badgeCls}">${escapeHtml(status)}</span>
+  <span class="muted">${escapeHtml(s.model || "")}</span></div>
+  <div class="path">${escapeHtml(s.cwd || "")}</div>
+  ${
+    s.mcpServers?.length || s.mcp_servers?.length
+      ? `<div class="path">mcp: ${escapeHtml((s.mcpServers || s.mcp_servers || []).join(", "))}</div>`
+      : ""
+  }
+</div>`;
+    })
+    .join("");
+}
+
+function renderTools() {
+  const root = $("tool-list");
+  if (!state.tools.length) {
+    root.innerHTML = `<div class="empty-hint">No tool calls yet</div>`;
+    return;
+  }
+  root.innerHTML = state.tools
+    .slice(0, 40)
+    .map(
+      (t) => `<div class="tool-card">
+  <div class="tool-name">${escapeHtml(t.tool || "tool")} · ${escapeHtml(t.status || "")}</div>
+  <div class="tool-sum">${escapeHtml(t.summary || t.id || "")}</div>
+</div>`
+    )
+    .join("");
+}
+
+function selectSession(id) {
+  state.selectedSession = id;
+  renderThreads();
+  renderTranscript();
+  const sess = state.sessions.find((s) => s.id === id);
+  if (sess?.cwd && !$("cwd").value) $("cwd").value = sess.cwd;
+}
+
+// ── Live events from backend ────────────────────────────────────────────
+function handleControlEvent(ev) {
+  if (!ev || typeof ev !== "object") {
+    pushEvent(String(ev));
+    return;
+  }
+  const type = ev.type || "event";
+  const sid = ev.session_id || ev.sessionId;
+
+  if (type === "agent_message" || type === "agentMessage") {
+    appendTranscript(sid, "agent", ev.text || JSON.stringify(ev));
+    pushEvent(`agent ${shortId(sid)}: ${(ev.text || "").slice(0, 80)}`);
+  } else if (type === "tool_call" || type === "toolCall") {
+    const te = ev.event || ev;
+    const tool = te.tool || te.name || "tool";
+    const summary = te.args_summary || te.argsSummary || te.result_summary || "";
+    const status = te.status || "running";
+    state.tools.unshift({
+      id: te.id,
+      tool,
+      status,
+      summary: String(summary).slice(0, 120),
+      sessionId: sid,
+    });
+    if (state.tools.length > 80) state.tools.length = 80;
+    renderTools();
+    appendTranscript(
+      sid,
+      "tool",
+      `${tool} [${status}]\n${String(summary).slice(0, 400)}`
+    );
+    pushEvent(`tool ${tool} · ${status}`);
+  } else if (type === "plan_update" || type === "planUpdate") {
+    const pe = ev.event || ev;
+    const steps = (pe.steps || [])
+      .map((s) => `  - [${s.status || "pending"}] ${s.description || s.id}`)
+      .join("\n");
+    appendTranscript(sid, "plan", `${pe.title || "plan"} (${pe.status || ""})\n${steps}`);
+    pushEvent(`plan update ${shortId(sid)}`);
+  } else if (type === "session_created" || type === "sessionCreated") {
+    pushEvent(`session created ${shortId(sid)}`, "ok");
+    refreshSessions();
+  } else if (type === "session_status_changed" || type === "sessionStatusChanged") {
+    pushEvent(`status ${shortId(sid)} → ${ev.status}`);
+    refreshSessions();
+  } else if (type === "session_cancelled" || type === "sessionCancelled") {
+    appendTranscript(sid, "system", "session cancelled");
+    pushEvent(`cancelled ${shortId(sid)}`);
+    refreshSessions();
+  } else if (type === "error") {
+    appendTranscript(sid || state.selectedSession, "error", ev.message || "error");
+    pushEvent(ev.message || "error", "err");
+    setStatus(state.ready ? "ready" : "error", ev.message || "error");
+  } else if (type === "approval_required" || type === "approvalRequired") {
+    appendTranscript(
+      sid,
+      "system",
+      `approval required: ${ev.tool || "?"} — ${ev.summary || ev.request_id || ""}`
+    );
+    pushEvent(`approval · ${ev.tool || "?"}`, "err");
+  } else {
+    pushEvent(`${type} ${shortId(sid || "")}`);
+  }
+}
+
+// ── API actions ─────────────────────────────────────────────────────────
+async function refreshStatus() {
+  const s = await invoke("get_runtime_status");
+  state.ready = !!s.ready;
+  setStatus(s.ready ? "ready" : "error", s.message);
+  if (s.defaultCwd && !$("cwd").value) {
+    $("cwd").value = s.defaultCwd;
+    $("repo").value = s.defaultCwd;
+  }
+  $("sys-out").textContent = JSON.stringify(s, null, 2);
+  return s;
 }
 
 async function refreshSessions() {
   try {
     const list = await invoke("list_sessions");
-    renderSessions(list);
-    if (Array.isArray(list) && list.length && !selectedSession) {
-      selectedSession = list[0].id;
-      $("selected-label").textContent = selectedSession.slice(0, 8) + "…";
-      renderSessions(list);
+    state.sessions = Array.isArray(list) ? list : [];
+    renderThreads();
+    renderAgents();
+    if (state.selectedSession && !state.sessions.some((s) => s.id === state.selectedSession)) {
+      state.selectedSession = state.sessions[0]?.id || null;
     }
+    if (!state.selectedSession && state.sessions.length) {
+      state.selectedSession = state.sessions[0].id;
+    }
+    renderTranscript();
   } catch (e) {
     toastError(e);
   }
@@ -118,28 +341,24 @@ function parseCsv(s) {
     .filter(Boolean);
 }
 
-// Sessions
-$("btn-start-acp").onclick = async () => {
+async function startAcp() {
   try {
     const cwd = $("cwd").value.trim();
-    if (!cwd) throw new Error("Set an absolute project directory first");
-    const mcpNames = parseCsv($("mcp-attach-session").value);
-    // High-risk names need explicit approval when attached
+    if (!cwd) throw new Error("Set project cwd (absolute path)");
+    const rawModel = $("model")?.value?.trim?.() || "";
+    const model = !rawModel || rawModel.toLowerCase() === "default" ? null : rawModel;
+    const mcpNames = parseCsv($("mcp-attach-session")?.value || "");
     const highRisk = mcpNames.filter((n) =>
       /playwright|browser|grok-build|custom|^x$/i.test(n)
     );
-    const rawModel = $("model").value.trim();
-    const model =
-      !rawModel || rawModel.toLowerCase() === "default" ? null : rawModel;
     const opts = {
       mode: "acp",
       model,
       planMode: $("plan-mode").checked,
       alwaysApprove: $("always-approve").checked,
-      // Only attach explicitly named MCP servers; auto-attach can break session/new.
       mcpServerNames: mcpNames,
       approvedHighRiskMcp: highRisk,
-      includeAutoMcp: mcpNames.length === 0 ? false : true,
+      includeAutoMcp: false,
       mcpServers: [],
       rules: [],
       permissionAllow: [],
@@ -150,127 +369,89 @@ $("btn-start-acp").onclick = async () => {
       sandboxProfile: "workspace",
     };
     const res = await invoke("start_session", { cwd, opts });
-    selectedSession = res.id;
-    $("selected-label").textContent = selectedSession.slice(0, 8) + "…";
-    appendEvent({ type: "session_started", res });
+    state.selectedSession = res.id;
+    appendTranscript(res.id, "system", `session started · cwd ${cwd}`);
+    pushEvent(`ACP session ${shortId(res.id)}`, "ok");
     await refreshSessions();
-    await refreshStatus();
+    selectSession(res.id);
   } catch (e) {
     toastError(e);
   }
-};
+}
 
-$("btn-mock").onclick = async () => {
+async function sendPrompt() {
   try {
-    const cwd = $("cwd").value || "/tmp";
-    const res = await invoke("start_mock_session", { cwd });
-    selectedSession = res.id;
-    appendEvent({ type: "mock_started", res });
-    await refreshSessions();
-  } catch (e) {
-    toastError(e);
-  }
-};
-
-$("btn-refresh").onclick = () => refreshSessions();
-
-$("btn-prompt").onclick = async () => {
-  try {
-    if (!selectedSession) throw new Error("Select a session first");
+    if (!state.selectedSession) throw new Error("Select a thread first");
     const prompt = $("prompt").value;
-    if (!prompt.trim()) throw new Error("Prompt is empty");
-    const res = await invoke("send_prompt", { id: selectedSession, prompt });
-    appendEvent({ type: "prompt_sent", res });
+    if (!prompt.trim()) throw new Error("Empty prompt");
+    appendTranscript(state.selectedSession, "user", prompt);
+    $("prompt").value = "";
+    await invoke("send_prompt", { id: state.selectedSession, prompt });
+    pushEvent(`prompt → ${shortId(state.selectedSession)}`, "ok");
   } catch (e) {
     toastError(e);
   }
-};
+}
 
+// Wire buttons
+$("btn-new-session").onclick = startAcp;
+$("btn-start-acp").onclick = startAcp;
+$("btn-send").onclick = sendPrompt;
 $("btn-cancel").onclick = async () => {
   try {
-    if (!selectedSession) throw new Error("No session selected");
-    await invoke("cancel_session", { id: selectedSession });
-    appendEvent({ type: "cancelled", id: selectedSession });
+    if (!state.selectedSession) throw new Error("No session selected");
+    await invoke("cancel_session", { id: state.selectedSession });
+    appendTranscript(state.selectedSession, "system", "cancel requested");
     await refreshSessions();
   } catch (e) {
     toastError(e);
   }
 };
-
-$("btn-plan-on").onclick = async () => {
-  if (!selectedSession) return toastError(new Error("No session selected"));
-  try {
-    await invoke("set_plan_mode", { id: selectedSession, enabled: true });
-    appendEvent({ type: "plan_mode", enabled: true });
-  } catch (e) {
-    toastError(e);
-  }
-};
-$("btn-plan-off").onclick = async () => {
-  if (!selectedSession) return toastError(new Error("No session selected"));
-  try {
-    await invoke("set_plan_mode", { id: selectedSession, enabled: false });
-    appendEvent({ type: "plan_mode", enabled: false });
-  } catch (e) {
-    toastError(e);
-  }
+$("btn-refresh").onclick = () => {
+  refreshStatus().catch(toastError);
+  refreshSessions();
 };
 
-// Worktrees
-$("btn-wt-list").onclick = async () => {
-  try {
-    log($("worktrees-list"), await invoke("list_worktrees", { repo: $("repo").value }));
-  } catch (e) {
-    toastError(e);
+$("prompt").addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) {
+    e.preventDefault();
+    sendPrompt();
   }
-};
-$("btn-wt-create").onclick = async () => {
-  try {
-    log(
-      $("worktrees-list"),
-      await invoke("create_worktree", {
-        repo: $("repo").value,
-        name: $("wt-name").value,
-        baseRef: null,
-      })
-    );
-  } catch (e) {
-    toastError(e);
-  }
-};
+});
 
-// MCP
-$("btn-mcp-catalog").onclick = async () => {
-  try {
-    log($("mcp-list"), await invoke("list_mcp_catalog"));
-  } catch (e) {
-    toastError(e);
-  }
-};
+// MCP view
 $("btn-mcp-list").onclick = async () => {
   try {
-    log($("mcp-list"), await invoke("list_mcp_servers"));
+    $("mcp-out").textContent = JSON.stringify(await invoke("list_mcp_servers"), null, 2);
+  } catch (e) {
+    toastError(e);
+  }
+};
+$("btn-mcp-catalog").onclick = async () => {
+  try {
+    $("mcp-out").textContent = JSON.stringify(await invoke("list_mcp_catalog"), null, 2);
   } catch (e) {
     toastError(e);
   }
 };
 $("btn-mcp-doctor").onclick = async () => {
   try {
-    log($("mcp-list"), await invoke("doctor_mcp_server", { name: null }));
+    $("mcp-out").textContent = JSON.stringify(
+      await invoke("doctor_mcp_server", { name: null }),
+      null,
+      2
+    );
   } catch (e) {
     toastError(e);
   }
 };
 $("btn-mcp-tools").onclick = async () => {
   try {
-    log($("mcp-list"), await invoke("list_mcp_tools", { name: null }));
-  } catch (e) {
-    toastError(e);
-  }
-};
-$("btn-mcp-creds").onclick = async () => {
-  try {
-    log($("mcp-list"), await invoke("list_mcp_credentials"));
+    $("mcp-out").textContent = JSON.stringify(
+      await invoke("list_mcp_tools", { name: null }),
+      null,
+      2
+    );
   } catch (e) {
     toastError(e);
   }
@@ -294,7 +475,7 @@ $("btn-mcp-add").onclick = async () => {
       env: null,
       scope: fromCatalog === "filesystem" ? "project" : null,
       description: null,
-      autoAttach: fromCatalog === "github",
+      autoAttach: false,
       requiresApproval: ["browser", "grok_build", "custom", "x_twitter"].includes(fromCatalog),
       headers: null,
       startupTimeoutSec: null,
@@ -302,7 +483,11 @@ $("btn-mcp-add").onclick = async () => {
       rateLimitPerMin: fromCatalog === "grok_build" ? 10 : null,
       credentialKeys: null,
     };
-    log($("mcp-list"), await invoke("add_mcp_server", { request }));
+    $("mcp-out").textContent = JSON.stringify(
+      await invoke("add_mcp_server", { request }),
+      null,
+      2
+    );
   } catch (e) {
     toastError(e);
   }
@@ -310,19 +495,47 @@ $("btn-mcp-add").onclick = async () => {
 $("btn-mcp-remove").onclick = async () => {
   try {
     await invoke("remove_mcp_server", { name: $("mcp-name").value });
-    log($("mcp-list"), await invoke("list_mcp_servers"));
+    $("mcp-out").textContent = JSON.stringify(await invoke("list_mcp_servers"), null, 2);
   } catch (e) {
     toastError(e);
   }
 };
 $("btn-cred-set").onclick = async () => {
   try {
-    const key = $("cred-key").value.trim();
-    const value = $("cred-value").value;
-    if (!key || !value) throw new Error("credential key and value required");
-    await invoke("set_mcp_credential", { key, value });
+    await invoke("set_mcp_credential", {
+      key: $("cred-key").value.trim(),
+      value: $("cred-value").value,
+    });
     $("cred-value").value = "";
-    log($("mcp-list"), await invoke("list_mcp_credentials"));
+    $("mcp-out").textContent = JSON.stringify(await invoke("list_mcp_credentials"), null, 2);
+  } catch (e) {
+    toastError(e);
+  }
+};
+
+// Worktrees
+$("btn-wt-list").onclick = async () => {
+  try {
+    $("wt-out").textContent = JSON.stringify(
+      await invoke("list_worktrees", { repo: $("repo").value }),
+      null,
+      2
+    );
+  } catch (e) {
+    toastError(e);
+  }
+};
+$("btn-wt-create").onclick = async () => {
+  try {
+    $("wt-out").textContent = JSON.stringify(
+      await invoke("create_worktree", {
+        repo: $("repo").value,
+        name: $("wt-name").value,
+        baseRef: null,
+      }),
+      null,
+      2
+    );
   } catch (e) {
     toastError(e);
   }
@@ -336,50 +549,29 @@ $("btn-mem-add").onclick = async () => {
       content: $("mem-content").value,
       tags: [],
     });
-    log($("memory-list"), await invoke("memory_list", { scope: $("mem-scope").value }));
+    $("mem-out").textContent = JSON.stringify(
+      await invoke("memory_list", { scope: $("mem-scope").value }),
+      null,
+      2
+    );
   } catch (e) {
     toastError(e);
   }
 };
 $("btn-mem-list").onclick = async () => {
   try {
-    log($("memory-list"), await invoke("memory_list", { scope: $("mem-scope").value }));
+    $("mem-out").textContent = JSON.stringify(
+      await invoke("memory_list", { scope: $("mem-scope").value }),
+      null,
+      2
+    );
   } catch (e) {
     toastError(e);
   }
 };
 $("btn-mem-flush").onclick = async () => {
   try {
-    log($("memory-list"), await invoke("memory_flush", { scope: $("mem-scope").value }));
-  } catch (e) {
-    toastError(e);
-  }
-};
-
-// Scheduler
-$("btn-job-add").onclick = async () => {
-  try {
-    log(
-      $("scheduler-list"),
-      await invoke("scheduler_add", {
-        request: {
-          name: $("job-name").value,
-          prompt: $("job-prompt").value,
-          intervalSecs: Number($("job-interval").value || 3600),
-          cron: null,
-          onceDelaySecs: null,
-          cwd: $("cwd").value || null,
-          maxRuns: null,
-        },
-      })
-    );
-  } catch (e) {
-    toastError(e);
-  }
-};
-$("btn-job-list").onclick = async () => {
-  try {
-    log($("scheduler-list"), await invoke("scheduler_list"));
+    $("mem-out").textContent = await invoke("memory_flush", { scope: $("mem-scope").value });
   } catch (e) {
     toastError(e);
   }
@@ -387,30 +579,16 @@ $("btn-job-list").onclick = async () => {
 
 // System
 $("btn-status").onclick = () => refreshStatus().catch(toastError);
-$("btn-discover").onclick = async () => {
-  try {
-    log($("system-log"), await invoke("discover_environment"));
-  } catch (e) {
-    toastError(e);
-  }
-};
 $("btn-baseline").onclick = async () => {
   try {
-    log($("system-log"), await invoke("capture_baseline"));
+    $("sys-out").textContent = JSON.stringify(await invoke("capture_baseline"), null, 2);
   } catch (e) {
     toastError(e);
   }
 };
 $("btn-config").onclick = async () => {
   try {
-    log($("system-log"), await invoke("get_config"));
-  } catch (e) {
-    toastError(e);
-  }
-};
-$("btn-checkpoint").onclick = async () => {
-  try {
-    log($("system-log"), await invoke("persistence_checkpoint"));
+    $("sys-out").textContent = JSON.stringify(await invoke("get_config"), null, 2);
   } catch (e) {
     toastError(e);
   }
@@ -418,28 +596,24 @@ $("btn-checkpoint").onclick = async () => {
 $("btn-shutdown").onclick = async () => {
   try {
     await invoke("shutdown_all");
-    selectedSession = null;
+    state.selectedSession = null;
     await refreshSessions();
-    appendEvent({ type: "shutdown_all" });
+    pushEvent("shutdown all", "ok");
   } catch (e) {
     toastError(e);
   }
 };
 
-async function bindEvents() {
-  if (!hasTauri() || !window.__TAURI__.event) {
-    setStatus("error", "Not running inside Tauri — use ./scripts/run.sh or the .app");
-    return;
-  }
-  await window.__TAURI__.event.listen("control-event", (e) => appendEvent(e.payload));
-}
-
 async function boot() {
-  await bindEvents();
+  if (hasTauri() && window.__TAURI__.event) {
+    await window.__TAURI__.event.listen("control-event", (e) => handleControlEvent(e.payload));
+  } else {
+    setStatus("error", "Not inside Tauri — use the .app");
+  }
   try {
     await refreshStatus();
     await refreshSessions();
-    appendEvent("Control panel ready.");
+    pushEvent("control panel ready", "ok");
   } catch (e) {
     toastError(e);
   }

@@ -8,79 +8,110 @@
   </head>
   <body>
     <div id="app">
-      <header>
-        <div class="brand">
-          <h1>Grok Build Control Panel</h1>
-          <p class="subtitle">Code with multi-session ACP agents + MCP</p>
-        </div>
-        <div id="status-bar" class="status-bar status-unknown">
-          <span id="status-dot" class="dot"></span>
-          <span id="status-text">Starting…</span>
-        </div>
-      </header>
-
-      <nav class="tabs">
-        <button class="tab active" data-tab="sessions">Sessions</button>
-        <button class="tab" data-tab="mcp">MCP</button>
-        <button class="tab" data-tab="worktrees">Worktrees</button>
-        <button class="tab" data-tab="memory">Memory</button>
-        <button class="tab" data-tab="scheduler">Scheduler</button>
-        <button class="tab" data-tab="system">System</button>
-      </nav>
-
-      <main>
-        <section id="sessions" class="panel active">
-          <div class="card">
-            <h3>Start coding session</h3>
-            <div class="row">
-              <label class="grow">Project directory (absolute)
-                <input id="cwd" type="text" placeholder="/Users/you/code/my-project" />
-              </label>
-            </div>
-            <div class="row">
-              <label>Model <input id="model" type="text" placeholder="leave empty for default" /></label>
-              <label class="check"><input id="plan-mode" type="checkbox" checked /> Plan mode</label>
-              <label class="check"><input id="always-approve" type="checkbox" /> Always approve</label>
-              <label class="grow">MCP attach (comma names)
-                <input id="mcp-attach-session" type="text" placeholder="github, docs-fs" />
-              </label>
-            </div>
-            <div class="row">
-              <button id="btn-start-acp" class="primary">Start ACP Session</button>
-              <button id="btn-mock" class="secondary">Mock (offline)</button>
-              <button id="btn-refresh">Refresh</button>
-              <button id="btn-cancel" class="danger">Cancel Selected</button>
-            </div>
-            <p class="hint">ACP uses <code>grok agent stdio</code>. Prefer plan mode unless you fully trust the repo.</p>
+      <!-- LEFT: threads + menus -->
+      <aside class="col col-left">
+        <header class="col-header brand">
+          <div class="logo">G</div>
+          <div>
+            <div class="title">Grok Build</div>
+            <div class="sub">Control Panel</div>
           </div>
+        </header>
 
-          <div class="split">
-            <div class="card">
-              <h3>Sessions <span id="session-count" class="badge">0</span></h3>
-              <div id="sessions-list" class="session-list">No sessions yet.</div>
-            </div>
-            <div class="card">
-              <h3>Prompt → <span id="selected-label" class="muted">none selected</span></h3>
-              <textarea id="prompt" rows="6" placeholder="Describe the coding task…"></textarea>
-              <div class="row">
-                <button id="btn-prompt" class="primary">Send Prompt</button>
-                <button id="btn-plan-on">Enable Plan Mode</button>
-                <button id="btn-plan-off">Disable Plan Mode</button>
-              </div>
+        <nav class="nav-block">
+          <button class="nav-item active" data-view="chat" title="Session">
+            <span class="nav-icon">⌘</span> Session
+          </button>
+          <button class="nav-item" data-view="mcp" title="MCP">
+            <span class="nav-icon">⬡</span> MCP
+          </button>
+          <button class="nav-item" data-view="worktrees" title="Worktrees">
+            <span class="nav-icon">⎇</span> Worktrees
+          </button>
+          <button class="nav-item" data-view="memory" title="Memory">
+            <span class="nav-icon">◈</span> Memory
+          </button>
+          <button class="nav-item" data-view="settings" title="System">
+            <span class="nav-icon">⚙</span> System
+          </button>
+        </nav>
+
+        <div class="threads-section">
+          <div class="section-label">
+            <span>Threads</span>
+            <button id="btn-new-session" class="icon-btn" title="New ACP session">+</button>
+          </div>
+          <div id="thread-list" class="thread-list">
+            <div class="empty-hint">No sessions yet</div>
+          </div>
+        </div>
+
+        <div class="col-footer">
+          <div id="status-pill" class="status-pill status-unknown">
+            <span class="dot"></span>
+            <span id="status-text">Starting…</span>
+          </div>
+        </div>
+      </aside>
+
+      <!-- CENTER: terminal-like stream -->
+      <main class="col col-center">
+        <header class="col-header center-header">
+          <div class="cwd-line">
+            <span class="muted">cwd</span>
+            <input id="cwd" type="text" spellcheck="false" placeholder="/absolute/project/path" />
+          </div>
+          <div class="header-actions">
+            <label class="toggle" title="Plan mode">
+              <input id="plan-mode" type="checkbox" checked />
+              <span>plan</span>
+            </label>
+            <label class="toggle" title="Always approve tools">
+              <input id="always-approve" type="checkbox" />
+              <span>yolo</span>
+            </label>
+            <button id="btn-start-acp" class="btn primary">Start</button>
+            <button id="btn-cancel" class="btn danger ghost">Cancel</button>
+          </div>
+        </header>
+
+        <!-- views -->
+        <section id="view-chat" class="view active">
+          <div id="transcript" class="transcript" aria-live="polite">
+            <div class="welcome">
+              <pre class="banner">  ╔══════════════════════════════════════╗
+  ║         grok build · control         ║
+  ╚══════════════════════════════════════╝</pre>
+              <p>Select a thread or start a new ACP session.</p>
+              <p class="muted">Center stream mirrors the terminal: messages, tools, plans.</p>
             </div>
           </div>
+          <footer class="composer">
+            <div class="composer-meta">
+              <span id="composer-session" class="muted">no session</span>
+              <span id="composer-model" class="muted"></span>
+            </div>
+            <div class="composer-row">
+              <textarea
+                id="prompt"
+                rows="2"
+                placeholder="Message Grok Build… (Enter to send, Shift+Enter newline)"
+                spellcheck="false"
+              ></textarea>
+              <button id="btn-send" class="btn primary">Send</button>
+            </div>
+          </footer>
         </section>
 
-        <section id="mcp" class="panel">
-          <div class="row">
-            <button id="btn-mcp-catalog">Catalog</button>
-            <button id="btn-mcp-list">List Servers</button>
-            <button id="btn-mcp-doctor">Doctor</button>
-            <button id="btn-mcp-tools">Tools</button>
-            <button id="btn-mcp-creds">Credentials</button>
-          </div>
-          <div class="row">
-            <label>Catalog
+        <section id="view-mcp" class="view">
+          <div class="pane-pad">
+            <div class="toolbar">
+              <button id="btn-mcp-list" class="btn">List</button>
+              <button id="btn-mcp-catalog" class="btn">Catalog</button>
+              <button id="btn-mcp-doctor" class="btn">Doctor</button>
+              <button id="btn-mcp-tools" class="btn">Tools</button>
+            </div>
+            <div class="toolbar">
               <select id="mcp-catalog">
                 <option value="filesystem">filesystem</option>
                 <option value="github">github</option>
@@ -90,68 +121,87 @@
                 <option value="grok_build">grok_build</option>
                 <option value="custom">custom</option>
               </select>
-            </label>
-            <input id="mcp-name" type="text" placeholder="server name" />
-            <input id="mcp-paths" type="text" placeholder="abs paths for filesystem" class="grow" />
-            <button id="btn-mcp-add" class="primary">Add</button>
-            <button id="btn-mcp-remove" class="danger">Remove</button>
+              <input id="mcp-name" type="text" placeholder="name" />
+              <input id="mcp-paths" type="text" placeholder="paths (filesystem)" class="grow" />
+              <button id="btn-mcp-add" class="btn primary">Add</button>
+              <button id="btn-mcp-remove" class="btn danger ghost">Remove</button>
+            </div>
+            <div class="toolbar">
+              <input id="cred-key" type="text" placeholder="GITHUB_TOKEN" />
+              <input id="cred-value" type="password" placeholder="secret" class="grow" />
+              <button id="btn-cred-set" class="btn">Save secret</button>
+            </div>
+            <pre id="mcp-out" class="mono-pane"></pre>
           </div>
-          <div class="row">
-            <input id="cred-key" type="text" placeholder="credential key e.g. GITHUB_TOKEN" />
-            <input id="cred-value" type="password" placeholder="secret value" class="grow" />
-            <button id="btn-cred-set">Save Credential</button>
-          </div>
-          <pre id="mcp-list" class="log"></pre>
         </section>
 
-        <section id="worktrees" class="panel">
-          <div class="row">
-            <label class="grow">Repo <input id="repo" type="text" placeholder="/path/to/git/repo" /></label>
-            <label>Name <input id="wt-name" type="text" placeholder="feature-x" /></label>
-            <button id="btn-wt-create" class="primary">Create</button>
-            <button id="btn-wt-list">List</button>
+        <section id="view-worktrees" class="view">
+          <div class="pane-pad">
+            <div class="toolbar">
+              <input id="repo" type="text" placeholder="git repo path" class="grow" />
+              <input id="wt-name" type="text" placeholder="worktree name" />
+              <button id="btn-wt-create" class="btn primary">Create</button>
+              <button id="btn-wt-list" class="btn">List</button>
+            </div>
+            <pre id="wt-out" class="mono-pane"></pre>
           </div>
-          <pre id="worktrees-list" class="log"></pre>
         </section>
 
-        <section id="memory" class="panel">
-          <div class="row">
-            <input id="mem-scope" type="text" value="workspace" />
-            <input id="mem-content" type="text" placeholder="memory content" class="grow" />
-            <button id="btn-mem-add" class="primary">Add</button>
-            <button id="btn-mem-list">List</button>
-            <button id="btn-mem-flush">Flush</button>
+        <section id="view-memory" class="view">
+          <div class="pane-pad">
+            <div class="toolbar">
+              <input id="mem-scope" type="text" value="workspace" />
+              <input id="mem-content" type="text" placeholder="note" class="grow" />
+              <button id="btn-mem-add" class="btn primary">Add</button>
+              <button id="btn-mem-list" class="btn">List</button>
+              <button id="btn-mem-flush" class="btn">Flush</button>
+            </div>
+            <pre id="mem-out" class="mono-pane"></pre>
           </div>
-          <pre id="memory-list" class="log"></pre>
         </section>
 
-        <section id="scheduler" class="panel">
-          <div class="row">
-            <input id="job-name" type="text" placeholder="job name" />
-            <input id="job-prompt" type="text" placeholder="prompt" class="grow" />
-            <input id="job-interval" type="number" value="3600" min="1" />
-            <button id="btn-job-add" class="primary">Add Job</button>
-            <button id="btn-job-list">List</button>
+        <section id="view-settings" class="view">
+          <div class="pane-pad">
+            <div class="toolbar">
+              <button id="btn-status" class="btn primary">Status</button>
+              <button id="btn-baseline" class="btn">Baseline</button>
+              <button id="btn-config" class="btn">Config</button>
+              <button id="btn-shutdown" class="btn danger ghost">Shutdown all</button>
+            </div>
+            <div class="toolbar">
+              <input id="model" type="text" placeholder="model (optional)" />
+              <input id="mcp-attach-session" type="text" placeholder="MCP attach: github, docs-fs" class="grow" />
+            </div>
+            <pre id="sys-out" class="mono-pane"></pre>
           </div>
-          <pre id="scheduler-list" class="log"></pre>
-        </section>
-
-        <section id="system" class="panel">
-          <div class="row">
-            <button id="btn-status" class="primary">Refresh Status</button>
-            <button id="btn-discover">Discover</button>
-            <button id="btn-baseline">Baseline</button>
-            <button id="btn-config">Config</button>
-            <button id="btn-checkpoint">Checkpoint</button>
-            <button id="btn-shutdown" class="danger">Shutdown All</button>
-          </div>
-          <pre id="system-log" class="log"></pre>
         </section>
       </main>
 
-      <aside>
-        <h2>Live Events</h2>
-        <pre id="events" class="log events"></pre>
+      <!-- RIGHT: agents / activity -->
+      <aside class="col col-right">
+        <header class="col-header">
+          <div class="title">Activity</div>
+          <button id="btn-refresh" class="icon-btn" title="Refresh">↻</button>
+        </header>
+
+        <div class="right-block">
+          <div class="section-label">Agents</div>
+          <div id="agent-list" class="agent-list">
+            <div class="empty-hint">No active agents</div>
+          </div>
+        </div>
+
+        <div class="right-block">
+          <div class="section-label">Tools</div>
+          <div id="tool-list" class="tool-list">
+            <div class="empty-hint">No tool calls yet</div>
+          </div>
+        </div>
+
+        <div class="right-block grow">
+          <div class="section-label">Events</div>
+          <div id="event-feed" class="event-feed"></div>
+        </div>
       </aside>
     </div>
     <script src="app.js"></script>
