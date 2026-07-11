@@ -188,6 +188,8 @@ cargo clippy --workspace --all-targets -- -D warnings → PASS
 - [x] ACP-first session engine  
 - [x] Multi-session + worktrees + permissions  
 - [x] MCP/skills/plugins, memory, scheduler  
+- [x] Full MCP manager + 7-server catalog + session injection  
+- [x] MCP plans under `docs/mcp_plans/` + `examples/mcp_setup.md`  
 - [x] Diff + SQLite recovery + export  
 - [x] Tauri 2 host + frontend shell  
 - [x] AGENTS.md  
