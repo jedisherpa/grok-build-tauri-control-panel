@@ -242,6 +242,95 @@ pub async fn set_last_cwd(state: State<'_, AppState>, cwd: String) -> Result<(),
     state.persistence.set_kv("last_cwd", &cwd).map_err(err)
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CreateFolderResult {
+    pub path: String,
+    pub name: String,
+    pub created: bool,
+}
+
+/// Create a new project folder under a parent directory (default: ~/Projects or home).
+#[tauri::command]
+pub async fn create_project_folder(
+    state: State<'_, AppState>,
+    name: String,
+    parent: Option<String>,
+) -> Result<CreateFolderResult, String> {
+    let slug = sanitize_folder_name(&name)?;
+    let parent_dir = resolve_projects_parent(parent)?;
+    std::fs::create_dir_all(&parent_dir).map_err(err)?;
+    let path = parent_dir.join(&slug);
+    let created = if path.exists() {
+        if !path.is_dir() {
+            return Err(format!("path exists and is not a directory: {}", path.display()));
+        }
+        false
+    } else {
+        std::fs::create_dir_all(&path).map_err(err)?;
+        true
+    };
+    let path_str = path.display().to_string();
+    let _ = state.persistence.set_kv("last_cwd", &path_str);
+    Ok(CreateFolderResult {
+        path: path_str,
+        name: slug,
+        created,
+    })
+}
+
+fn sanitize_folder_name(name: &str) -> Result<String, String> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() {
+        return Err("folder name is empty".into());
+    }
+    // Keep letters, numbers, dash, underscore, space -> dash
+    let mut out = String::new();
+    for c in trimmed.chars() {
+        if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+            out.push(c.to_ascii_lowercase());
+        } else if c.is_whitespace() || c == '/' || c == '\\' {
+            if !out.ends_with('-') && !out.is_empty() {
+                out.push('-');
+            }
+        }
+        // drop other punctuation
+    }
+    let out = out.trim_matches('-').to_string();
+    if out.is_empty() {
+        return Err("folder name has no usable characters".into());
+    }
+    if out == "." || out == ".." {
+        return Err("invalid folder name".into());
+    }
+    if out.len() > 80 {
+        return Err("folder name too long".into());
+    }
+    Ok(out)
+}
+
+fn resolve_projects_parent(parent: Option<String>) -> Result<PathBuf, String> {
+    if let Some(p) = parent {
+        let path = PathBuf::from(p);
+        if !path.is_absolute() {
+            return Err("parent must be absolute".into());
+        }
+        return Ok(path);
+    }
+    let home = std::env::var("HOME")
+        .map(PathBuf::from)
+        .map_err(|_| "HOME not set".to_string())?;
+    // Prefer existing project roots
+    for candidate in ["Projects", "projects", "Code", "code", "Developer", "dev"] {
+        let p = home.join(candidate);
+        if p.is_dir() {
+            return Ok(p);
+        }
+    }
+    // Default: ~/Projects (create on demand by caller)
+    Ok(home.join("Projects"))
+}
+
 // ── Phase 1: Sessions ────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize)]

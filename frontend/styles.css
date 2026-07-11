@@ -207,8 +207,15 @@ body {
   gap: 12px;
   flex-wrap: wrap;
 }
+.cwd-block {
+  flex: 1;
+  min-width: 220px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
 .cwd-line {
-  display: flex; align-items: center; gap: 8px; flex: 1; min-width: 200px;
+  display: flex; align-items: center; gap: 8px; width: 100%;
   font-family: var(--font); font-size: 12px;
 }
 .cwd-line input {
@@ -219,6 +226,69 @@ body {
   border-radius: 6px;
   padding: 6px 8px;
   font: inherit;
+}
+#btn-new-folder {
+  flex-shrink: 0;
+  font-size: 11px;
+  padding: 6px 8px;
+  white-space: nowrap;
+}
+.new-folder-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 8px 0 2px;
+  border-top: 1px solid color-mix(in srgb, var(--border) 70%, transparent);
+}
+.new-folder-row {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+}
+.new-folder-row input {
+  flex: 1;
+  min-width: 0;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font-family: var(--font);
+  font-size: 12px;
+}
+.suggest-label {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  padding-left: 2px;
+}
+.folder-suggestions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+.folder-chip {
+  font-family: var(--font);
+  font-size: 11px;
+  padding: 4px 9px;
+  border-radius: 999px;
+  border: 1px solid color-mix(in srgb, var(--border) 80%, transparent);
+  background: transparent;
+  color: var(--dim);
+  opacity: 0.42;
+  cursor: pointer;
+  transition: opacity 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+.folder-chip:hover {
+  opacity: 0.9;
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--border));
+}
+.folder-chip.selected {
+  opacity: 0.95;
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
 }
 .header-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .toggle {

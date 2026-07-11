@@ -50,6 +50,7 @@ pub fn run() {
             commands::capture_baseline,
             commands::get_runtime_status,
             commands::set_last_cwd,
+            commands::create_project_folder,
             commands::get_auth_status,
             commands::start_grok_login,
             commands::start_grok_login_oauth,

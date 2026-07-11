@@ -76,9 +76,21 @@
       <!-- CENTER: terminal-like stream -->
       <main class="col col-center">
         <header class="col-header center-header">
-          <div class="cwd-line">
-            <span class="muted">cwd</span>
-            <input id="cwd" type="text" spellcheck="false" placeholder="/absolute/project/path" />
+          <div class="cwd-block">
+            <div class="cwd-line">
+              <span class="muted">cwd</span>
+              <input id="cwd" type="text" spellcheck="false" placeholder="/absolute/project/path" />
+              <button id="btn-new-folder" class="btn ghost" type="button" title="Create a new project folder">+ Folder</button>
+            </div>
+            <div id="new-folder-panel" class="new-folder-panel" style="display:none">
+              <div class="new-folder-row">
+                <input id="new-folder-name" type="text" spellcheck="false" placeholder="project-name" autocomplete="off" />
+                <button id="btn-create-folder" class="btn primary" type="button">Create</button>
+                <button id="btn-cancel-folder" class="btn ghost" type="button">Cancel</button>
+              </div>
+              <div class="suggest-label muted">Suggestions · philosophers &amp; mystics</div>
+              <div id="folder-suggestions" class="folder-suggestions"></div>
+            </div>
           </div>
           <div class="header-actions">
             <label class="toggle" title="Plan mode">

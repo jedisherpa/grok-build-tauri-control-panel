@@ -613,6 +613,144 @@ $("btn-new-session").onclick = startAcp;
 $("btn-start-acp").onclick = startAcp;
 $("btn-login").onclick = loginWithGrok;
 $("btn-logout").onclick = logoutGrok;
+
+// ── New project folder (top bar) ────────────────────────────────────────
+const MYSTIC_NAMES = [
+  "heraclitus",
+  "plotinus",
+  "hypatia",
+  "rumi",
+  "ibn-arabi",
+  "hildegard",
+  "mechtild",
+  "eckhart",
+  "boehme",
+  "spinoza",
+  "lao-tzu",
+  "zhuangzi",
+  "nagarjuna",
+  "padmasambhava",
+  "milarepa",
+  "dogen",
+  "hafez",
+  "attar",
+  "avicenna",
+  "maimonides",
+  "paradoxa",
+  "gnosis-well",
+  "void-mirror",
+  "sophia-code",
+  "alembic",
+  "hermetica",
+  "kabir",
+  "teresa",
+  "john-of-the-cross",
+  "simone-weil",
+  "blavatsky",
+  "gurdjieff",
+  "ouroboros",
+  "emerald-tablet",
+  "night-sea",
+  "oracle-bone",
+  "quinque-viae",
+  "pneuma-lab",
+  "axis-mundi",
+  "enochian",
+];
+
+function shufflePick(arr, n) {
+  const copy = [...arr];
+  for (let i = copy.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy.slice(0, n);
+}
+
+function renderFolderSuggestions() {
+  const root = $("folder-suggestions");
+  if (!root) return;
+  const picks = shufflePick(MYSTIC_NAMES, 8);
+  root.innerHTML = picks
+    .map(
+      (name) =>
+        `<button type="button" class="folder-chip" data-name="${escapeHtml(name)}">${escapeHtml(
+          name
+        )}</button>`
+    )
+    .join("");
+  root.querySelectorAll(".folder-chip").forEach((chip) => {
+    chip.onclick = () => {
+      root.querySelectorAll(".folder-chip").forEach((c) => c.classList.remove("selected"));
+      chip.classList.add("selected");
+      $("new-folder-name").value = chip.dataset.name;
+      $("new-folder-name").focus();
+    };
+  });
+}
+
+function toggleNewFolderPanel(show) {
+  const panel = $("new-folder-panel");
+  if (!panel) return;
+  const open = show ?? panel.style.display === "none";
+  panel.style.display = open ? "flex" : "none";
+  if (open) {
+    renderFolderSuggestions();
+    $("new-folder-name").value = "";
+    $("new-folder-name").focus();
+  }
+}
+
+async function createProjectFolder() {
+  const name = $("new-folder-name").value.trim();
+  if (!name) {
+    $("new-folder-name").focus();
+    pushEvent("Enter a folder name or pick a suggestion", "err");
+    return;
+  }
+  try {
+    // Parent: sibling of current project under Projects/Code, else ~/Projects
+    let parent = null;
+    const cwd = $("cwd").value.trim().replace(/\/+$/, "");
+    if (cwd) {
+      const lower = cwd.toLowerCase();
+      if (/\/(projects|code|developer|dev)$/i.test(cwd)) {
+        parent = cwd;
+      } else if (/\/(projects|code|developer|dev)\//i.test(lower)) {
+        parent = cwd.replace(/\/[^/]+$/, "") || null;
+      }
+    }
+    const res = await invoke("create_project_folder", { name, parent });
+    $("cwd").value = res.path;
+    if ($("repo")) $("repo").value = res.path;
+    toggleNewFolderPanel(false);
+    pushEvent(
+      res.created
+        ? `Created project folder ${res.name}`
+        : `Using existing folder ${res.name}`,
+      "ok"
+    );
+    appendTranscript(
+      state.selectedSession,
+      "system",
+      `project folder ready: ${res.path}`
+    );
+  } catch (e) {
+    toastError(e);
+  }
+}
+
+$("btn-new-folder").onclick = () => toggleNewFolderPanel();
+$("btn-create-folder").onclick = createProjectFolder;
+$("btn-cancel-folder").onclick = () => toggleNewFolderPanel(false);
+$("new-folder-name").addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    createProjectFolder();
+  } else if (e.key === "Escape") {
+    toggleNewFolderPanel(false);
+  }
+});
 $("btn-submit-code").onclick = submitLoginCode;
 $("btn-cancel-login").onclick = cancelLogin;
 $("btn-open-login-url").onclick = async () => {
