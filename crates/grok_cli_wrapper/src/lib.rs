@@ -12,9 +12,11 @@ use thiserror::Error;
 use tokio::process::{Child, Command};
 use tracing::{debug, warn};
 
+pub mod auth;
 pub mod inspect;
 pub mod spawn_opts;
 
+pub use auth::{AuthStatus, LoginResult};
 pub use inspect::{GrokInspect, InspectReport};
 pub use spawn_opts::HeadlessSpawnOptions;
 

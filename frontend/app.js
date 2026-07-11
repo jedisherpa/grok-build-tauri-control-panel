@@ -7,6 +7,8 @@ const state = {
   sessions: [],
   tools: [], // recent tool calls
   ready: false,
+  auth: null,
+  loggingIn: false,
   transcriptBySession: new Map(), // id -> [{role, body, at}]
 };
 
@@ -304,16 +306,121 @@ function handleControlEvent(ev) {
 }
 
 // ── API actions ─────────────────────────────────────────────────────────
+function renderAuth(auth) {
+  state.auth = auth;
+  const label = $("auth-label");
+  const loginBtn = $("btn-login");
+  const logoutBtn = $("btn-logout");
+  const hint = $("auth-hint");
+  if (!auth) {
+    label.textContent = "Auth unknown";
+    return;
+  }
+  if (auth.loggedIn) {
+    const name = auth.email || auth.firstName || "Grok user";
+    label.textContent = name;
+    label.title = auth.message || name;
+    loginBtn.style.display = "none";
+    logoutBtn.style.display = "block";
+    hint.textContent = auth.authMode ? `via ${auth.authMode}` : "Signed in";
+  } else {
+    label.textContent = "Not signed in";
+    loginBtn.style.display = "block";
+    logoutBtn.style.display = "none";
+    loginBtn.disabled = !!state.loggingIn;
+    loginBtn.textContent = state.loggingIn ? "Waiting for browser…" : "Log in with Grok";
+    hint.textContent = "Opens Grok / xAI sign-in in your browser.";
+  }
+}
+
+async function refreshAuth() {
+  try {
+    const auth = await invoke("get_auth_status");
+    renderAuth(auth);
+    return auth;
+  } catch (e) {
+    renderAuth({
+      loggedIn: false,
+      message: String(e.message || e),
+    });
+    throw e;
+  }
+}
+
 async function refreshStatus() {
   const s = await invoke("get_runtime_status");
   state.ready = !!s.ready;
   setStatus(s.ready ? "ready" : "error", s.message);
   if (s.defaultCwd && !$("cwd").value) {
     $("cwd").value = s.defaultCwd;
-    $("repo").value = s.defaultCwd;
+    if ($("repo")) $("repo").value = s.defaultCwd;
   }
-  $("sys-out").textContent = JSON.stringify(s, null, 2);
+  if ($("sys-out")) $("sys-out").textContent = JSON.stringify(s, null, 2);
+  await refreshAuth().catch(() => {});
   return s;
+}
+
+async function loginWithGrok() {
+  if (state.loggingIn) return;
+  state.loggingIn = true;
+  renderAuth(state.auth || { loggedIn: false });
+  pushEvent("Starting Grok login…");
+  $("auth-hint").textContent = "Browser should open — complete sign-in, then wait…";
+  try {
+    // Prefer device-code: reliably prints URL for GUI apps
+    let result;
+    try {
+      result = await invoke("login_with_device");
+    } catch (e1) {
+      pushEvent(`device login failed, trying oauth: ${e1.message || e1}`, "err");
+      result = await invoke("login_with_grok");
+    }
+    if (result.loginUrl) {
+      pushEvent(`Login URL opened`, "ok");
+      $("auth-hint").textContent = result.userCode
+        ? `Code: ${result.userCode} — finish in browser`
+        : "Complete sign-in in the browser window.";
+    }
+    renderAuth(result.status);
+    if (result.status?.loggedIn) {
+      pushEvent(result.status.message || "Signed in", "ok");
+      appendTranscript(
+        state.selectedSession,
+        "system",
+        result.status.message || "Signed in with Grok"
+      );
+    } else {
+      // Poll a few times — user may still be finishing browser flow
+      for (let i = 0; i < 30; i++) {
+        await new Promise((r) => setTimeout(r, 2000));
+        const auth = await invoke("get_auth_status");
+        renderAuth(auth);
+        if (auth.loggedIn) {
+          pushEvent(auth.message || "Signed in", "ok");
+          break;
+        }
+        $("auth-hint").textContent = `Waiting for browser sign-in… (${i + 1}/30)`;
+      }
+    }
+    await refreshStatus();
+  } catch (e) {
+    toastError(e);
+    $("auth-hint").textContent = String(e.message || e);
+  } finally {
+    state.loggingIn = false;
+    await refreshAuth().catch(() => {});
+  }
+}
+
+async function logoutGrok() {
+  try {
+    const status = await invoke("logout_grok");
+    renderAuth(status);
+    pushEvent("Signed out", "ok");
+    await refreshStatus();
+  } catch (e) {
+    toastError(e);
+  }
 }
 
 async function refreshSessions() {
@@ -343,6 +450,16 @@ function parseCsv(s) {
 
 async function startAcp() {
   try {
+    const auth = state.auth || (await refreshAuth().catch(() => null));
+    if (auth && !auth.loggedIn) {
+      const go = confirm("Not signed in with Grok. Log in now?");
+      if (go) {
+        await loginWithGrok();
+        if (!state.auth?.loggedIn) throw new Error("Login required before starting a session");
+      } else {
+        throw new Error("Sign in with Grok first");
+      }
+    }
     const cwd = $("cwd").value.trim();
     if (!cwd) throw new Error("Set project cwd (absolute path)");
     const rawModel = $("model")?.value?.trim?.() || "";
@@ -396,6 +513,8 @@ async function sendPrompt() {
 // Wire buttons
 $("btn-new-session").onclick = startAcp;
 $("btn-start-acp").onclick = startAcp;
+$("btn-login").onclick = loginWithGrok;
+$("btn-logout").onclick = logoutGrok;
 $("btn-send").onclick = sendPrompt;
 $("btn-cancel").onclick = async () => {
   try {
@@ -613,7 +732,10 @@ async function boot() {
   try {
     await refreshStatus();
     await refreshSessions();
-    pushEvent("control panel ready", "ok");
+    pushEvent("Bomb Code ready", "ok");
+    if (state.auth && !state.auth.loggedIn) {
+      pushEvent("Not signed in — click Log in with Grok");
+    }
   } catch (e) {
     toastError(e);
   }

@@ -135,7 +135,23 @@ body {
 
 .empty-hint { color: var(--dim); font-size: 12px; padding: 8px 6px; }
 
-.col-footer { padding: 10px; border-top: 1px solid var(--border); flex-shrink: 0; }
+.col-footer { padding: 10px; border-top: 1px solid var(--border); flex-shrink: 0; display: flex; flex-direction: column; gap: 8px; }
+.auth-box {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px;
+  background: var(--bg);
+}
+.auth-label {
+  font-size: 11px;
+  margin-bottom: 6px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.auth-actions { display: flex; flex-direction: column; gap: 4px; }
+.auth-actions .btn { width: 100%; font-size: 12px; }
+.auth-hint { font-size: 10px; margin-top: 6px; line-height: 1.35; word-break: break-word; }
 .status-pill {
   display: flex; align-items: center; gap: 8px;
   font-size: 11px; color: var(--muted);

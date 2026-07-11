@@ -47,6 +47,14 @@
         </div>
 
         <div class="col-footer">
+          <div id="auth-box" class="auth-box">
+            <div id="auth-label" class="auth-label muted">Checking login…</div>
+            <div class="auth-actions">
+              <button id="btn-login" class="btn primary" title="Sign in with Grok (browser)">Log in with Grok</button>
+              <button id="btn-logout" class="btn ghost danger" title="Sign out" style="display:none">Log out</button>
+            </div>
+            <div id="auth-hint" class="auth-hint muted"></div>
+          </div>
           <div id="status-pill" class="status-pill status-unknown">
             <span class="dot"></span>
             <span id="status-text">Starting…</span>

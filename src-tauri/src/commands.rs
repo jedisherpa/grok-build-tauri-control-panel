@@ -56,6 +56,42 @@ pub async fn capture_baseline(
     Ok(state.grok_cli.capture_baseline().await)
 }
 
+// ── Auth / Grok login ────────────────────────────────────────────────────
+
+#[tauri::command]
+pub async fn get_auth_status() -> Result<grok_cli_wrapper::AuthStatus, String> {
+    Ok(grok_cli_wrapper::GrokCli::auth_status())
+}
+
+/// Opens Grok OAuth in the browser (`grok login --oauth`) and waits for completion.
+#[tauri::command]
+pub async fn login_with_grok(
+    state: State<'_, AppState>,
+) -> Result<grok_cli_wrapper::LoginResult, String> {
+    state
+        .grok_cli
+        .login_oauth(std::time::Duration::from_secs(300))
+        .await
+        .map_err(err)
+}
+
+/// Device-code login (prints/opens URL with user_code). Best for GUI.
+#[tauri::command]
+pub async fn login_with_device(
+    state: State<'_, AppState>,
+) -> Result<grok_cli_wrapper::LoginResult, String> {
+    state
+        .grok_cli
+        .login_device(std::time::Duration::from_secs(300))
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn logout_grok(state: State<'_, AppState>) -> Result<grok_cli_wrapper::AuthStatus, String> {
+    state.grok_cli.logout().await.map_err(err)
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeStatus {
@@ -101,6 +137,7 @@ pub async fn get_runtime_status(state: State<'_, AppState>) -> Result<RuntimeSta
     let xai = std::env::var("XAI_API_KEY")
         .map(|s| !s.is_empty())
         .unwrap_or(false);
+    let auth = grok_cli_wrapper::GrokCli::auth_status();
 
     let (ready, message) = if !exists {
         (
@@ -115,12 +152,20 @@ pub async fn get_runtime_status(state: State<'_, AppState>) -> Result<RuntimeSta
                 binary.display()
             ),
         )
+    } else if !auth.logged_in && !xai {
+        (
+            false,
+            "Not signed in — use Log in with Grok.".into(),
+        )
     } else {
+        let who = auth
+            .email
+            .clone()
+            .unwrap_or_else(|| "Grok".into());
         (
             true,
             format!(
-                "Ready — {} ({})",
-                binary.display(),
+                "Ready · {who} · {}",
                 version.as_deref().unwrap_or("?")
             ),
         )

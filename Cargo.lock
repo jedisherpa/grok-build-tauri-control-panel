@@ -1302,6 +1302,7 @@ name = "grok_cli_wrapper"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "directories",
  "grok_config",
  "serde",
  "serde_json",
