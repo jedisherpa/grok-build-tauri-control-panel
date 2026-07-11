@@ -355,7 +355,7 @@ async fn open_url(url: &str) -> Result<()> {
         if !status.success() {
             warn!(%url, "open failed");
         }
-        return Ok(());
+        Ok(())
     }
     #[cfg(target_os = "linux")]
     {
@@ -363,7 +363,7 @@ async fn open_url(url: &str) -> Result<()> {
         if !status.success() {
             warn!(%url, "xdg-open failed");
         }
-        return Ok(());
+        Ok(())
     }
     #[cfg(target_os = "windows")]
     {
@@ -374,7 +374,7 @@ async fn open_url(url: &str) -> Result<()> {
         if !status.success() {
             warn!(%url, "start failed");
         }
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     {
