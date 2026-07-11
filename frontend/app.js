@@ -1319,6 +1319,10 @@ async function sendPrompt() {
     if (!state.selectedSession) throw new Error("Select a thread first");
     const prompt = $("prompt").value;
     if (!prompt.trim()) throw new Error("Empty prompt");
+    const sess = state.sessions.find((s) => s.id === state.selectedSession);
+    const needsResume =
+      sess && (sess.live === false || String(sess.status || "").toLowerCase().includes("saved"));
+
     appendTranscript(state.selectedSession, "user", prompt);
     $("prompt").value = "";
     endAgentStream(state.selectedSession);
@@ -1326,12 +1330,19 @@ async function sendPrompt() {
     state.turn = emptyTurn();
     noteTurn("send", {
       promptChars: prompt.length,
-      note: "On the wire",
+      note: needsResume ? "Resuming saved thread…" : "On the wire",
       startedAt: Date.now(),
       lastSignalAt: Date.now(),
     });
-    // Immediately advance to think — waiting for first real signal
-    noteTurn("think", { promptChars: prompt.length, note: "Waiting for first token or tool" });
+    if (needsResume) {
+      noteTurn("think", {
+        promptChars: prompt.length,
+        note: "Starting agent for saved thread (history kept)",
+      });
+      pushEvent(`resume · ${shortId(state.selectedSession)}`, "ok", "thinking", { force: true });
+    } else {
+      noteTurn("think", { promptChars: prompt.length, note: "Waiting for first token or tool" });
+    }
     startPhraseCycle();
     pushEvent(
       `you · ${formatCount(prompt.length)} chars → ${shortId(state.selectedSession)}`,
@@ -1340,7 +1351,21 @@ async function sendPrompt() {
       { force: true }
     );
     await invoke("send_prompt", { id: state.selectedSession, prompt });
-    // Keep think until agent_message / tool_call arrives
+    // Mark live after successful send/resume
+    if (sess) {
+      sess.live = true;
+      sess.status = "running";
+      renderThreads();
+      renderAgents();
+    }
+    if (needsResume) {
+      // Pull "agent resumed…" system line from SQLite without dropping live chat.
+      appendTranscript(
+        state.selectedSession,
+        "system",
+        "agent resumed after app restart — same thread memory, new ACP process"
+      );
+    }
     if (state.turn.phase === "send") {
       noteTurn("think", { note: "Prompt accepted · waiting on agent" });
     }

@@ -40,6 +40,35 @@ impl SessionRegistry {
     }
 
     pub async fn spawn_agent(&self, cwd: &str, opts: SpawnOptions) -> Result<Uuid> {
+        let id = Uuid::new_v4();
+        self.spawn_agent_with_id(id, cwd, opts, None).await?;
+        Ok(id)
+    }
+
+    /// Re-attach a live ACP process to an existing thread id (after reboot / update).
+    /// Transcript history stays under the same id in SQLite.
+    pub async fn resume_session(
+        &self,
+        id: Uuid,
+        cwd: &str,
+        opts: SpawnOptions,
+        created_at: Option<chrono::DateTime<Utc>>,
+    ) -> Result<()> {
+        if self.sessions.contains_key(&id) {
+            return Ok(());
+        }
+        self.spawn_agent_with_id(id, cwd, opts, created_at).await?;
+        info!(%id, cwd, "session resumed from disk");
+        Ok(())
+    }
+
+    async fn spawn_agent_with_id(
+        &self,
+        id: Uuid,
+        cwd: &str,
+        opts: SpawnOptions,
+        created_at: Option<chrono::DateTime<Utc>>,
+    ) -> Result<()> {
         opts.validate().map_err(CoreError::InvalidOptions)?;
 
         let cwd_path = Path::new(cwd);
@@ -60,7 +89,6 @@ impl SessionRegistry {
             return Err(CoreError::MaxSessions(max));
         }
 
-        // Security: never silently force always_approve from config default if plan_mode preferred
         if cfg.always_approve_default && !opts.plan_mode {
             warn!("config always_approve_default is true; respecting explicit spawn opts");
         }
@@ -75,7 +103,6 @@ impl SessionRegistry {
         let binary = cfg.resolve_grok_binary()?;
         drop(cfg);
 
-        let id = Uuid::new_v4();
         let now = Utc::now();
         let mut metadata = SessionMetadata {
             id,
@@ -89,40 +116,54 @@ impl SessionRegistry {
             always_approve: opts.always_approve,
             sandbox_profile: opts.sandbox_profile.clone(),
             mcp_servers: opts.mcp_server_names.clone(),
-            created_at: now,
+            created_at: created_at.unwrap_or(now),
             last_activity: now,
             label: None,
         };
 
         let handle = match opts.mode {
             AgentMode::Acp => {
-                let acp_opts = AcpSpawnOptions {
-                    model: Some(model),
-                    rules: if opts.rules.is_empty() {
-                        None
-                    } else {
-                        Some(json!(opts.rules))
-                    },
-                    mcp_servers: opts.mcp_servers.clone(),
-                    plan_mode: metadata.plan_mode,
-                    always_approve: opts.always_approve,
-                    sandbox_profile: opts.sandbox_profile.clone(),
-                    extra_env: Vec::new(),
-                };
-                let client_cfg = AcpClientConfig::new(&binary, cwd_path);
-                let client = AcpClient::connect(
-                    client_cfg,
-                    &acp_opts,
-                    Some(self.event_bus.clone()),
-                    id,
-                )
-                .await?;
-                metadata.acp_session_id = client.session_id().await;
-                metadata.status = SessionStatus::Idle;
-                AgentHandle {
-                    metadata,
-                    child: None,
-                    acp_client: Some(client),
+                // Offline / mock threads from memory
+                if model.eq_ignore_ascii_case("mock") {
+                    let client =
+                        AcpClient::mock_for_tests(&format!("mock-{id}"), Some(self.event_bus.clone()));
+                    metadata.acp_session_id = Some(format!("mock-{id}"));
+                    metadata.status = SessionStatus::Idle;
+                    metadata.label = Some("mock".into());
+                    AgentHandle {
+                        metadata,
+                        child: None,
+                        acp_client: Some(client),
+                    }
+                } else {
+                    let acp_opts = AcpSpawnOptions {
+                        model: Some(model),
+                        rules: if opts.rules.is_empty() {
+                            None
+                        } else {
+                            Some(json!(opts.rules))
+                        },
+                        mcp_servers: opts.mcp_servers.clone(),
+                        plan_mode: metadata.plan_mode,
+                        always_approve: opts.always_approve,
+                        sandbox_profile: opts.sandbox_profile.clone(),
+                        extra_env: Vec::new(),
+                    };
+                    let client_cfg = AcpClientConfig::new(&binary, cwd_path);
+                    let client = AcpClient::connect(
+                        client_cfg,
+                        &acp_opts,
+                        Some(self.event_bus.clone()),
+                        id,
+                    )
+                    .await?;
+                    metadata.acp_session_id = client.session_id().await;
+                    metadata.status = SessionStatus::Idle;
+                    AgentHandle {
+                        metadata,
+                        child: None,
+                        acp_client: Some(client),
+                    }
                 }
             }
             AgentMode::Headless => {
@@ -162,37 +203,21 @@ impl SessionRegistry {
 
         info!(%id, mode = mode_str, cwd, "session spawned");
         self.sessions.insert(id, handle);
-        Ok(id)
+        Ok(())
     }
 
     /// Spawn a mock ACP session for tests / offline UI development.
     pub async fn spawn_mock(&self, cwd: &str) -> Result<Uuid> {
         let id = Uuid::new_v4();
-        let now = Utc::now();
-        let client = AcpClient::mock_for_tests(&format!("mock-{id}"), Some(self.event_bus.clone()));
-        let handle = AgentHandle {
-            metadata: SessionMetadata {
-                id,
-                acp_session_id: Some(format!("mock-{id}")),
-                cwd: cwd.to_string(),
-                worktree: None,
-                model: "mock".into(),
-                mode: AgentMode::Acp,
-                status: SessionStatus::Idle,
-                plan_mode: true,
-                always_approve: false,
-                sandbox_profile: Some("workspace".into()),
-                mcp_servers: Vec::new(),
-                created_at: now,
-                last_activity: now,
-                label: Some("mock".into()),
-            },
-            child: None,
-            acp_client: Some(client),
-        };
-        self.event_bus.emit_session_created(id, cwd, "acp").await;
-        self.sessions.insert(id, handle);
+        let mut opts = SpawnOptions::default();
+        opts.model = Some("mock".into());
+        opts.mode = AgentMode::Acp;
+        self.spawn_agent_with_id(id, cwd, opts, None).await?;
         Ok(id)
+    }
+
+    pub fn is_live(&self, id: Uuid) -> bool {
+        self.sessions.contains_key(&id)
     }
 
     pub fn list_sessions(&self) -> Vec<SessionMetadata> {

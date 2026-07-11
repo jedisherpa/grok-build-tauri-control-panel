@@ -421,12 +421,83 @@ pub async fn send_prompt(
     prompt: String,
 ) -> Result<(), String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
+
+    // Saved threads after reboot have history in SQLite but no live ACP process.
+    // Auto-resume so "Send" picks up the same thread id + transcript.
+    if !state.registry.is_live(id) {
+        resume_saved_session(&state, id).await?;
+    }
+
     state.registry.send_prompt(id, &prompt).await.map_err(err)?;
     // User message — durable immediately (agent side streams via event bus).
     let _ = state
         .persistence
         .append_message(id, "prompt", prompt, Utc::now());
     persist_session(&state, id).await;
+    Ok(())
+}
+
+/// Bring a SQLite thread back online under the same id.
+async fn resume_saved_session(state: &AppState, id: Uuid) -> Result<(), String> {
+    let rec = state
+        .persistence
+        .get_session(id)
+        .map_err(|e| format!("cannot resume thread — {e}"))?;
+
+    if rec.cwd.trim().is_empty() {
+        return Err("cannot resume: saved thread has no project path".into());
+    }
+    if !PathBuf::from(&rec.cwd).is_dir() {
+        return Err(format!(
+            "cannot resume: project path missing — {}",
+            rec.cwd
+        ));
+    }
+
+    let mut opts = SpawnOptions::default();
+    opts.mode = if rec.mode.eq_ignore_ascii_case("headless") {
+        grok_control_core::AgentMode::Headless
+    } else {
+        grok_control_core::AgentMode::Acp
+    };
+    opts.model = if rec.model.is_empty() {
+        None
+    } else {
+        Some(rec.model.clone())
+    };
+    opts.worktree = rec.worktree.clone();
+    opts.plan_mode = true;
+    opts.mcp_server_names = extract_mcp_from_meta(&rec.metadata_json);
+    // Prefer empty headless prompt so validate fails only if mode is headless without prompt —
+    // for resume we force ACP for headless-saved threads that lack a prompt.
+    if matches!(opts.mode, grok_control_core::AgentMode::Headless) {
+        opts.mode = grok_control_core::AgentMode::Acp;
+    }
+
+    // Re-resolve MCP payloads if names present
+    if !opts.mcp_server_names.is_empty() {
+        if let Ok(payload) = state
+            .mcp
+            .session_mcp_payload(&opts.mcp_server_names, &[], false)
+            .await
+        {
+            opts.mcp_servers = payload;
+        }
+    }
+
+    state
+        .registry
+        .resume_session(id, &rec.cwd, opts, Some(rec.created_at))
+        .await
+        .map_err(err)?;
+
+    let _ = state.persistence.append_message(
+        id,
+        "system",
+        "agent resumed after app restart — same thread memory, new ACP process",
+        Utc::now(),
+    );
+    persist_session(state, id).await;
     Ok(())
 }
 
