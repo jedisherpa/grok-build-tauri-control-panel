@@ -3,10 +3,20 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+/// JSON-RPC id may be string or number on the wire.
+pub fn id_key(id: &Value) -> String {
+    match id {
+        Value::String(s) => s.clone(),
+        Value::Number(n) => n.to_string(),
+        other => other.to_string(),
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct JsonRpcRequest {
     pub jsonrpc: String,
-    pub id: String,
+    /// Wire id (string or number).
+    pub id: Value,
     pub method: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub params: Option<Value>,
@@ -41,9 +51,20 @@ pub struct JsonRpcError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum JsonRpcMessage {
+    /// Must try response first (has result/error).
     Response(JsonRpcResponse),
-    Notification(JsonRpcNotification),
+    /// Request has method + id.
     Request(JsonRpcRequest),
+    /// Notification has method, no id.
+    Notification(JsonRpcNotification),
+}
+
+/// Agent → client JSON-RPC request that needs a response.
+#[derive(Debug, Clone)]
+pub struct IncomingAgentRequest {
+    pub id: Value,
+    pub method: String,
+    pub params: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -19,8 +19,8 @@ use grok_events::{
 
 use crate::error::{AcpError, Result};
 use crate::messages::{
-    AuthenticateParams, ClientCapabilities, ClientInfo, FsCapabilities, InitializeParams,
-    JsonRpcNotification, PromptContent, SessionPromptParams,
+    AuthenticateParams, ClientCapabilities, ClientInfo, FsCapabilities, IncomingAgentRequest,
+    InitializeParams, JsonRpcNotification, PromptContent, SessionPromptParams,
 };
 use crate::transport::NdjsonTransport;
 
@@ -89,6 +89,9 @@ pub struct AcpClient {
     event_bus: Option<Arc<EventBus>>,
     control_session_id: Uuid,
     notification_rx: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<JsonRpcNotification>>>,
+    agent_request_rx: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<IncomingAgentRequest>>>,
+    /// When true, auto-allow tool permission requests (yolo).
+    always_approve: bool,
 }
 
 impl AcpClient {
@@ -147,7 +150,8 @@ impl AcpClient {
             .ok_or_else(|| AcpError::Spawn("missing stdout".into()))?;
 
         let (notif_tx, notif_rx) = tokio::sync::mpsc::unbounded_channel();
-        let transport = NdjsonTransport::new(stdin, stdout, notif_tx);
+        let (agent_req_tx, agent_req_rx) = tokio::sync::mpsc::unbounded_channel();
+        let transport = NdjsonTransport::new(stdin, stdout, notif_tx, agent_req_tx);
 
         let client = Arc::new(Self {
             config,
@@ -159,6 +163,8 @@ impl AcpClient {
             event_bus,
             control_session_id,
             notification_rx: Mutex::new(Some(notif_rx)),
+            agent_request_rx: Mutex::new(Some(agent_req_rx)),
+            always_approve: opts.always_approve,
         });
 
         client.initialize().await?;
@@ -170,6 +176,14 @@ impl AcpClient {
         tokio::spawn(async move {
             if let Err(e) = loop_client.run_event_loop().await {
                 warn!(error = %e, "ACP event loop terminated");
+            }
+        });
+
+        // Answer agent→client requests (fs + permissions). Without this the turn hangs.
+        let req_client = client.clone();
+        tokio::spawn(async move {
+            if let Err(e) = req_client.run_agent_request_loop().await {
+                warn!(error = %e, "ACP agent-request loop terminated");
             }
         });
 
@@ -189,6 +203,8 @@ impl AcpClient {
             event_bus,
             control_session_id: Uuid::new_v4(),
             notification_rx: Mutex::new(None),
+            agent_request_rx: Mutex::new(None),
+            always_approve: false,
         })
     }
 
@@ -559,6 +575,261 @@ impl AcpClient {
             self.handle_notification(notif).await;
         }
         Err(AcpError::ProcessExited)
+    }
+
+    /// Handle agent-initiated JSON-RPC requests. Critical for unblocking turns.
+    async fn run_agent_request_loop(self: Arc<Self>) -> Result<()> {
+        let mut rx = self
+            .agent_request_rx
+            .lock()
+            .await
+            .take()
+            .ok_or(AcpError::SessionNotReady)?;
+
+        while let Some(req) = rx.recv().await {
+            if let Err(e) = self.handle_agent_request(req).await {
+                warn!(error = %e, "failed handling agent request");
+            }
+        }
+        Err(AcpError::ProcessExited)
+    }
+
+    async fn handle_agent_request(&self, req: IncomingAgentRequest) -> Result<()> {
+        let transport = self.transport().await?;
+        let method = req.method.as_str();
+        info!(%method, "ACP agent→client request");
+
+        match method {
+            "fs/read_text_file" | "fs/readTextFile" => {
+                let path = req
+                    .params
+                    .as_ref()
+                    .and_then(|p| p.get("path"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                self.emit_host_tool("fs/read", path, ToolCallStatus::Running);
+                match self.fs_read_text(&req.params).await {
+                    Ok(content) => {
+                        self.emit_host_tool("fs/read", path, ToolCallStatus::Completed);
+                        transport
+                            .send_response(req.id, json!({ "content": content }))
+                            .await?;
+                    }
+                    Err(e) => {
+                        self.emit_host_tool("fs/read", &e.to_string(), ToolCallStatus::Failed);
+                        transport
+                            .send_error_response(req.id, -32000, e.to_string())
+                            .await?;
+                    }
+                }
+            }
+            "fs/write_text_file" | "fs/writeTextFile" => {
+                let path = req
+                    .params
+                    .as_ref()
+                    .and_then(|p| p.get("path"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?");
+                self.emit_host_tool("fs/write", path, ToolCallStatus::Running);
+                match self.fs_write_text(&req.params).await {
+                    Ok(()) => {
+                        self.emit_host_tool("fs/write", path, ToolCallStatus::Completed);
+                        transport.send_response(req.id, json!({})).await?;
+                    }
+                    Err(e) => {
+                        self.emit_host_tool("fs/write", &e.to_string(), ToolCallStatus::Failed);
+                        transport
+                            .send_error_response(req.id, -32000, e.to_string())
+                            .await?;
+                    }
+                }
+            }
+            "session/request_permission" | "session/requestPermission" => {
+                let outcome = self.permission_outcome(&req.params).await;
+                if let Some(bus) = &self.event_bus {
+                    let tool = req
+                        .params
+                        .as_ref()
+                        .and_then(|p| p.get("toolCall"))
+                        .and_then(|t| t.get("title").or_else(|| t.get("toolName")))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("tool");
+                    bus.emit(ControlEvent::ApprovalRequired {
+                        session_id: self.control_session_id,
+                        request_id: req.id.to_string(),
+                        tool: tool.to_string(),
+                        summary: if self.always_approve {
+                            "auto-approved (yolo)".into()
+                        } else {
+                            "auto-allowed for session progress (plan mode soft-approve)".into()
+                        },
+                        at: Utc::now(),
+                    });
+                }
+                transport.send_response(req.id, outcome).await?;
+            }
+            // Terminal stubs — not fully implemented; return method-not-found cleanly
+            m if m.starts_with("terminal/") => {
+                transport
+                    .send_error_response(
+                        req.id,
+                        -32601,
+                        format!("terminal capability not fully implemented: {m}"),
+                    )
+                    .await?;
+            }
+            other => {
+                warn!(method = %other, "unhandled agent request — returning empty result");
+                // Prefer empty success over hang when method is unknown optional.
+                transport.send_response(req.id, json!({})).await?;
+            }
+        }
+        Ok(())
+    }
+
+    async fn permission_outcome(&self, params: &Option<Value>) -> Value {
+        // Pick first allow-ish option if present; else selected generic allow.
+        let options = params
+            .as_ref()
+            .and_then(|p| p.get("options"))
+            .and_then(|o| o.as_array())
+            .cloned()
+            .unwrap_or_default();
+
+        let option_id = options
+            .iter()
+            .find_map(|o| {
+                let id = o.get("optionId").or_else(|| o.get("id"))?.as_str()?;
+                let kind = o
+                    .get("kind")
+                    .or_else(|| o.get("name"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_lowercase();
+                if kind.contains("allow") || kind.contains("approve") || kind.contains("yes") {
+                    Some(id.to_string())
+                } else {
+                    None
+                }
+            })
+            .or_else(|| {
+                options
+                    .first()
+                    .and_then(|o| o.get("optionId").or_else(|| o.get("id")))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+            })
+            .unwrap_or_else(|| "allow".into());
+
+        json!({
+            "outcome": {
+                "outcome": "selected",
+                "optionId": option_id
+            }
+        })
+    }
+
+    fn resolve_sandbox_path(&self, path: &str) -> Result<PathBuf> {
+        let p = PathBuf::from(path);
+        let abs = if p.is_absolute() {
+            p
+        } else {
+            self.config.cwd.join(p)
+        };
+        let abs = abs.canonicalize().unwrap_or(abs);
+        let cwd = self
+            .config
+            .cwd
+            .canonicalize()
+            .unwrap_or_else(|_| self.config.cwd.clone());
+        // Allow cwd and children only.
+        if abs == cwd || abs.starts_with(&cwd) {
+            Ok(abs)
+        } else {
+            Err(AcpError::Protocol(format!(
+                "path outside workspace: {}",
+                abs.display()
+            )))
+        }
+    }
+
+    fn emit_host_tool(&self, tool: &str, summary: &str, status: ToolCallStatus) {
+        if let Some(bus) = &self.event_bus {
+            bus.emit_tool_call(
+                self.control_session_id,
+                ToolCallEvent {
+                    id: Uuid::new_v4().to_string(),
+                    tool: tool.to_string(),
+                    args_summary: summary.to_string(),
+                    status,
+                    result_summary: None,
+                    at: Utc::now(),
+                },
+            );
+        }
+    }
+
+    async fn fs_read_text(&self, params: &Option<Value>) -> Result<String> {
+        let p = params.as_ref().ok_or_else(|| AcpError::Protocol("missing params".into()))?;
+        let path = p
+            .get("path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| AcpError::Protocol("fs/read missing path".into()))?;
+        let abs = self.resolve_sandbox_path(path)?;
+        let mut content = tokio::fs::read_to_string(&abs)
+            .await
+            .map_err(|e| AcpError::Protocol(format!("read {}: {e}", abs.display())))?;
+
+        // Optional line/limit (1-based line)
+        if let Some(line) = p.get("line").and_then(|v| v.as_u64()) {
+            let start = line.saturating_sub(1) as usize;
+            let lines: Vec<&str> = content.lines().collect();
+            let end = if let Some(limit) = p.get("limit").and_then(|v| v.as_u64()) {
+                (start + limit as usize).min(lines.len())
+            } else {
+                lines.len()
+            };
+            content = lines
+                .get(start..end)
+                .map(|s| s.join("\n"))
+                .unwrap_or_default();
+        }
+        // Cap huge files so we don't blow the agent context
+        const MAX: usize = 400_000;
+        if content.len() > MAX {
+            content.truncate(MAX);
+            content.push_str("\n…[truncated]");
+        }
+        Ok(content)
+    }
+
+    async fn fs_write_text(&self, params: &Option<Value>) -> Result<()> {
+        let p = params.as_ref().ok_or_else(|| AcpError::Protocol("missing params".into()))?;
+        let path = p
+            .get("path")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| AcpError::Protocol("fs/write missing path".into()))?;
+        let content = p
+            .get("content")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| AcpError::Protocol("fs/write missing content".into()))?;
+        let abs = self.resolve_sandbox_path(path)?;
+        if let Some(parent) = abs.parent() {
+            tokio::fs::create_dir_all(parent)
+                .await
+                .map_err(|e| AcpError::Protocol(format!("mkdir: {e}")))?;
+        }
+        tokio::fs::write(&abs, content)
+            .await
+            .map_err(|e| AcpError::Protocol(format!("write {}: {e}", abs.display())))?;
+        if let Some(bus) = &self.event_bus {
+            bus.emit(ControlEvent::AgentMessage {
+                session_id: self.control_session_id,
+                text: format!("wrote {}", abs.display()),
+                at: Utc::now(),
+            });
+        }
+        Ok(())
     }
 
     async fn handle_notification(&self, notif: JsonRpcNotification) {

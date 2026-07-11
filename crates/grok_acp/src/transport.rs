@@ -11,12 +11,16 @@ use tracing::{debug, warn};
 use uuid::Uuid;
 
 use crate::error::{AcpError, Result};
-use crate::messages::{JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse};
+use crate::messages::{
+    id_key, IncomingAgentRequest, JsonRpcError, JsonRpcMessage, JsonRpcNotification, JsonRpcRequest,
+    JsonRpcResponse,
+};
 
 pub struct NdjsonTransport {
     stdin: Mutex<ChildStdin>,
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<JsonRpcResponse>>>>,
     notification_tx: tokio::sync::mpsc::UnboundedSender<JsonRpcNotification>,
+    agent_request_tx: tokio::sync::mpsc::UnboundedSender<IncomingAgentRequest>,
 }
 
 impl NdjsonTransport {
@@ -24,11 +28,13 @@ impl NdjsonTransport {
         stdin: ChildStdin,
         stdout: ChildStdout,
         notification_tx: tokio::sync::mpsc::UnboundedSender<JsonRpcNotification>,
+        agent_request_tx: tokio::sync::mpsc::UnboundedSender<IncomingAgentRequest>,
     ) -> Arc<Self> {
         let transport = Arc::new(Self {
             stdin: Mutex::new(stdin),
             pending: Arc::new(Mutex::new(HashMap::new())),
             notification_tx,
+            agent_request_tx,
         });
 
         let reader_self = transport.clone();
@@ -60,10 +66,7 @@ impl NdjsonTransport {
                     let id_key = resp
                         .id
                         .as_ref()
-                        .map(|v| match v {
-                            Value::String(s) => s.clone(),
-                            other => other.to_string(),
-                        })
+                        .map(id_key)
                         .unwrap_or_default();
                     let mut pending = self.pending.lock().await;
                     if let Some(tx) = pending.remove(&id_key) {
@@ -76,14 +79,42 @@ impl NdjsonTransport {
                     let _ = self.notification_tx.send(n);
                 }
                 Ok(JsonRpcMessage::Request(req)) => {
-                    // Server-initiated requests (e.g. fs/read) — surface as notifications-like events
-                    let _ = self.notification_tx.send(JsonRpcNotification {
-                        jsonrpc: "2.0".into(),
-                        method: format!("client/request/{}", req.method),
+                    // Agent → client request (fs/*, session/request_permission, …).
+                    // MUST be answered or the agent turn hangs forever.
+                    let _ = self.agent_request_tx.send(IncomingAgentRequest {
+                        id: req.id,
+                        method: req.method,
                         params: req.params,
                     });
                 }
                 Err(e) => {
+                    // Try looser parse: notification-shaped with extra fields.
+                    if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
+                        if v.get("method").is_some() && v.get("id").is_some() {
+                            let _ = self.agent_request_tx.send(IncomingAgentRequest {
+                                id: v.get("id").cloned().unwrap_or(Value::Null),
+                                method: v
+                                    .get("method")
+                                    .and_then(|m| m.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                params: v.get("params").cloned(),
+                            });
+                            continue;
+                        }
+                        if v.get("method").is_some() && v.get("id").is_none() {
+                            let _ = self.notification_tx.send(JsonRpcNotification {
+                                jsonrpc: "2.0".into(),
+                                method: v
+                                    .get("method")
+                                    .and_then(|m| m.as_str())
+                                    .unwrap_or("")
+                                    .to_string(),
+                                params: v.get("params").cloned(),
+                            });
+                            continue;
+                        }
+                    }
                     warn!(error = %e, line = %trimmed, "failed to parse ACP line");
                 }
             }
@@ -102,27 +133,65 @@ impl NdjsonTransport {
         method: &str,
         params: Option<Value>,
     ) -> Result<oneshot::Receiver<JsonRpcResponse>> {
-        let id = Uuid::new_v4().to_string();
+        let id = Value::String(Uuid::new_v4().to_string());
+        let id_str = id_key(&id);
         let req = JsonRpcRequest {
             jsonrpc: "2.0".into(),
-            id: id.clone(),
+            id,
             method: method.to_string(),
             params,
         };
         let (tx, rx) = oneshot::channel();
         {
             let mut pending = self.pending.lock().await;
-            pending.insert(id.clone(), tx);
+            pending.insert(id_str.clone(), tx);
         }
 
         let line = serde_json::to_string(&req)? + "\n";
-        debug!(method, %id, "acp send");
+        debug!(method, %id_str, "acp send");
         {
             let mut stdin = self.stdin.lock().await;
             stdin.write_all(line.as_bytes()).await?;
             stdin.flush().await?;
         }
         Ok(rx)
+    }
+
+    pub async fn send_response(&self, id: Value, result: Value) -> Result<()> {
+        let resp = JsonRpcResponse {
+            jsonrpc: "2.0".into(),
+            id: Some(id),
+            result: Some(result),
+            error: None,
+        };
+        let line = serde_json::to_string(&resp)? + "\n";
+        let mut stdin = self.stdin.lock().await;
+        stdin.write_all(line.as_bytes()).await?;
+        stdin.flush().await?;
+        Ok(())
+    }
+
+    pub async fn send_error_response(
+        &self,
+        id: Value,
+        code: i64,
+        message: impl Into<String>,
+    ) -> Result<()> {
+        let resp = JsonRpcResponse {
+            jsonrpc: "2.0".into(),
+            id: Some(id),
+            result: None,
+            error: Some(JsonRpcError {
+                code,
+                message: message.into(),
+                data: None,
+            }),
+        };
+        let line = serde_json::to_string(&resp)? + "\n";
+        let mut stdin = self.stdin.lock().await;
+        stdin.write_all(line.as_bytes()).await?;
+        stdin.flush().await?;
+        Ok(())
     }
 
     pub fn unwrap_response(resp: JsonRpcResponse) -> Result<Value> {

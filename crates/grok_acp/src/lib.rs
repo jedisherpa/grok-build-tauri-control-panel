@@ -10,8 +10,8 @@ mod transport;
 pub use client::{AcpClient, AcpClientConfig, SpawnOptions as AcpSpawnOptions};
 pub use error::{AcpError, Result};
 pub use messages::{
-    AuthenticateParams, ClientCapabilities, ClientInfo, InitializeParams, InitializeResult,
-    JsonRpcError, JsonRpcMessage, JsonRpcNotification, JsonRpcRequest, JsonRpcResponse,
-    PromptContent, SessionNewParams, SessionPromptParams,
+    AuthenticateParams, ClientCapabilities, ClientInfo, IncomingAgentRequest, InitializeParams,
+    InitializeResult, JsonRpcError, JsonRpcMessage, JsonRpcNotification, JsonRpcRequest,
+    JsonRpcResponse, PromptContent, SessionNewParams, SessionPromptParams,
 };
 pub use transport::NdjsonTransport;
