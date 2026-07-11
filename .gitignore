@@ -1,0 +1,26 @@
+# Rust
+/target
+**/target
+**/*.rs.bk
+
+# Tauri / Node
+node_modules
+dist
+.DS_Store
+*.log
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# IDE
+.idea
+.vscode
+*.swp
+
+# Local grok / agent state
+.grok/
+
+# OS
+Thumbs.db

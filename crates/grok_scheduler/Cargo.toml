@@ -1,0 +1,20 @@
+[package]
+name = "grok_scheduler"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Recurring job scheduler for agent routines and goals"
+
+[dependencies]
+chrono.workspace = true
+cron.workspace = true
+grok_events = { path = "../grok_events" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

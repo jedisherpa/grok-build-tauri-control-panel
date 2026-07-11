@@ -1,0 +1,21 @@
+[package]
+name = "grok_worktree"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Git worktree lifecycle for isolated parallel agent sessions"
+
+[dependencies]
+anyhow.workspace = true
+chrono.workspace = true
+grok_cli_wrapper = { path = "../grok_cli_wrapper" }
+grok_config = { path = "../grok_config" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

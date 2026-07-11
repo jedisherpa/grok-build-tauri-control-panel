@@ -1,0 +1,20 @@
+[package]
+name = "grok_extensions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "MCP, plugins, and skills CRUD with config persistence"
+
+[dependencies]
+grok_cli_wrapper = { path = "../grok_cli_wrapper" }
+grok_config = { path = "../grok_config" }
+grok_events = { path = "../grok_events" }
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

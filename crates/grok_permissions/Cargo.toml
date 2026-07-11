@@ -1,0 +1,16 @@
+[package]
+name = "grok_permissions"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Permission presets, tool rules, and sandbox policy engine"
+
+[dependencies]
+grok_config = { path = "../grok_config" }
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]

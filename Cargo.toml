@@ -1,0 +1,56 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/grok_config",
+    "crates/grok_events",
+    "crates/grok_cli_wrapper",
+    "crates/grok_acp",
+    "crates/grok_control_core",
+    "crates/grok_worktree",
+    "crates/grok_permissions",
+    "crates/grok_extensions",
+    "crates/grok_memory",
+    "crates/grok_scheduler",
+    "crates/grok_persistence",
+    "crates/grok_diff",
+    "src-tauri",
+]
+default-members = ["src-tauri"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+authors = ["xAI / Grok Build Contributors"]
+repository = "https://github.com/jedisherpa/grok-build-tauri-control-panel"
+
+[workspace.dependencies]
+anyhow = "1"
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+dashmap = "6"
+directories = "5"
+futures = "0.3"
+parking_lot = "0.12"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec", "io"] }
+toml = "0.8"
+toml_edit = "0.22"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4", "serde"] }
+which = "7"
+bytes = "1"
+regex = "1"
+sha2 = "0.10"
+hex = "0.4"
+tempfile = "3"
+rusqlite = { version = "0.32", features = ["bundled"] }
+cron = "0.15"
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+tauri-plugin-fs = "2"
+tauri-build = { version = "2", features = [] }

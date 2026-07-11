@@ -1,0 +1,19 @@
+[package]
+name = "grok_memory"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Cross-session memory store with flush/dream hooks"
+
+[dependencies]
+chrono.workspace = true
+grok_events = { path = "../grok_events" }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

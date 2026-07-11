@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Grok Build Control Panel</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div id="app">
+      <header>
+        <h1>Grok Build Control Panel</h1>
+        <p class="subtitle">ACP-first multi-session agent orchestrator</p>
+      </header>
+
+      <nav class="tabs">
+        <button class="tab active" data-tab="sessions">Sessions</button>
+        <button class="tab" data-tab="worktrees">Worktrees</button>
+        <button class="tab" data-tab="extensions">Extensions</button>
+        <button class="tab" data-tab="memory">Memory</button>
+        <button class="tab" data-tab="scheduler">Scheduler</button>
+        <button class="tab" data-tab="system">System</button>
+      </nav>
+
+      <main>
+        <section id="sessions" class="panel active">
+          <div class="row">
+            <label>CWD <input id="cwd" type="text" placeholder="/absolute/path" /></label>
+            <button id="btn-mock">Start Mock Session</button>
+            <button id="btn-refresh">Refresh</button>
+          </div>
+          <div class="row">
+            <input id="prompt" type="text" placeholder="Send prompt to selected session…" />
+            <button id="btn-prompt">Send Prompt</button>
+            <button id="btn-cancel">Cancel</button>
+          </div>
+          <pre id="sessions-list" class="log">No sessions yet.</pre>
+        </section>
+
+        <section id="worktrees" class="panel">
+          <div class="row">
+            <label>Repo <input id="repo" type="text" placeholder="/path/to/git/repo" /></label>
+            <label>Name <input id="wt-name" type="text" placeholder="feature-x" /></label>
+            <button id="btn-wt-create">Create</button>
+            <button id="btn-wt-list">List</button>
+          </div>
+          <pre id="worktrees-list" class="log"></pre>
+        </section>
+
+        <section id="extensions" class="panel">
+          <div class="row">
+            <button id="btn-ext-list">List Extensions</button>
+            <button id="btn-ext-doctor">Doctor</button>
+          </div>
+          <pre id="extensions-list" class="log"></pre>
+        </section>
+
+        <section id="memory" class="panel">
+          <div class="row">
+            <input id="mem-scope" type="text" placeholder="scope" value="workspace" />
+            <input id="mem-content" type="text" placeholder="memory content" />
+            <button id="btn-mem-add">Add</button>
+            <button id="btn-mem-list">List</button>
+            <button id="btn-mem-flush">Flush</button>
+          </div>
+          <pre id="memory-list" class="log"></pre>
+        </section>
+
+        <section id="scheduler" class="panel">
+          <div class="row">
+            <input id="job-name" type="text" placeholder="job name" />
+            <input id="job-prompt" type="text" placeholder="prompt" />
+            <input id="job-interval" type="number" value="3600" min="1" />
+            <button id="btn-job-add">Add Interval Job</button>
+            <button id="btn-job-list">List Jobs</button>
+          </div>
+          <pre id="scheduler-list" class="log"></pre>
+        </section>
+
+        <section id="system" class="panel">
+          <div class="row">
+            <button id="btn-discover">Discover Environment</button>
+            <button id="btn-baseline">Capture Baseline</button>
+            <button id="btn-config">Get Config</button>
+            <button id="btn-checkpoint">Checkpoint</button>
+            <button id="btn-shutdown">Shutdown All</button>
+          </div>
+          <pre id="system-log" class="log"></pre>
+        </section>
+      </main>
+
+      <aside>
+        <h2>Live Events</h2>
+        <pre id="events" class="log events"></pre>
+      </aside>
+    </div>
+    <script src="app.js"></script>
+  </body>
+</html>
