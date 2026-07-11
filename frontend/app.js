@@ -701,10 +701,17 @@ function renderThreads() {
       const liveTag = live
         ? ""
         : `<span class="badge saved" title="Restored from disk">saved</span>`;
+      const brain = String(s.brainMode || s.brain_mode || "").toLowerCase();
+      let brainTag = "";
+      if (live && brain === "full_brain") {
+        brainTag = `<span class="badge brain-full" title="Agent reloaded prior ACP session">full brain</span>`;
+      } else if (live && brain === "history_only") {
+        brainTag = `<span class="badge brain-history" title="New ACP process; transcript injected as context">history-only</span>`;
+      }
       return `<div class="thread-item ${selected}${live ? "" : " restored"}" data-id="${escapeHtml(id)}">
   <div class="name">${bombHtml(bombMood, "xs")} ${escapeHtml(mode)} · ${escapeHtml(shortId(id))}</div>
   <div class="meta"><span class="badge ${badgeCls}">${bombHtml(bombMood, "xs")}${escapeHtml(status)}</span>
-  ${liveTag}
+  ${liveTag}${brainTag}
   <span>${escapeHtml(isMock ? "mock" : model || "—")}</span>
   ${msgs ? `<span class="muted">${msgs} msg</span>` : ""}</div>
   <div class="meta">${escapeHtml(shortCwd)}</div>
@@ -1337,9 +1344,14 @@ async function sendPrompt() {
     if (needsResume) {
       noteTurn("think", {
         promptChars: prompt.length,
-        note: "Starting agent for saved thread (history kept)",
+        note: "Resume ladder: load → history inject…",
       });
-      pushEvent(`resume · ${shortId(state.selectedSession)}`, "ok", "thinking", { force: true });
+      pushEvent(
+        `resume · ${shortId(state.selectedSession)} · try full brain else history-only`,
+        "ok",
+        "thinking",
+        { force: true }
+      );
     } else {
       noteTurn("think", { promptChars: prompt.length, note: "Waiting for first token or tool" });
     }
@@ -1351,20 +1363,23 @@ async function sendPrompt() {
       { force: true }
     );
     await invoke("send_prompt", { id: state.selectedSession, prompt });
-    // Mark live after successful send/resume
+    // Mark live after successful send/resume; refresh brain_mode from registry.
     if (sess) {
       sess.live = true;
       sess.status = "running";
-      renderThreads();
-      renderAgents();
     }
+    await refreshSessions();
     if (needsResume) {
-      // Pull "agent resumed…" system line from SQLite without dropping live chat.
-      appendTranscript(
-        state.selectedSession,
-        "system",
-        "agent resumed after app restart — same thread memory, new ACP process"
-      );
+      const s2 = state.sessions.find((s) => s.id === state.selectedSession);
+      const brain = String(s2?.brainMode || s2?.brain_mode || "history_only");
+      const note =
+        brain === "full_brain"
+          ? "🧠 full brain — agent reloaded prior ACP session"
+          : "📜 history-only — prior transcript injected into this prompt";
+      appendTranscript(state.selectedSession, "system", note);
+      pushEvent(`brain · ${brain.replace(/_/g, " ")}`, "ok", brain === "full_brain" ? "boom" : "thinking", {
+        force: true,
+      });
     }
     if (state.turn.phase === "send") {
       noteTurn("think", { note: "Prompt accepted · waiting on agent" });

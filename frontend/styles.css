@@ -137,6 +137,16 @@ body {
   color: var(--muted);
   border-color: color-mix(in srgb, var(--muted) 35%, var(--border));
 }
+.badge.brain-full {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 45%, var(--border));
+  background: color-mix(in srgb, var(--ok) 8%, transparent);
+}
+.badge.brain-history {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 40%, var(--border));
+  background: color-mix(in srgb, var(--warn) 8%, transparent);
+}
 .thread-item.restored { opacity: 0.92; }
 
 .empty-hint { color: var(--dim); font-size: 12px; padding: 8px 6px; }

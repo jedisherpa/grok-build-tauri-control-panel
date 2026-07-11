@@ -49,6 +49,45 @@ impl Default for SpawnOptions {
     }
 }
 
+/// How much agent mind we recovered after connect / resume.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum BrainMode {
+    /// Agent reloaded its own session (`session/load` or `session/resume`).
+    FullBrain,
+    /// New ACP session; we will inject SQLite transcript as context.
+    HistoryOnly,
+    /// Brand-new session, no prior context.
+    #[default]
+    Fresh,
+}
+
+impl BrainMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BrainMode::FullBrain => "full_brain",
+            BrainMode::HistoryOnly => "history_only",
+            BrainMode::Fresh => "fresh",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            BrainMode::FullBrain => "full brain",
+            BrainMode::HistoryOnly => "history-only",
+            BrainMode::Fresh => "fresh",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ConnectOpts {
+    /// Prior ACP session id from a previous process (try session/load).
+    pub resume_acp_session_id: Option<String>,
+    /// SQLite transcript summary to inject if load/resume fails.
+    pub transcript_context: Option<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct AcpClientConfig {
     pub grok_path: PathBuf,
@@ -92,6 +131,11 @@ pub struct AcpClient {
     agent_request_rx: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<IncomingAgentRequest>>>,
     /// When true, auto-allow tool permission requests (yolo).
     always_approve: bool,
+    brain_mode: RwLock<BrainMode>,
+    /// Injected once on first prompt when brain is history-only.
+    pending_context: Mutex<Option<String>>,
+    load_session_supported: RwLock<bool>,
+    resume_session_supported: RwLock<bool>,
 }
 
 impl AcpClient {
@@ -100,6 +144,17 @@ impl AcpClient {
         opts: &SpawnOptions,
         event_bus: Option<Arc<EventBus>>,
         control_session_id: Uuid,
+    ) -> Result<Arc<Self>> {
+        Self::connect_with(config, opts, event_bus, control_session_id, ConnectOpts::default())
+            .await
+    }
+
+    pub async fn connect_with(
+        config: AcpClientConfig,
+        opts: &SpawnOptions,
+        event_bus: Option<Arc<EventBus>>,
+        control_session_id: Uuid,
+        connect_opts: ConnectOpts,
     ) -> Result<Arc<Self>> {
         if !config.cwd.is_absolute() {
             return Err(AcpError::Spawn("cwd must be absolute".into()));
@@ -153,6 +208,10 @@ impl AcpClient {
         let (agent_req_tx, agent_req_rx) = tokio::sync::mpsc::unbounded_channel();
         let transport = NdjsonTransport::new(stdin, stdout, notif_tx, agent_req_tx);
 
+        let pending_context = connect_opts
+            .transcript_context
+            .filter(|s| !s.trim().is_empty());
+
         let client = Arc::new(Self {
             config,
             child: Mutex::new(Some(child)),
@@ -165,11 +224,17 @@ impl AcpClient {
             notification_rx: Mutex::new(Some(notif_rx)),
             agent_request_rx: Mutex::new(Some(agent_req_rx)),
             always_approve: opts.always_approve,
+            brain_mode: RwLock::new(BrainMode::Fresh),
+            pending_context: Mutex::new(pending_context),
+            load_session_supported: RwLock::new(false),
+            resume_session_supported: RwLock::new(false),
         });
 
         client.initialize().await?;
         client.authenticate().await?;
-        client.session_new(opts).await?;
+        client
+            .open_session(opts, connect_opts.resume_acp_session_id.as_deref())
+            .await?;
 
         // Background event loop for notifications
         let loop_client = client.clone();
@@ -205,7 +270,15 @@ impl AcpClient {
             notification_rx: Mutex::new(None),
             agent_request_rx: Mutex::new(None),
             always_approve: false,
+            brain_mode: RwLock::new(BrainMode::Fresh),
+            pending_context: Mutex::new(None),
+            load_session_supported: RwLock::new(false),
+            resume_session_supported: RwLock::new(false),
         })
+    }
+
+    pub async fn brain_mode(&self) -> BrainMode {
+        *self.brain_mode.read().await
     }
 
     async fn transport(&self) -> Result<Arc<NdjsonTransport>> {
@@ -240,7 +313,31 @@ impl AcpClient {
         let result = self
             .request_timeout("initialize", Some(serde_json::to_value(params)?))
             .await?;
-        *self.agent_capabilities.write().await = result.get("agentCapabilities").cloned();
+        let caps = result.get("agentCapabilities").cloned();
+        *self.agent_capabilities.write().await = caps.clone();
+
+        // loadSession: true  OR sessionCapabilities.load / resume
+        let load = caps
+            .as_ref()
+            .and_then(|c| c.get("loadSession"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+            || caps
+                .as_ref()
+                .and_then(|c| c.pointer("/sessionCapabilities/load"))
+                .is_some();
+        let resume = caps
+            .as_ref()
+            .and_then(|c| c.pointer("/sessionCapabilities/resume"))
+            .is_some()
+            || caps
+                .as_ref()
+                .and_then(|c| c.get("resumeSession"))
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+        *self.load_session_supported.write().await = load;
+        *self.resume_session_supported.write().await = resume;
+        info!(load_session = load, resume_session = resume, "ACP agent session capabilities");
 
         // Cache advertised auth methods (e.g. cached_token, grok.com).
         let methods = result
@@ -322,6 +419,165 @@ impl AcpClient {
         }
     }
 
+    /// Open a session: try load → resume → new, set brain_mode accordingly.
+    async fn open_session(&self, opts: &SpawnOptions, prior_sid: Option<&str>) -> Result<()> {
+        let model = opts.model.clone().filter(|m| {
+            let t = m.trim();
+            !t.is_empty() && !t.eq_ignore_ascii_case("default") && !t.eq_ignore_ascii_case("mock")
+        });
+
+        if let Some(prior) = prior_sid.map(str::trim).filter(|s| !s.is_empty()) {
+            let load_ok = *self.load_session_supported.read().await;
+            let resume_ok = *self.resume_session_supported.read().await;
+
+            if load_ok {
+                match self.session_load(prior, opts, model.as_deref()).await {
+                    Ok(sid) => {
+                        *self.session_id.write().await = Some(sid.clone());
+                        *self.brain_mode.write().await = BrainMode::FullBrain;
+                        // Full brain — don't inject transcript context.
+                        *self.pending_context.lock().await = None;
+                        info!(%sid, prior, "ACP session/load complete (full brain)");
+                        self.apply_mode_after_session(opts).await;
+                        if let Some(bus) = &self.event_bus {
+                            bus.emit_status(self.control_session_id, SessionStatus::Idle)
+                                .await;
+                            bus.emit(ControlEvent::AgentMessage {
+                                session_id: self.control_session_id,
+                                text: "🧠 full brain — agent reloaded prior ACP session".into(),
+                                at: Utc::now(),
+                            });
+                        }
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        warn!(error = %e, prior, "session/load failed; trying resume/new");
+                    }
+                }
+            }
+
+            if resume_ok {
+                match self.session_resume(prior, opts, model.as_deref()).await {
+                    Ok(sid) => {
+                        *self.session_id.write().await = Some(sid.clone());
+                        *self.brain_mode.write().await = BrainMode::FullBrain;
+                        *self.pending_context.lock().await = None;
+                        info!(%sid, prior, "ACP session/resume complete (full brain)");
+                        self.apply_mode_after_session(opts).await;
+                        if let Some(bus) = &self.event_bus {
+                            bus.emit_status(self.control_session_id, SessionStatus::Idle)
+                                .await;
+                            bus.emit(ControlEvent::AgentMessage {
+                                session_id: self.control_session_id,
+                                text: "🧠 full brain — agent resumed prior ACP session".into(),
+                                at: Utc::now(),
+                            });
+                        }
+                        return Ok(());
+                    }
+                    Err(e) => {
+                        warn!(error = %e, prior, "session/resume failed; falling back to session/new");
+                    }
+                }
+            } else if !load_ok {
+                info!(prior, "agent does not advertise loadSession/resume — history-only resume");
+            }
+        }
+
+        // Fresh process session — history-only if we have transcript context pending.
+        self.session_new(opts).await?;
+        let has_ctx = self
+            .pending_context
+            .lock()
+            .await
+            .as_ref()
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        let mode = if has_ctx || prior_sid.is_some() {
+            BrainMode::HistoryOnly
+        } else {
+            BrainMode::Fresh
+        };
+        *self.brain_mode.write().await = mode;
+        if mode == BrainMode::HistoryOnly {
+            if let Some(bus) = &self.event_bus {
+                bus.emit(ControlEvent::AgentMessage {
+                    session_id: self.control_session_id,
+                    text: "📜 history-only — agent is new; prior chat will be injected as context"
+                        .into(),
+                    at: Utc::now(),
+                });
+            }
+        }
+        Ok(())
+    }
+
+    async fn session_load(
+        &self,
+        session_id: &str,
+        opts: &SpawnOptions,
+        model: Option<&str>,
+    ) -> Result<String> {
+        let mut params = json!({
+            "sessionId": session_id,
+            "cwd": self.config.cwd.display().to_string(),
+            "mcpServers": opts.mcp_servers,
+        });
+        if let Some(m) = model {
+            params["model"] = json!(m);
+        }
+        let result = match self
+            .request_timeout("session/load", Some(params.clone()))
+            .await
+        {
+            Ok(r) => r,
+            Err(AcpError::Rpc { code, message }) if !opts.mcp_servers.is_empty() => {
+                warn!(code, %message, "session/load with MCP failed; retrying bare");
+                let mut bare = json!({
+                    "sessionId": session_id,
+                    "cwd": self.config.cwd.display().to_string(),
+                    "mcpServers": [],
+                });
+                if let Some(m) = model {
+                    bare["model"] = json!(m);
+                }
+                self.request_timeout("session/load", Some(bare)).await?
+            }
+            Err(e) => return Err(e),
+        };
+        Ok(result
+            .get("sessionId")
+            .or_else(|| result.get("session_id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(session_id)
+            .to_string())
+    }
+
+    async fn session_resume(
+        &self,
+        session_id: &str,
+        opts: &SpawnOptions,
+        model: Option<&str>,
+    ) -> Result<String> {
+        let mut params = json!({
+            "sessionId": session_id,
+            "cwd": self.config.cwd.display().to_string(),
+            "mcpServers": opts.mcp_servers,
+        });
+        if let Some(m) = model {
+            params["model"] = json!(m);
+        }
+        let result = self
+            .request_timeout("session/resume", Some(params))
+            .await?;
+        Ok(result
+            .get("sessionId")
+            .or_else(|| result.get("session_id"))
+            .and_then(|v| v.as_str())
+            .unwrap_or(session_id)
+            .to_string())
+    }
+
     async fn session_new(&self, opts: &SpawnOptions) -> Result<()> {
         // Start with minimal valid params; Grok rejects unknown fields/values.
         let model = opts.model.clone().filter(|m| {
@@ -368,18 +624,21 @@ impl AcpClient {
         *self.session_id.write().await = Some(sid.clone());
         info!(%sid, "ACP session/new complete");
 
-        // Best-effort plan / always-approve mode after session exists.
-        if opts.always_approve {
-            let _ = self.set_mode("always_approve").await;
-        } else if opts.plan_mode {
-            let _ = self.set_mode("plan").await;
-        }
+        self.apply_mode_after_session(opts).await;
 
         if let Some(bus) = &self.event_bus {
             bus.emit_status(self.control_session_id, SessionStatus::Idle)
                 .await;
         }
         Ok(())
+    }
+
+    async fn apply_mode_after_session(&self, opts: &SpawnOptions) {
+        if opts.always_approve {
+            let _ = self.set_mode("always_approve").await;
+        } else if opts.plan_mode {
+            let _ = self.set_mode("plan").await;
+        }
     }
 
     pub async fn session_id(&self) -> Option<String> {
@@ -396,6 +655,32 @@ impl AcpClient {
 
         if prompt.trim().is_empty() {
             return Err(AcpError::Protocol("empty prompt".into()));
+        }
+
+        // History-only: prepend transcript pack once.
+        let mut text = prompt.to_string();
+        if let Some(ctx) = self.pending_context.lock().await.take() {
+            text = format!(
+                "[Bomb Code session recovery — history-only mode]\n\
+                 The previous ACP process died. Below is the durable transcript from this thread.\n\
+                 Continue coherently; do not re-ask for info already covered.\n\n\
+                 --- prior transcript ---\n{ctx}\n--- end prior transcript ---\n\n\
+                 User message:\n{prompt}"
+            );
+            info!(
+                ctx_chars = ctx.len(),
+                "injected transcript context (history-only brain)"
+            );
+            if let Some(bus) = &self.event_bus {
+                bus.emit(ControlEvent::AgentMessage {
+                    session_id: self.control_session_id,
+                    text: format!(
+                        "📜 injected {} chars of prior transcript into this prompt",
+                        ctx.len()
+                    ),
+                    at: Utc::now(),
+                });
+            }
         }
 
         if let Some(bus) = &self.event_bus {
@@ -424,7 +709,7 @@ impl AcpClient {
             session_id: sid,
             prompt: vec![PromptContent {
                 kind: "text".into(),
-                text: prompt.to_string(),
+                text,
             }],
         };
         let params_val = serde_json::to_value(params)?;

@@ -9,7 +9,7 @@ use serde_json::json;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use grok_acp::{AcpClient, AcpClientConfig, AcpSpawnOptions};
+use grok_acp::{AcpClient, AcpClientConfig, AcpSpawnOptions, BrainMode, ConnectOpts};
 use grok_cli_wrapper::{GrokCli, HeadlessSpawnOptions};
 use grok_config::GrokConfig;
 use grok_events::{EventBus, SessionStatus};
@@ -41,25 +41,43 @@ impl SessionRegistry {
 
     pub async fn spawn_agent(&self, cwd: &str, opts: SpawnOptions) -> Result<Uuid> {
         let id = Uuid::new_v4();
-        self.spawn_agent_with_id(id, cwd, opts, None).await?;
+        self.spawn_agent_with_id(id, cwd, opts, None, ConnectOpts::default())
+            .await?;
         Ok(id)
     }
 
     /// Re-attach a live ACP process to an existing thread id (after reboot / update).
-    /// Transcript history stays under the same id in SQLite.
+    /// Tries session/load for full brain; else history-only + transcript inject.
     pub async fn resume_session(
         &self,
         id: Uuid,
         cwd: &str,
         opts: SpawnOptions,
         created_at: Option<chrono::DateTime<Utc>>,
-    ) -> Result<()> {
+        connect_opts: ConnectOpts,
+    ) -> Result<BrainMode> {
         if self.sessions.contains_key(&id) {
-            return Ok(());
+            let mode = if let Some(c) = self.sessions.get(&id).and_then(|h| h.acp_client.clone()) {
+                c.brain_mode().await
+            } else {
+                BrainMode::Fresh
+            };
+            return Ok(mode);
         }
-        self.spawn_agent_with_id(id, cwd, opts, created_at).await?;
-        info!(%id, cwd, "session resumed from disk");
-        Ok(())
+        self.spawn_agent_with_id(id, cwd, opts, created_at, connect_opts)
+            .await?;
+        let mode = self
+            .sessions
+            .get(&id)
+            .and_then(|h| h.acp_client.clone())
+            .map(|c| async move { c.brain_mode().await });
+        let brain = if let Some(f) = mode {
+            f.await
+        } else {
+            BrainMode::HistoryOnly
+        };
+        info!(%id, cwd, ?brain, "session resumed from disk");
+        Ok(brain)
     }
 
     async fn spawn_agent_with_id(
@@ -68,6 +86,7 @@ impl SessionRegistry {
         cwd: &str,
         opts: SpawnOptions,
         created_at: Option<chrono::DateTime<Utc>>,
+        connect_opts: ConnectOpts,
     ) -> Result<()> {
         opts.validate().map_err(CoreError::InvalidOptions)?;
 
@@ -119,6 +138,7 @@ impl SessionRegistry {
             created_at: created_at.unwrap_or(now),
             last_activity: now,
             label: None,
+            brain_mode: BrainMode::Fresh,
         };
 
         let handle = match opts.mode {
@@ -130,6 +150,11 @@ impl SessionRegistry {
                     metadata.acp_session_id = Some(format!("mock-{id}"));
                     metadata.status = SessionStatus::Idle;
                     metadata.label = Some("mock".into());
+                    metadata.brain_mode = if connect_opts.transcript_context.is_some() {
+                        BrainMode::HistoryOnly
+                    } else {
+                        BrainMode::Fresh
+                    };
                     AgentHandle {
                         metadata,
                         child: None,
@@ -150,14 +175,16 @@ impl SessionRegistry {
                         extra_env: Vec::new(),
                     };
                     let client_cfg = AcpClientConfig::new(&binary, cwd_path);
-                    let client = AcpClient::connect(
+                    let client = AcpClient::connect_with(
                         client_cfg,
                         &acp_opts,
                         Some(self.event_bus.clone()),
                         id,
+                        connect_opts,
                     )
                     .await?;
                     metadata.acp_session_id = client.session_id().await;
+                    metadata.brain_mode = client.brain_mode().await;
                     metadata.status = SessionStatus::Idle;
                     AgentHandle {
                         metadata,
@@ -212,12 +239,18 @@ impl SessionRegistry {
         let mut opts = SpawnOptions::default();
         opts.model = Some("mock".into());
         opts.mode = AgentMode::Acp;
-        self.spawn_agent_with_id(id, cwd, opts, None).await?;
+        self.spawn_agent_with_id(id, cwd, opts, None, ConnectOpts::default())
+            .await?;
         Ok(id)
     }
 
     pub fn is_live(&self, id: Uuid) -> bool {
         self.sessions.contains_key(&id)
+    }
+
+    pub async fn brain_mode(&self, id: Uuid) -> Option<BrainMode> {
+        let c = self.sessions.get(&id)?.acp_client.clone()?;
+        Some(c.brain_mode().await)
     }
 
     pub fn list_sessions(&self) -> Vec<SessionMetadata> {

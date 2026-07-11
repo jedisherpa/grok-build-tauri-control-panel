@@ -7,7 +7,9 @@ mod error;
 mod messages;
 mod transport;
 
-pub use client::{AcpClient, AcpClientConfig, SpawnOptions as AcpSpawnOptions};
+pub use client::{
+    AcpClient, AcpClientConfig, BrainMode, ConnectOpts, SpawnOptions as AcpSpawnOptions,
+};
 pub use error::{AcpError, Result};
 pub use messages::{
     AuthenticateParams, ClientCapabilities, ClientInfo, IncomingAgentRequest, InitializeParams,

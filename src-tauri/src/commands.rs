@@ -438,6 +438,7 @@ pub async fn send_prompt(
 }
 
 /// Bring a SQLite thread back online under the same id.
+/// Ladder: session/load → session/resume → session/new + transcript inject.
 async fn resume_saved_session(state: &AppState, id: Uuid) -> Result<(), String> {
     let rec = state
         .persistence
@@ -468,13 +469,10 @@ async fn resume_saved_session(state: &AppState, id: Uuid) -> Result<(), String> 
     opts.worktree = rec.worktree.clone();
     opts.plan_mode = true;
     opts.mcp_server_names = extract_mcp_from_meta(&rec.metadata_json);
-    // Prefer empty headless prompt so validate fails only if mode is headless without prompt —
-    // for resume we force ACP for headless-saved threads that lack a prompt.
     if matches!(opts.mode, grok_control_core::AgentMode::Headless) {
         opts.mode = grok_control_core::AgentMode::Acp;
     }
 
-    // Re-resolve MCP payloads if names present
     if !opts.mcp_server_names.is_empty() {
         if let Ok(payload) = state
             .mcp
@@ -485,20 +483,77 @@ async fn resume_saved_session(state: &AppState, id: Uuid) -> Result<(), String> 
         }
     }
 
-    state
+    let transcript_context = build_transcript_context(state, id);
+    let connect_opts = grok_control_core::ConnectOpts {
+        resume_acp_session_id: rec.acp_session_id.clone().filter(|s| !s.is_empty()),
+        transcript_context: transcript_context.clone(),
+    };
+
+    let brain = state
         .registry
-        .resume_session(id, &rec.cwd, opts, Some(rec.created_at))
+        .resume_session(id, &rec.cwd, opts, Some(rec.created_at), connect_opts)
         .await
         .map_err(err)?;
 
-    let _ = state.persistence.append_message(
-        id,
-        "system",
-        "agent resumed after app restart — same thread memory, new ACP process",
-        Utc::now(),
-    );
+    let msg = match brain {
+        grok_control_core::BrainMode::FullBrain => {
+            "🧠 full brain — agent reloaded prior ACP session (true continuity)"
+        }
+        grok_control_core::BrainMode::HistoryOnly => {
+            "📜 history-only — new ACP process; prior transcript will be injected on next send"
+        }
+        grok_control_core::BrainMode::Fresh => {
+            "agent resumed — fresh ACP session (no prior agent id / history pack)"
+        }
+    };
+    let _ = state
+        .persistence
+        .append_message(id, "system", msg, Utc::now());
     persist_session(state, id).await;
     Ok(())
+}
+
+/// Pack recent transcript for history-only rehydration (bounded).
+fn build_transcript_context(state: &AppState, id: Uuid) -> Option<String> {
+    let entries = state.persistence.transcript_entries(id).ok()?;
+    if entries.is_empty() {
+        return None;
+    }
+    // Keep last ~40 turns, cap total chars.
+    const MAX_ENTRIES: usize = 40;
+    const MAX_CHARS: usize = 24_000;
+    let slice = if entries.len() > MAX_ENTRIES {
+        &entries[entries.len() - MAX_ENTRIES..]
+    } else {
+        &entries[..]
+    };
+    let mut out = String::new();
+    for e in slice {
+        let role = e.role.as_str();
+        // Skip pure system noise
+        if role == "system"
+            && (e.body.contains("resumed")
+                || e.body.contains("full brain")
+                || e.body.contains("history-only")
+                || e.body.contains("injected"))
+        {
+            continue;
+        }
+        let line = format!(
+            "[{}] {}\n",
+            role,
+            e.body.chars().take(2000).collect::<String>()
+        );
+        if out.len() + line.len() > MAX_CHARS {
+            break;
+        }
+        out.push_str(&line);
+    }
+    if out.trim().is_empty() {
+        None
+    } else {
+        Some(out)
+    }
 }
 
 #[tauri::command]
@@ -1036,6 +1091,7 @@ fn build_thread_list(state: &AppState) -> Vec<ThreadDto> {
             worktree: m.worktree,
             mcp_servers: m.mcp_servers,
             label: m.label,
+            brain_mode: Some(m.brain_mode.as_str().into()),
         });
     }
 
@@ -1063,6 +1119,7 @@ fn build_thread_list(state: &AppState) -> Vec<ThreadDto> {
                 worktree: rec.worktree,
                 mcp_servers: mcp,
                 label: None,
+                brain_mode: None,
             });
         }
     }

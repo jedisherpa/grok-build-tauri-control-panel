@@ -81,6 +81,8 @@ pub struct ThreadDto {
     pub worktree: Option<String>,
     pub mcp_servers: Vec<String>,
     pub label: Option<String>,
+    /// full_brain | history_only | fresh | null when not live
+    pub brain_mode: Option<String>,
 }
 
 pub struct Persistence {

@@ -6,7 +6,7 @@ use tokio::process::Child;
 use tokio::sync::Mutex;
 use uuid::Uuid;
 
-use grok_acp::AcpClient;
+use grok_acp::{AcpClient, BrainMode};
 use grok_events::SessionStatus;
 
 use crate::options::AgentMode;
@@ -29,6 +29,9 @@ pub struct SessionMetadata {
     pub created_at: DateTime<Utc>,
     pub last_activity: DateTime<Utc>,
     pub label: Option<String>,
+    /// full_brain | history_only | fresh — agent context recovery mode.
+    #[serde(default)]
+    pub brain_mode: BrainMode,
 }
 
 /// Serializable snapshot of a handle (no process handles).
