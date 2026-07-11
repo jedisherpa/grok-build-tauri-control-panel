@@ -3,7 +3,7 @@ name = "grok-build-control-panel"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Tauri 2 desktop control panel for Grok Build"
+description = "Bomb Code — Tauri 2 desktop control panel for Grok Build"
 default-run = "grok-build-control-panel"
 
 [build-dependencies]

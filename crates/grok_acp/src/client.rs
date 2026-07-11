@@ -65,7 +65,7 @@ impl AcpClientConfig {
         Self {
             grok_path: grok_path.into(),
             cwd: cwd.into(),
-            client_name: "GrokBuildTauriControlPanel".into(),
+            client_name: "BombCode".into(),
             client_version: env!("CARGO_PKG_VERSION").into(),
             request_timeout: Duration::from_secs(120),
             // Grok Build advertises cached_token + grok.com (not xai.api_key).

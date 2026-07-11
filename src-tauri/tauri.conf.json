@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Grok Build Control Panel",
+  "productName": "Bomb Code",
   "version": "0.1.0",
-  "identifier": "ai.xai.grok-build-control-panel",
+  "identifier": "app.bombcode.desktop",
   "build": {
     "frontendDist": "../frontend",
     "devUrl": "http://localhost:1420",
@@ -14,7 +14,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Grok Build Control Panel",
+        "title": "Bomb Code",
         "width": 1380,
         "height": 900,
         "minWidth": 960,
@@ -34,8 +34,8 @@
       "app"
     ],
     "category": "DeveloperTool",
-    "shortDescription": "ACP control panel for Grok Build",
-    "longDescription": "Desktop control panel for multi-session Grok Build agent orchestration with MCP management.",
+    "shortDescription": "Bomb Code — ACP control panel for Grok Build",
+    "longDescription": "Bomb Code: multi-session Grok Build agent orchestration with MCP management.",
     "macOS": {
       "minimumSystemVersion": "12.0"
     },

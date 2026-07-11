@@ -1,4 +1,4 @@
-# Quickstart — use the Control Panel with Grok Build
+# Quickstart — Bomb Code + Grok Build
 
 ## Prerequisites
 
@@ -22,7 +22,7 @@ Later launches:
 ```bash
 ./scripts/run.sh
 # or
-open "/Applications/Grok Build Control Panel.app"
+open "/Applications/Bomb Code.app"
 ```
 
 ## First coding session

@@ -1,6 +1,6 @@
-# Grok Build Tauri Control Panel
+# Bomb Code
 
-Rust **Tauri 2** desktop control panel for [Grok Build](https://x.ai) — multi-session agent orchestration with **ACP-first** integration, worktrees, permissions, MCP/skills, memory, scheduler, and crash recovery.
+**Bomb Code** is a Rust **Tauri 2** desktop control panel for [Grok Build](https://x.ai) — multi-session agent orchestration with **ACP-first** integration, worktrees, permissions, MCP/skills, memory, scheduler, and crash recovery.
 
 ## Features
 

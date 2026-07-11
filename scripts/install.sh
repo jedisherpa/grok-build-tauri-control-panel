@@ -20,8 +20,8 @@ grok version || true
 echo "==> Building app bundle (release)"
 cargo tauri build --bundles app
 
-SRC="${ROOT}/target/release/bundle/macos/Grok Build Control Panel.app"
-DEST="/Applications/Grok Build Control Panel.app"
+SRC="${ROOT}/target/release/bundle/macos/Bomb Code.app"
+DEST="/Applications/Bomb Code.app"
 
 if [[ ! -d "$SRC" ]]; then
   echo "ERROR: app bundle not found at $SRC"

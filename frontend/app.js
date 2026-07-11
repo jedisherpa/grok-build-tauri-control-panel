@@ -1,4 +1,4 @@
-// Three-column Grok Build control panel UI.
+// Bomb Code — three-column Grok Build control panel.
 
 const $ = (id) => document.getElementById(id);
 
@@ -94,10 +94,10 @@ function renderTranscript() {
   if (!sid) {
     root.innerHTML = `<div class="welcome">
 <pre class="banner">  ╔══════════════════════════════════════╗
-  ║         grok build · control         ║
+  ║              bomb code               ║
   ╚══════════════════════════════════════╝</pre>
 <p>Select a thread or start a new ACP session.</p>
-<p class="muted">Center stream mirrors the terminal: messages, tools, plans.</p>
+<p class="muted">Center stream mirrors Grok Build in the terminal.</p>
 </div>`;
     $("composer-session").textContent = "no session";
     $("composer-model").textContent = "";

@@ -1,8 +1,8 @@
-# AGENTS.md — Grok Build Tauri Control Panel
+# AGENTS.md — Bomb Code
 
 ## Project
 
-Production-oriented **Rust + Tauri 2** desktop control panel backend for **Grok Build** (xAI agentic coding CLI).
+**Bomb Code** — production-oriented **Rust + Tauri 2** desktop control panel for **Grok Build** (xAI agentic coding CLI).
 
 Primary integration path: **ACP** (`grok agent stdio`, JSON-RPC over NDJSON stdio).  
 Fallback: headless CLI (`grok -p ...`) for batch/scheduler jobs.
