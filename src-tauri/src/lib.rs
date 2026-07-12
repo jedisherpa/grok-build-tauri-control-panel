@@ -93,6 +93,7 @@ pub fn run() {
             commands::cancel_session,
             commands::remove_session,
             commands::set_plan_mode,
+            commands::set_always_approve,
             commands::respond_approval,
             commands::list_worktrees,
             commands::create_worktree,

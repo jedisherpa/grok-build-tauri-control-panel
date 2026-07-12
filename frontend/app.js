@@ -1972,15 +1972,30 @@ function setMode(id, on) {
 }
 
 function wireModeButtons() {
+  // Push a toggle change into the live selected session (best-effort —
+  // saved threads pick the values up on next send instead).
+  const applyLive = async (cmd, enabled) => {
+    const sess = state.sessions.find((s) => s.id === state.selectedSession);
+    if (!sess || sess.live === false) return;
+    try {
+      await invoke(cmd, { id: state.selectedSession, enabled });
+      pushEvent(`${cmd === "set_plan_mode" ? "plan" : "yolo"} ${enabled ? "on" : "off"} · ${shortId(state.selectedSession)}`, "ok", null, { force: true });
+    } catch (e) {
+      pushEvent(`mode change failed: ${e?.message || e}`, "err", "error", { force: true });
+    }
+  };
   $("plan-mode")?.addEventListener("click", () => {
     const next = !modeOn("plan-mode");
     setMode("plan-mode", next);
     if (next) setMode("always-approve", false);
+    applyLive("set_plan_mode", next);
+    if (next) applyLive("set_always_approve", false);
   });
   $("always-approve")?.addEventListener("click", () => {
     const next = !modeOn("always-approve");
     setMode("always-approve", next);
     if (next) setMode("plan-mode", false);
+    applyLive("set_always_approve", next);
   });
 }
 
@@ -2202,6 +2217,8 @@ async function sendPrompt() {
       prompt,
       backend: currentBackend(),
       model: currentModel(),
+      planMode: modeOn("plan-mode"),
+      alwaysApprove: modeOn("always-approve"),
     });
     // Mark live after successful send/resume; refresh brain_mode from registry.
     if (sess) {

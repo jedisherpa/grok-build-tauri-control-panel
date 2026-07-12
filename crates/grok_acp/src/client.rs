@@ -160,8 +160,9 @@ pub struct AcpClient {
     control_session_id: Uuid,
     notification_rx: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<JsonRpcNotification>>>,
     agent_request_rx: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<IncomingAgentRequest>>>,
-    /// When true, auto-allow tool permission requests (yolo).
-    always_approve: bool,
+    /// When true, auto-allow tool permission requests (yolo). Atomic so the
+    /// UI toggle can flip it mid-session.
+    always_approve: std::sync::atomic::AtomicBool,
     /// Permission requests parked until the user answers via respond_approval.
     pending_permissions: Mutex<HashMap<String, PendingPermission>>,
     brain_mode: RwLock<BrainMode>,
@@ -169,6 +170,9 @@ pub struct AcpClient {
     pending_context: Mutex<Option<String>>,
     load_session_supported: RwLock<bool>,
     resume_session_supported: RwLock<bool>,
+    /// Mode ids the agent advertised in the session/new//load result.
+    available_modes: RwLock<Vec<String>>,
+    current_mode: RwLock<Option<String>>,
     /// Host-side terminals for ACP terminal/* (required for run_terminal_command).
     terminals: TerminalRegistry,
 }
@@ -289,12 +293,14 @@ impl AcpClient {
             control_session_id,
             notification_rx: Mutex::new(Some(notif_rx)),
             agent_request_rx: Mutex::new(Some(agent_req_rx)),
-            always_approve: opts.always_approve,
+            always_approve: std::sync::atomic::AtomicBool::new(opts.always_approve),
             pending_permissions: Mutex::new(HashMap::new()),
             brain_mode: RwLock::new(BrainMode::Fresh),
             pending_context: Mutex::new(pending_context),
             load_session_supported: RwLock::new(false),
             resume_session_supported: RwLock::new(false),
+            available_modes: RwLock::new(Vec::new()),
+            current_mode: RwLock::new(None),
             terminals: TerminalRegistry::new(default_cwd),
         });
 
@@ -337,12 +343,14 @@ impl AcpClient {
             control_session_id: Uuid::new_v4(),
             notification_rx: Mutex::new(None),
             agent_request_rx: Mutex::new(None),
-            always_approve: false,
+            always_approve: std::sync::atomic::AtomicBool::new(false),
             pending_permissions: Mutex::new(HashMap::new()),
             brain_mode: RwLock::new(BrainMode::Fresh),
             pending_context: Mutex::new(None),
             load_session_supported: RwLock::new(false),
             resume_session_supported: RwLock::new(false),
+            available_modes: RwLock::new(Vec::new()),
+            current_mode: RwLock::new(None),
             terminals: TerminalRegistry::new(PathBuf::from("/tmp")),
         })
     }
@@ -625,6 +633,7 @@ impl AcpClient {
             }
             Err(e) => return Err(e),
         };
+        self.capture_modes(&result).await;
         Ok(result
             .get("sessionId")
             .or_else(|| result.get("session_id"))
@@ -650,6 +659,7 @@ impl AcpClient {
         let result = self
             .request_timeout("session/resume", Some(params))
             .await?;
+        self.capture_modes(&result).await;
         Ok(result
             .get("sessionId")
             .or_else(|| result.get("session_id"))
@@ -701,6 +711,7 @@ impl AcpClient {
             .map(|s| s.to_string())
             .unwrap_or_else(|| Uuid::new_v4().to_string());
 
+        self.capture_modes(&result).await;
         *self.session_id.write().await = Some(sid.clone());
         info!(%sid, "ACP session/new complete");
 
@@ -713,23 +724,100 @@ impl AcpClient {
         Ok(())
     }
 
+    /// Record `modes.availableModes` / `modes.currentModeId` from a
+    /// session/new//load/resume result.
+    async fn capture_modes(&self, result: &Value) {
+        let modes = result.get("modes");
+        let available: Vec<String> = modes
+            .and_then(|m| m.get("availableModes"))
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|m| {
+                        m.get("id")
+                            .or_else(|| m.get("modeId"))
+                            .and_then(|v| v.as_str())
+                            .map(str::to_string)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        let current = modes
+            .and_then(|m| m.get("currentModeId").or_else(|| m.get("currentMode")))
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
+        if !available.is_empty() {
+            info!(?available, ?current, "ACP agent session modes");
+            *self.available_modes.write().await = available;
+        }
+        if current.is_some() {
+            *self.current_mode.write().await = current;
+        }
+    }
+
+    /// Find the advertised mode id matching an intent ("plan", "yolo", "default").
+    async fn resolve_mode_id(&self, wanted: &str) -> Option<String> {
+        let advertised = self.available_modes.read().await.clone();
+        if advertised.is_empty() {
+            return Some(wanted.to_string());
+        }
+        if let Some(exact) = advertised.iter().find(|m| m.eq_ignore_ascii_case(wanted)) {
+            return Some(exact.clone());
+        }
+        // Intent aliases: different agents name the same modes differently.
+        let fallback = [wanted];
+        let candidates: &[&str] = match wanted {
+            "plan" => &["plan", "planning"],
+            "always_approve" | "yolo" => &[
+                "always_approve",
+                "alwaysallow",
+                "always_allow",
+                "bypasspermissions",
+                "yolo",
+                "acceptedits",
+            ],
+            "default" => &["default", "normal", "ask", "code"],
+            _ => &fallback,
+        };
+        for c in candidates {
+            if let Some(hit) = advertised
+                .iter()
+                .find(|m| m.to_lowercase().replace(['-', '_'], "") == c.replace(['-', '_'], ""))
+            {
+                return Some(hit.clone());
+            }
+        }
+        None
+    }
+
     async fn apply_mode_after_session(&self, opts: &SpawnOptions) {
-        // Mode ids differ per agent (grok: always_approve; claude adapter:
-        // bypassPermissions). set_mode is best-effort, so try aliases in order;
-        // "plan" is shared vocabulary. Yolo also auto-approves client-side.
-        if opts.always_approve {
-            let aliases: &[&str] = if self.config.backend_label == "grok" {
-                &["always_approve"]
-            } else {
-                &["bypassPermissions", "always_approve", "yolo"]
-            };
-            for alias in aliases {
-                if self.set_mode(alias).await.is_ok() {
-                    break;
+        let wanted = if opts.always_approve {
+            "always_approve"
+        } else if opts.plan_mode {
+            "plan"
+        } else {
+            return;
+        };
+        match self.set_mode(wanted).await {
+            Ok(()) => {
+                if let Some(bus) = &self.event_bus {
+                    let applied = self.current_mode.read().await.clone();
+                    Self::emit_term(
+                        bus,
+                        self.control_session_id,
+                        format!("mode → {}", applied.as_deref().unwrap_or(wanted)),
+                    );
                 }
             }
-        } else if opts.plan_mode {
-            let _ = self.set_mode("plan").await;
+            Err(e) => {
+                warn!(error = %e, %wanted, "failed to set session mode");
+                if let Some(bus) = &self.event_bus {
+                    bus.emit_error(
+                        Some(self.control_session_id),
+                        format!("could not enable {wanted} mode: {e}"),
+                    );
+                }
+            }
         }
     }
 
@@ -918,9 +1006,16 @@ impl AcpClient {
         Ok(())
     }
 
+    /// Flip client-side yolo gating mid-session (UI toggle).
+    pub fn set_always_approve(&self, enabled: bool) {
+        self.always_approve
+            .store(enabled, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub async fn set_mode(&self, mode: &str) -> Result<()> {
         if self.transport.read().await.is_none() {
             debug!(%mode, "set_mode (mock/local)");
+            *self.current_mode.write().await = Some(mode.to_string());
             return Ok(());
         }
         let sid = self
@@ -929,24 +1024,34 @@ impl AcpClient {
             .await
             .clone()
             .ok_or(AcpError::SessionNotReady)?;
+        let mode_id = self.resolve_mode_id(mode).await.ok_or_else(|| {
+            AcpError::Protocol(format!(
+                "agent does not advertise a '{mode}' mode (available: {})",
+                self.available_modes
+                    .try_read()
+                    .map(|m| m.join(", "))
+                    .unwrap_or_default()
+            ))
+        })?;
+        // ACP spec: session/set_mode takes { sessionId, modeId }.
         let params = json!({
             "sessionId": sid,
-            "mode": mode,
+            "modeId": mode_id,
         });
-        // Best-effort — method name may vary by agent version
-        match self
+        let result = match self
             .request_timeout("session/set_mode", Some(params.clone()))
             .await
         {
-            Ok(_) => Ok(()),
+            Ok(r) => Ok(r),
+            // Older agents: camelCase method name.
             Err(AcpError::Rpc { .. }) => {
-                let _ = self
-                    .request_timeout("session/setMode", Some(params))
-                    .await;
-                Ok(())
+                self.request_timeout("session/setMode", Some(params)).await
             }
             Err(e) => Err(e),
-        }
+        }?;
+        let _ = result;
+        *self.current_mode.write().await = Some(mode_id);
+        Ok(())
     }
 
     /// Answer a parked `session/request_permission`. `option_id: None` = cancel.
@@ -1147,7 +1252,7 @@ impl AcpClient {
                 let summary = permission_summary(&req.params, &tool);
                 let request_id = id_key(&req.id);
 
-                if self.always_approve {
+                if self.always_approve.load(std::sync::atomic::Ordering::Relaxed) {
                     match pick_auto_approve_option(&options) {
                         Some(picked) => {
                             transport
@@ -1763,8 +1868,18 @@ impl AcpClient {
                     },
                 );
             }
-            "available_commands_update" | "availablecommandsupdate" | "current_mode_update"
-            | "currentmodeupdate" => {}
+            "available_commands_update" | "availablecommandsupdate" => {}
+            "current_mode_update" | "currentmodeupdate" => {
+                if let Some(mode) = update
+                    .get("currentModeId")
+                    .or_else(|| update.get("modeId"))
+                    .or_else(|| update.get("mode"))
+                    .and_then(|v| v.as_str())
+                {
+                    *self.current_mode.write().await = Some(mode.to_string());
+                    Self::emit_term(bus, sid, format!("mode → {mode}"));
+                }
+            }
             "usage_update" | "usageupdate" => {
                 let used = update.get("used").and_then(|v| v.as_u64());
                 let size = update.get("size").and_then(|v| v.as_u64());

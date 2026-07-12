@@ -108,9 +108,6 @@ impl SessionRegistry {
             return Err(CoreError::MaxSessions(max));
         }
 
-        if cfg.always_approve_default && !opts.plan_mode {
-            warn!("config always_approve_default is true; respecting explicit spawn opts");
-        }
         if opts.always_approve {
             warn!("spawning with always_approve=true — elevated trust mode");
         }
@@ -380,6 +377,31 @@ impl SessionRegistry {
         if let Some(client) = client {
             let mode = if enabled { "plan" } else { "default" };
             client.set_mode(mode).await?;
+        }
+        Ok(())
+    }
+
+    pub async fn set_always_approve(&self, id: Uuid, enabled: bool) -> Result<()> {
+        let client = {
+            let mut entry = self
+                .sessions
+                .get_mut(&id)
+                .ok_or(CoreError::SessionNotFound(id))?;
+            entry.metadata.always_approve = enabled;
+            if enabled {
+                entry.metadata.plan_mode = false;
+            }
+            entry.touch();
+            entry.acp_client.clone()
+        };
+        if let Some(client) = client {
+            // Client-side gating is the real mechanism; agent-side mode is
+            // best-effort (not every agent advertises a bypass mode).
+            client.set_always_approve(enabled);
+            let mode = if enabled { "always_approve" } else { "default" };
+            if let Err(e) = client.set_mode(mode).await {
+                tracing::warn!(error = %e, enabled, "agent-side always-approve mode not applied");
+            }
         }
         Ok(())
     }

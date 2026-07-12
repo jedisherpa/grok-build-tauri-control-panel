@@ -110,10 +110,8 @@ impl GrokCli {
 
         if opts.always_approve {
             cmd.arg("--always-approve");
-        }
-        if opts.plan_mode {
-            // Prefer plan gate when not always-approve
-            // (flag names may vary by grok version; keep as optional)
+        } else if opts.plan_mode {
+            cmd.args(["--permission-mode", "plan"]);
         }
         if let Some(ref model) = opts.model {
             cmd.args(["--model", model]);

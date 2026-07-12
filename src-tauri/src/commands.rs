@@ -534,6 +534,8 @@ pub async fn send_prompt(
     prompt: String,
     backend: Option<String>,
     model: Option<String>,
+    plan_mode: Option<bool>,
+    always_approve: Option<bool>,
 ) -> Result<(), String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
 
@@ -564,14 +566,23 @@ pub async fn send_prompt(
             let _ = state
                 .persistence
                 .append_message(id, "system", &label, Utc::now());
-            resume_saved_session(&state, id, want_backend, want_model.clone()).await?;
+            resume_saved_session(
+                &state,
+                id,
+                want_backend,
+                want_model.clone(),
+                plan_mode,
+                always_approve,
+            )
+            .await?;
         }
     }
 
     // Saved threads after reboot have history in SQLite but no live ACP process.
     // Auto-resume so "Send" picks up the same thread id + transcript.
     if !state.registry.is_live(id) {
-        resume_saved_session(&state, id, want_backend, want_model).await?;
+        resume_saved_session(&state, id, want_backend, want_model, plan_mode, always_approve)
+            .await?;
     }
 
     let prompt_len = prompt.len();
@@ -601,6 +612,8 @@ async fn resume_saved_session(
     id: Uuid,
     override_backend: Option<grok_config::Backend>,
     override_model: Option<String>,
+    plan_mode: Option<bool>,
+    always_approve: Option<bool>,
 ) -> Result<(), String> {
     let rec = state
         .persistence
@@ -635,7 +648,13 @@ async fn resume_saved_session(
         }
     });
     opts.worktree = rec.worktree.clone();
-    opts.plan_mode = true;
+    // Honor the caller's current mode toggles; default to safe (plan on, yolo off).
+    opts.always_approve = always_approve.unwrap_or(false);
+    opts.plan_mode = if opts.always_approve {
+        false
+    } else {
+        plan_mode.unwrap_or(true)
+    };
     opts.mcp_server_names = extract_mcp_from_meta(&rec.metadata_json);
     if matches!(opts.mode, grok_control_core::AgentMode::Headless) {
         opts.mode = grok_control_core::AgentMode::Acp;
@@ -756,6 +775,20 @@ pub async fn set_plan_mode(
     state
         .registry
         .set_plan_mode(id, enabled)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn set_always_approve(
+    state: State<'_, AppState>,
+    id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let id = Uuid::parse_str(&id).map_err(err)?;
+    state
+        .registry
+        .set_always_approve(id, enabled)
         .await
         .map_err(err)
 }
