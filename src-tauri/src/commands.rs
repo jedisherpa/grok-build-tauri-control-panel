@@ -2024,10 +2024,12 @@ pub fn persist_control_event(db: &grok_persistence::Persistence, ev: &ControlEve
                 .map(|_| ())
             } else {
                 let _ = db.update_session_status(*session_id, "waitingapproval");
+                // Durable as an approval row so it renders as a card (inert
+                // after restart — the live request died with the process).
                 db.append_message(
                     *session_id,
-                    "system",
-                    format!("approval required: {tool} — {summary}"),
+                    "approval",
+                    format!("{tool} — {summary}"),
                     *at,
                 )
                 .map(|_| ())

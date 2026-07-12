@@ -1343,7 +1343,28 @@ impl AcpClient {
                     .and_then(|v| v.as_str())
                     .unwrap_or("tool")
                     .to_string();
-                let summary = permission_summary(&req.params, &tool);
+                // Plan approvals carry the whole plan in the toolCall input —
+                // surface it as a plan document and keep the card summary clean
+                // instead of dumping raw JSON.
+                let tool_raw_input = req
+                    .params
+                    .as_ref()
+                    .and_then(|p| p.get("toolCall"))
+                    .and_then(|t| t.get("rawInput"));
+                let plan_extracted = extract_tool_plan(&tool, tool_raw_input);
+                if let Some(ref plan) = plan_extracted {
+                    if let Some(bus) = &self.event_bus {
+                        bus.emit(ControlEvent::Raw {
+                            session_id: Some(self.control_session_id),
+                            payload: json!({ "channel": "plan_doc", "text": plan }),
+                        });
+                    }
+                }
+                let summary = if plan_extracted.is_some() {
+                    format!("{tool} — approve the plan above?")
+                } else {
+                    permission_summary(&req.params, &tool)
+                };
                 let request_id = id_key(&req.id);
 
                 // Deny rules are absolute: they beat yolo and skip the card.
@@ -2105,16 +2126,18 @@ impl AcpClient {
 /// Pull a plan document out of a plan-presenting tool call's input
 /// (Claude Code's `ExitPlanMode` / `exit_plan_mode` carries `{ plan: "…" }`).
 fn extract_tool_plan(tool_name: &str, raw_input: Option<&Value>) -> Option<String> {
-    let name = tool_name.to_lowercase();
-    if !name.contains("plan") {
-        return None;
-    }
     let input = raw_input?;
-    let plan = input
-        .get("plan")
-        .or_else(|| input.get("content"))
-        .and_then(|v| v.as_str())?
-        .trim();
+    // Either the tool is plan-named (ExitPlanMode) or the input carries an
+    // explicit plan field (Claude's "Ready to code?" approval does the
+    // latter with a generic title).
+    let name = tool_name.to_lowercase();
+    let plan_field = input.get("plan").and_then(|v| v.as_str());
+    let plan = match plan_field {
+        Some(p) => p,
+        None if name.contains("plan") => input.get("content").and_then(|v| v.as_str())?,
+        None => return None,
+    }
+    .trim();
     if plan.len() < 20 {
         return None;
     }
@@ -2361,12 +2384,19 @@ mod tests {
     }
 
     #[test]
-    fn extracts_plan_from_exit_plan_mode_tool() {
+    fn extracts_plan_from_plan_tools_and_plan_approvals() {
         let input = json!({ "plan": "## Steps\n1. do the thing\n2. verify it works" });
         assert!(extract_tool_plan("ExitPlanMode", Some(&input)).is_some());
         assert!(extract_tool_plan("exit_plan_mode", Some(&input)).is_some());
-        // Non-plan tools and short/missing plans are ignored.
-        assert!(extract_tool_plan("Bash", Some(&input)).is_none());
+        // An explicit `plan` field wins regardless of the tool title —
+        // Claude's plan approval arrives as "Ready to code?".
+        assert!(extract_tool_plan("Ready to code?", Some(&input)).is_some());
+        // `content` is only trusted on plan-named tools; short/missing plans
+        // are ignored.
+        assert!(
+            extract_tool_plan("Bash", Some(&json!({ "content": "## Steps\nlong enough content" })))
+                .is_none()
+        );
         assert!(extract_tool_plan("ExitPlanMode", Some(&json!({ "plan": "hi" }))).is_none());
         assert!(extract_tool_plan("ExitPlanMode", None).is_none());
     }

@@ -926,10 +926,15 @@ function renderTranscript({ keepScroll = false } = {}) {
           const explain = m.explanation
             ? `<div class="approval-explain">💡 ${escapeHtml(String(m.explanation))}</div>`
             : "";
+          // Restored rows have no live request behind them (it died with the
+          // old agent process) — render an inert card, never dead buttons.
+          const isLive = !!e.meta;
           const foot = m.resolved
             ? `${explain}<div class="approval-resolved">resolved · ${escapeHtml(String(m.resolved))}</div>`
-            : `${explain}<div class="approval-actions">${buttons}${deny}</div>`;
-          return `<div class="t-block approval${m.resolved ? "" : " pending"}">
+            : isLive
+              ? `${explain}<div class="approval-actions">${buttons}${deny}</div>`
+              : `${explain}<div class="approval-resolved">from a previous session — see the rows below for how it resolved</div>`;
+          return `<div class="t-block approval${m.resolved || !isLive ? "" : " pending"}">
   <div class="t-role"><span class="t-ts">${escapeHtml(shortTime(e.at || ""))}</span>${bombHtml("wait", "xs")}<span>${label}</span></div>
   <div class="t-body">${escapeHtml(e.body)}${foot}</div>
 </div>`;
