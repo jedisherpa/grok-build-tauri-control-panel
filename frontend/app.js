@@ -36,8 +36,9 @@ const state = {
   phraseTimer: null,
   phraseIndex: 0,
   lastEventKey: "",
-  boomTimer: null,
-  boomSessionId: null,
+  /** sessionId → boom-hold timer (per-session; one global slot let a second
+   *  session's boom cancel the first one's reset). */
+  boomTimers: new Map(),
   hostStatusKind: "unknown",
   hostStatusText: "…",
 };
@@ -94,16 +95,17 @@ function endTurnPresence(sid, phase, note) {
     lastToolStatus: phase === "error" ? "failed" : "completed",
   });
   openToolsFor(sid).clear();
-  if (state.boomTimer && phase !== "done") {
-    clearTimeout(state.boomTimer);
-    state.boomTimer = null;
-    state.boomSessionId = null;
-  }
+  if (phase !== "done") clearBoomTimer(sid);
   commitPresence(sid, p);
 }
 
-function emptyTurn() {
-  return P.emptyPresence();
+function clearBoomTimer(sid) {
+  const key = sid || state.selectedSession;
+  const t = state.boomTimers.get(key);
+  if (t) {
+    clearTimeout(t);
+    state.boomTimers.delete(key);
+  }
 }
 
 function bombHtml(mood = "idle", size = "sm", extraClass = "") {
@@ -168,19 +170,6 @@ function turnActive() {
   return P.turnActive(state.turn);
 }
 
-function selectedBusy() {
-  if (turnActive()) return true;
-  if (!state.selectedSession) return false;
-  const s = state.sessions.find((x) => x.id === state.selectedSession);
-  if (!s) return false;
-  const st = String(s.status || "").toLowerCase();
-  return st.includes("run") || st.includes("wait");
-}
-
-function formatElapsed(ms) {
-  return P.formatElapsed(ms);
-}
-
 function formatCount(n) {
   return P.formatCount(n);
 }
@@ -212,42 +201,24 @@ function noteTurn(phase, patch = {}, sid = null) {
   commitPresence(target, p);
 }
 
-function setTurnPhase(phase, detail = "") {
-  const map = {
-    thinking: "think",
-    running: "think",
-    tooling: "tools",
-    stream: "reply",
-    wait: "wait",
-    boom: "done",
-    error: "error",
-    idle: "idle",
-  };
-  const p = map[phase] || phase;
-  noteTurn(p, detail ? { lastTool: detail, note: detail } : {});
-}
-
 function flashBoomThenIdle(ms, sid = null) {
   const hold = ms != null ? ms : P.BOOM_HOLD_MS;
   const target = sid || state.selectedSession;
-  if (state.boomTimer) clearTimeout(state.boomTimer);
+  clearBoomTimer(target);
   openToolsFor(target).clear();
   noteTurn("done", { note: "Turn finished", toolsActive: 0 }, target);
-  state.boomSessionId = target;
-  state.boomTimer = setTimeout(() => {
-    state.boomTimer = null;
-    const boomSid = state.boomSessionId;
-    state.boomSessionId = null;
-    if (!boomSid) return;
-    if (boomSid !== state.selectedSession) {
-      const p = state.presenceBySession.get(boomSid);
+  const timer = setTimeout(() => {
+    state.boomTimers.delete(target);
+    if (target !== state.selectedSession) {
+      const p = state.presenceBySession.get(target);
       if (p && p.phase === "done") {
-        state.presenceBySession.set(boomSid, P.emptyPresence());
+        state.presenceBySession.set(target, P.emptyPresence());
       }
       return;
     }
     if (state.turn.phase === "done") noteTurn("idle");
   }, hold);
+  state.boomTimers.set(target, timer);
 }
 
 function updateBombChrome() {
@@ -405,7 +376,7 @@ function updateBombChrome() {
     if (pill && !pill.classList.contains("status-error")) {
       setBombMood($("status-bomb"), "ready");
       const st = $("status-text");
-      if (st && !st.dataset.locked) {
+      if (st) {
         st.textContent = state.hostStatusText || "Ready";
       }
     }
@@ -802,7 +773,7 @@ function renderTranscript({ keepScroll = false } = {}) {
   // Terminal-style continuous log (mirrors CLI, not just chat bubbles).
   const liveView = P.formatPresence(state.turn, { phraseIndex: state.phraseIndex });
   const liveHint =
-    turnActive() && isSelectedBusyForRender()
+    turnActive()
       ? `<div class="t-block term streaming term-live">
   <div class="t-role">${bombHtml(liveView.mood, "xs")}<span>live</span><span class="stream-caret" aria-hidden="true"></span></div>
   <div class="t-body">${escapeHtml(liveView.subtitle)}</div>
@@ -877,10 +848,6 @@ function renderTranscript({ keepScroll = false } = {}) {
     scrollTranscriptBottom();
   }
   updateBombChrome();
-}
-
-function isSelectedBusyForRender() {
-  return turnActive();
 }
 
 // ── Threads / agents ────────────────────────────────────────────────────
@@ -1024,7 +991,8 @@ async function selectSession(id) {
   }
   renderThreads();
   const sess = state.sessions.find((s) => s.id === id);
-  if (sess?.cwd) setProjectCwd(sess.cwd, { remember: false });
+  // Don't discard a path the user just typed for their next session.
+  if (sess?.cwd && !state.cwdDirty) setProjectCwd(sess.cwd, { remember: false });
   syncSelectorsToSession(sess);
   if (id) await loadTranscriptFromDb(id);
   renderTranscript();
@@ -1900,6 +1868,7 @@ function recentProjects() {
 
 function setProjectCwd(path, { remember = true } = {}) {
   const p = String(path || "").trim().replace(/\/+$/, "");
+  if (remember) state.cwdDirty = false; // explicit choice supersedes typing
   $("cwd").value = p;
   $("project-chip-name").textContent = p || "choose project";
   $("project-chip").title = p || "Choose project folder";
@@ -2239,10 +2208,7 @@ async function sendPrompt() {
     $("prompt").value = "";
     endAgentStream(state.selectedSession);
     state.phraseIndex = 0;
-    if (state.boomTimer) {
-      clearTimeout(state.boomTimer);
-      state.boomTimer = null;
-    }
+    clearBoomTimer(state.selectedSession);
     state.turn = P.emptyPresence();
     noteTurn("send", {
       promptChars: prompt.length,
@@ -2451,15 +2417,21 @@ $("new-folder-name").addEventListener("keydown", (e) => {
 $("btn-submit-code").onclick = submitLoginCode;
 $("btn-cancel-login").onclick = cancelLogin;
 $("btn-open-login-url").onclick = async () => {
+  // window.open is a silent no-op in the Tauri webview — show the URL so
+  // the user can open it themselves if the backend open fails.
+  const fallback = () => {
+    const u = $("btn-open-login-url").dataset.url;
+    if (u) {
+      pushEvent(`open manually: ${u}`, "err", "wait", { force: true });
+      $("auth-hint").textContent = `Open this URL in your browser: ${u}`;
+    }
+  };
   try {
     const url = await invoke("open_grok_login_url");
-    if (!url && $("btn-open-login-url").dataset.url) {
-      window.open($("btn-open-login-url").dataset.url, "_blank");
-    }
+    if (!url) fallback();
   } catch (e) {
-    const u = $("btn-open-login-url").dataset.url;
-    if (u) window.open(u, "_blank");
-    else toastError(e);
+    fallback();
+    toastError(e);
   }
 };
 $("auth-paste-code").addEventListener("keydown", (e) => {
@@ -2571,9 +2543,9 @@ async function openDevServer() {
     const url = await invoke("open_dev_server");
     pushEvent(`Opened ${url}`, "ok");
   } catch (e) {
-    // fallback: open link if we have it
+    // window.open is a no-op in the Tauri webview — surface the URL instead.
     if (state.devServer?.url) {
-      window.open(state.devServer.url, "_blank");
+      pushEvent(`open manually: ${state.devServer.url}`, "err", "wait", { force: true });
     } else {
       toastError(e);
     }
@@ -2886,18 +2858,25 @@ setInterval(() => {
 }, 1000);
 
 async function boot() {
-  if (hasTauri() && window.__TAURI__.event) {
-    await window.__TAURI__.event.listen("control-event", (e) => handleControlEvent(e.payload));
-  } else {
-    setStatus("error", "Not inside Tauri — use the .app");
-    setBombMood($("status-bomb"), "error");
-  }
+  // Every boot step is independent — one failure must not take down the rest
+  // (a failed listen() used to die as an unhandled rejection and nothing
+  // loaded; a failed refreshStatus skipped session loading entirely).
   try {
-    await refreshStatus();
-    await loadBackends();
-    await loadMcpCatalog();
-    await refreshSessions();
-    await refreshDevStatus();
+    if (hasTauri() && window.__TAURI__.event) {
+      await window.__TAURI__.event.listen("control-event", (e) => handleControlEvent(e.payload));
+    } else {
+      setStatus("error", "Not inside Tauri — use the .app");
+      setBombMood($("status-bomb"), "error");
+    }
+  } catch (e) {
+    toastError(e);
+  }
+  await refreshStatus().catch(toastError);
+  await loadBackends().catch(toastError);
+  await loadMcpCatalog().catch(() => {});
+  await refreshSessions().catch(toastError);
+  await refreshDevStatus().catch(() => {});
+  try {
     noteTurn("idle");
     pushEvent("Bomb Code ready", "ok", "boom", { force: true });
     // Haven (Hetzner) auto-link status
@@ -2929,6 +2908,10 @@ async function boot() {
     toastError(e);
   }
 }
+
+$("cwd")?.addEventListener("input", () => {
+  state.cwdDirty = !!$("cwd").value.trim();
+});
 
 wireModeButtons();
 wireProjectChip();

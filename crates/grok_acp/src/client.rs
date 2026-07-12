@@ -607,7 +607,9 @@ impl AcpClient {
             .as_ref()
             .map(|s| !s.trim().is_empty())
             .unwrap_or(false);
-        let mode = if has_ctx || prior_sid.is_some() {
+        // HistoryOnly only when there is actually context to inject — the
+        // badge otherwise promises a history injection that never happens.
+        let mode = if has_ctx {
             BrainMode::HistoryOnly
         } else {
             BrainMode::Fresh
@@ -1472,9 +1474,12 @@ impl AcpClient {
                 }
             }
             other => {
-                warn!(method = %other, "unhandled agent request — returning empty result");
-                // Prefer empty success over hang when method is unknown optional.
-                transport.send_response(req.id, json!({})).await?;
+                warn!(method = %other, "unhandled agent request — method not found");
+                // Spec-correct: an unknown method gets -32601, not `{}` — a
+                // fake empty success can make the agent misbehave subtly.
+                transport
+                    .send_error_response(req.id, -32601, format!("method not found: {other}"))
+                    .await?;
             }
         }
         Ok(())

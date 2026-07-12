@@ -15,11 +15,11 @@
 - **Headless CLI** fallback for batch / scheduled jobs
 - **Multi-session registry** with concurrent `DashMap` access
 - **Git worktree** isolation for parallel agents
-- **Permission presets** (safe / workspace / yolo) + sandbox profiles
-- **MCP management** — catalog (filesystem, GitHub, Linear, X, Playwright, grok-build, custom), doctor, credentials store, session attachment
+- **Interactive tool approvals** (allow once / always / deny per request), deny rules enforced ahead of yolo, permission presets (safe / workspace / yolo) + sandbox profiles
+- **MCP management** — catalog (filesystem, GitHub, Linear, X, Playwright, custom), doctor, credentials store, pre-spawn health checks, session attachment. Servers needing credentials (e.g. `GITHUB_TOKEN`, `LINEAR_API_KEY`, `X_API_BEARER`) are skipped with a visible reason until the secret is set.
 - **Extensions** — skills, plugins CRUD (config + CLI)
 - **Memory** — structured store + MEMORY.md flush/dream
-- **Scheduler** — interval, cron, one-shot routines
+- **Scheduler** — interval, cron, one-shot routines (persisted; survive restart; each job needs an explicit working directory)
 - **Persistence** — SQLite session/transcript recovery
 - **Diff engine** — before/after capture and summaries
 - **Live Dev Server** dock for project preview

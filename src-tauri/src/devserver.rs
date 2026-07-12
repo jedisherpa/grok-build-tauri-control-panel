@@ -333,14 +333,32 @@ impl DevServerManager {
             });
         }
 
-        // Brief wait for server to bind
-        tokio::time::sleep(Duration::from_millis(900)).await;
-        if let Ok(Some(status)) = child.try_wait() {
+        // Poll for the port to actually bind (up to ~12s) instead of a fixed
+        // 900ms sleep declaring success before the server exists. Frameworks
+        // that auto-increment a busy port are reported as such.
+        let mut bound = false;
+        for _ in 0..40 {
+            if let Ok(Some(status)) = child.try_wait() {
+                let logs = log_tail.lock().await.clone();
+                return Err(format!(
+                    "dev server exited immediately ({status})\n{}",
+                    logs.join("\n")
+                ));
+            }
+            if std::net::TcpStream::connect_timeout(
+                &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+                Duration::from_millis(150),
+            )
+            .is_ok()
+            {
+                bound = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(300)).await;
+        }
+        if !bound {
             let logs = log_tail.lock().await.clone();
-            return Err(format!(
-                "dev server exited immediately ({status})\n{}",
-                logs.join("\n")
-            ));
+            warn!(port, "dev server has not bound its expected port yet; it may be using another port\n{}", logs.join("\n"));
         }
 
         {
@@ -403,7 +421,18 @@ impl DevServerManager {
 }
 
 fn shell_cmd(s: &str) -> Vec<String> {
-    vec!["/bin/zsh".into(), "-lc".into(), s.to_string()]
+    // $SHELL with sane fallbacks — hardcoded zsh broke non-zsh setups.
+    let shell = std::env::var("SHELL")
+        .ok()
+        .filter(|sh| !sh.trim().is_empty() && std::path::Path::new(sh).exists())
+        .or_else(|| {
+            ["/bin/zsh", "/bin/bash", "/bin/sh"]
+                .iter()
+                .find(|c| std::path::Path::new(c).exists())
+                .map(|c| c.to_string())
+        })
+        .unwrap_or_else(|| "/bin/sh".into());
+    vec![shell, "-lc".into(), s.to_string()]
 }
 
 fn split_command(cmd: &[String]) -> Result<(String, Vec<String>), String> {

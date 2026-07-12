@@ -19,7 +19,7 @@ Fallback: headless CLI (`grok -p ...`) for batch/scheduler jobs.
 | `grok_worktree` | Git/Grok worktree lifecycle |
 | `grok_permissions` | Allow/deny rules, presets, sandbox policy |
 | `grok_extensions` | Skills / plugins CRUD (MCP legacy helpers) |
-| `grok_mcp` | Full MCP manager: catalog (7 servers), CRUD, doctor, credentials, session injection |
+| `grok_mcp` | Full MCP manager: catalog (filesystem, GitHub, Linear, X, Playwright, custom), CRUD, doctor, credentials, session injection |
 | `grok_memory` | Cross-session memory + flush/dream |
 | `grok_scheduler` | Interval/cron/once jobs |
 | `grok_persistence` | SQLite crash recovery + transcripts |
@@ -38,10 +38,10 @@ cargo tauri dev   # full desktop UI
 ## Security defaults
 
 - **Never** default to `--always-approve` / yolo.
-- Plan mode on by default.
+- Plan mode on by default (set via ACP session/set_mode with the agent-advertised modeId; headless uses --permission-mode plan).
 - Validate absolute `cwd`, extension names, and prompts at boundaries.
 - Do not log `XAI_API_KEY`.
-- Deny-first permission evaluation; presets in `grok_permissions`.
+- Deny-first permission evaluation: config/spawn deny rules are enforced in the ACP approval path (they beat yolo); other requests show an interactive approval card unless always-approve is on.
 
 ## Agent conventions
 

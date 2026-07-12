@@ -37,7 +37,7 @@ open "/Applications/Bomb Code.app"
 ### Optional MCP
 
 - **MCP** tab → pick `filesystem` or `github` → **Add**.
-- For GitHub: save `GITHUB_TOKEN` under credentials first.
+- For GitHub: save `GITHUB_TOKEN` under credentials first — without it the server is skipped at session start (the thread will say why). Linear needs `LINEAR_API_KEY`; X needs `X_API_BEARER`; stdio servers need Node/npx on PATH.
 - On Sessions, set **MCP attach** to those names (e.g. `github`).
 
 ## Config locations (safe)
@@ -68,6 +68,6 @@ cargo tauri dev
 
 ## Safety
 
-- Default: **plan mode on**, **always-approve off** in the panel UI.
+- Default: **plan mode on**, **always-approve off**. With always-approve off, each tool permission shows an approval card in the thread (Allow once / Always / Deny).
 - High-risk MCP (browser, grok-build, custom) requires explicit attach approval.
 - Do not enable Always approve unless you trust the workspace.

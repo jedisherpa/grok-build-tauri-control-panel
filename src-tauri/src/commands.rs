@@ -8,7 +8,7 @@ use tauri::State;
 use uuid::Uuid;
 
 use grok_config::{DiscoveryReport, GrokConfig};
-use grok_control_core::{AgentHandleSnapshot, SessionStatus, SpawnOptions};
+use grok_control_core::{AgentHandleSnapshot, SpawnOptions};
 use grok_diff::{DiffCapture, DiffEngine, DiffSummary};
 use grok_extensions::ExtensionEntry;
 use grok_mcp::{
@@ -894,7 +894,7 @@ pub async fn evaluate_permission(
     preset: Option<String>,
 ) -> Result<PermissionEvalResult, String> {
     let cfg = state.config.read().await;
-    let mut ctl = if let Some(name) = preset {
+    let ctl = if let Some(name) = preset {
         let presets = builtin_presets();
         let p = presets
             .iter()
@@ -904,8 +904,6 @@ pub async fn evaluate_permission(
     } else {
         PermissionController::from_defaults(&cfg.permissions, cfg.sandbox_profile)
     };
-    // silence mut if unused later
-    let _ = &mut ctl;
     Ok(PermissionEvalResult {
         decision: ctl.evaluate(&tool, &detail),
     })
@@ -1511,12 +1509,6 @@ pub fn persist_control_event(db: &grok_persistence::Persistence, ev: &ControlEve
     if let Err(e) = res {
         tracing::debug!(error = %e, "persist_control_event skipped/failed");
     }
-}
-
-// Keep SessionStatus import used for docs / future
-#[allow(dead_code)]
-fn _status_idle() -> SessionStatus {
-    SessionStatus::Idle
 }
 
 // ── Dev server / live preview ────────────────────────────────────────────

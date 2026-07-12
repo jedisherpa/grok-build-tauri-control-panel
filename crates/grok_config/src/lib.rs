@@ -59,8 +59,6 @@ pub struct GrokConfig {
     pub plan_mode_default: bool,
     pub sandbox_profile: SandboxProfile,
     pub worktrees_root: Option<PathBuf>,
-    pub memory_enabled: bool,
-    pub scheduler_enabled: bool,
     pub mcp_servers: HashMap<String, McpServerConfig>,
     pub skills: HashMap<String, SkillConfig>,
     pub plugins: HashMap<String, PluginConfig>,
@@ -82,8 +80,6 @@ impl Default for GrokConfig {
             plan_mode_default: true,
             sandbox_profile: SandboxProfile::Workspace,
             worktrees_root: None,
-            memory_enabled: true,
-            scheduler_enabled: true,
             mcp_servers: HashMap::new(),
             skills: HashMap::new(),
             plugins: HashMap::new(),
@@ -236,12 +232,6 @@ impl GrokConfig {
         }
         if overlay.worktrees_root.is_some() {
             self.worktrees_root = overlay.worktrees_root;
-        }
-        if overlay.memory_enabled != defaults.memory_enabled {
-            self.memory_enabled = overlay.memory_enabled;
-        }
-        if overlay.scheduler_enabled != defaults.scheduler_enabled {
-            self.scheduler_enabled = overlay.scheduler_enabled;
         }
         self.mcp_servers.extend(overlay.mcp_servers);
         self.skills.extend(overlay.skills);

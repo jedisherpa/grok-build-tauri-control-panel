@@ -645,6 +645,12 @@
   border-color: color-mix(in srgb, var(--bomb-err) 35%, var(--border));
   color: var(--err);
 }
+/* Startup state before the first status refresh lands. */
+.status-pill.status-unknown {
+  color: var(--muted);
+  border-color: var(--border);
+  opacity: 0.85;
+}
 
 /* ── Badges with mini bomb ───────────────────────────────────────────────── */
 .badge {

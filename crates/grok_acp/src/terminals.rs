@@ -320,21 +320,29 @@ impl TerminalRegistry {
 
     async fn kill(&self, params: &Option<Value>) -> Result<Value> {
         let id = terminal_id(params)?;
-        let map = self.terminals.lock().await;
-        let term = map
-            .get(&id)
-            .ok_or_else(|| AcpError::Protocol(format!("unknown terminalId: {id}")))?;
-        let mut child_guard = term.child.lock().await;
-        if let Some(child) = child_guard.as_mut() {
-            let _ = child.kill().await;
+        // Clone the child handle out so a wedged kill doesn't stall every
+        // other terminal RPC behind the map mutex.
+        let child = {
+            let map = self.terminals.lock().await;
+            map.get(&id)
+                .ok_or_else(|| AcpError::Protocol(format!("unknown terminalId: {id}")))?
+                .child
+                .clone()
+        };
+        let mut child_guard = child.lock().await;
+        if let Some(c) = child_guard.as_mut() {
+            let _ = c.kill().await;
         }
         Ok(json!({}))
     }
 
     async fn release(&self, params: &Option<Value>) -> Result<Value> {
         let id = terminal_id(params)?;
-        let mut map = self.terminals.lock().await;
-        if let Some(term) = map.remove(&id) {
+        let term = {
+            let mut map = self.terminals.lock().await;
+            map.remove(&id)
+        };
+        if let Some(term) = term {
             let mut child_guard = term.child.lock().await;
             if let Some(mut child) = child_guard.take() {
                 let _ = child.kill().await;
@@ -412,8 +420,24 @@ fn terminal_id(params: &Option<Value>) -> Result<String> {
         .ok_or_else(|| AcpError::Protocol("missing terminalId".into()))
 }
 
+/// The user's shell, falling back through common defaults ($SHELL → zsh →
+/// bash → sh) so this works beyond zsh-only macOS setups.
+pub(crate) fn user_shell() -> String {
+    if let Ok(sh) = std::env::var("SHELL") {
+        if !sh.trim().is_empty() && Path::new(&sh).exists() {
+            return sh;
+        }
+    }
+    for candidate in ["/bin/zsh", "/bin/bash", "/bin/sh"] {
+        if Path::new(candidate).exists() {
+            return candidate.to_string();
+        }
+    }
+    "/bin/sh".into()
+}
+
 /// Build a process command. If `args` is empty and `command` looks like a shell
-/// snippet (spaces / metacharacters), run via `/bin/zsh -lc` so Grok's
+/// snippet (spaces / metacharacters), run via `$SHELL -lc` so Grok's
 /// `run_terminal_command` payloads work.
 fn build_command(
     command: &str,
@@ -422,7 +446,7 @@ fn build_command(
     env_pairs: &[(String, String)],
 ) -> Command {
     let mut cmd = if args.is_empty() && needs_shell(command) {
-        let mut c = Command::new("/bin/zsh");
+        let mut c = Command::new(user_shell());
         c.arg("-lc").arg(command);
         c
     } else {
