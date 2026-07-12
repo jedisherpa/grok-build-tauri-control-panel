@@ -1105,22 +1105,59 @@ function renderThreads() {
   updateBombChrome();
 }
 
-async function renameThread(id) {
+// window.prompt() is a silent no-op in the macOS webview — rename happens
+// inline: the row title becomes an input (Enter commits, Esc cancels).
+function renameThread(id) {
   const sess = state.sessions.find((s) => s.id === id);
   if (!sess) return;
+  const row = document.querySelector(`.thread-item[data-id="${CSS.escape(id)}"]`);
+  const titleEl = row?.querySelector(".thread-title");
+  if (!row || !titleEl || row.querySelector(".thread-rename-input")) return;
+
   const current = sess.label || "";
-  const name = prompt("Rename thread", current);
-  if (name == null) return; // cancelled
-  const trimmed = name.trim();
-  if (!trimmed || trimmed === current) return;
-  try {
-    await invoke("rename_thread", { id, label: trimmed });
-    sess.label = trimmed;
-    renderThreads();
-    pushEvent(`renamed → ${trimmed}`, "ok", null, { force: true });
-  } catch (e) {
-    toastError(e);
+  const input = document.createElement("input");
+  input.type = "text";
+  input.className = "thread-rename-input";
+  input.value = current;
+  input.maxLength = 60;
+  input.placeholder = "thread name";
+  titleEl.textContent = "";
+  titleEl.appendChild(input);
+  input.focus();
+  input.select();
+
+  // Keep the row's select/dblclick handlers away from the editor.
+  for (const evName of ["click", "dblclick", "mousedown"]) {
+    input.addEventListener(evName, (e) => e.stopPropagation());
   }
+
+  let done = false;
+  const finish = async (commit) => {
+    if (done) return;
+    done = true;
+    const val = input.value.trim();
+    if (commit && val && val !== current) {
+      try {
+        await invoke("rename_thread", { id, label: val });
+        sess.label = val;
+        pushEvent(`renamed → ${val}`, "ok", null, { force: true });
+      } catch (e) {
+        toastError(e);
+      }
+    }
+    renderThreads();
+  };
+  input.addEventListener("keydown", (e) => {
+    e.stopPropagation();
+    if (e.key === "Enter") {
+      e.preventDefault();
+      finish(true);
+    } else if (e.key === "Escape") {
+      e.preventDefault();
+      finish(false);
+    }
+  });
+  input.addEventListener("blur", () => finish(true));
 }
 
 /** Show Land/Sync controls only for threads that own a worktree. */

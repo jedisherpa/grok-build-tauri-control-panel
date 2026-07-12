@@ -222,6 +222,14 @@ body {
 .thread-item:hover .thread-delete, .thread-item:hover .thread-rename { opacity: 1; }
 .thread-delete:hover { color: var(--err); }
 .thread-rename:hover { color: var(--accent); }
+.thread-rename-input {
+  width: 100%; min-width: 0;
+  background: var(--bg); color: var(--text);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, var(--border));
+  border-radius: 4px; padding: 1px 5px;
+  font-family: var(--font); font-size: 12px;
+  outline: none;
+}
 
 .badge.branch {
   color: var(--ok);
