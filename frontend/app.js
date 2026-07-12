@@ -520,6 +520,19 @@ function renderMarkdown(src) {
   return text;
 }
 
+/** Native yes/no dialog — window.confirm silently falls through as truthy
+ *  in the Tauri webview, which made destructive actions skip confirmation. */
+async function askConfirm(message, { title = "Bomb Code", kind = "warning" } = {}) {
+  try {
+    if (window.__TAURI__?.dialog?.ask) {
+      return await window.__TAURI__.dialog.ask(message, { title, kind });
+    }
+  } catch (_) {
+    /* fall through */
+  }
+  return window.confirm(message);
+}
+
 function toastError(e) {
   const msg = e?.message || String(e);
   pushEvent(msg, "err", "error", { force: true, milestone: true });
@@ -1240,11 +1253,16 @@ async function deleteThread(id) {
   const sess = state.sessions.find((s) => s.id === id);
   if (!sess) return;
   const name = sess.label || shortId(id);
-  if (!confirm(`Delete thread "${name}"? Its transcript is removed permanently.`)) return;
+  const ok = await askConfirm(
+    `Delete thread "${name}"?\n\nIts transcript is removed permanently.`,
+    { title: "Delete thread" }
+  );
+  if (!ok) return;
   let removeWorktree = false;
   if (sess.projectRoot || sess.project_root) {
-    removeWorktree = confirm(
-      "Also remove its git worktree?\n\nOK = remove worktree (unlanded changes are LOST)\nCancel = keep the worktree on disk"
+    removeWorktree = await askConfirm(
+      "Also remove its git worktree?\n\nYes = remove worktree (unlanded changes are LOST)\nNo = keep the worktree on disk",
+      { title: "Delete worktree too?" }
     );
   }
   try {
@@ -2608,7 +2626,10 @@ async function startAcp() {
     const auth =
       backend === "grok" ? state.auth || (await refreshAuth().catch(() => null)) : null;
     if (auth && !auth.loggedIn) {
-      const go = confirm("Not signed in with Grok. Log in now?");
+      const go = await askConfirm("Not signed in with Grok. Log in now?", {
+        title: "Sign in",
+        kind: "info",
+      });
       if (go) {
         await loginWithGrok();
         // The device-code flow finishes in the browser — wait for the poll
