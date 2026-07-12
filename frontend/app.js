@@ -1045,11 +1045,15 @@ function renderThreads() {
         ? ""
         : list.length
           ? list.map(renderThreadRow).join("")
-          : `<div class="empty-hint project-empty">no threads yet — click the folder name, then +</div>`;
-      return `<div class="project-group" data-key="${escapeHtml(key)}">
-  <button class="project-header${active}" type="button" data-key="${escapeHtml(key)}" title="${escapeHtml(key)} — click to make this the active project">
+          : `<div class="empty-hint project-empty">no threads yet — hit + to start one here</div>`;
+      const marker = active
+        ? `<span class="badge active-proj" title="New threads start in this project">● active</span>`
+        : `<span class="project-set">set active</span>`;
+      return `<div class="project-group${active ? " active" : ""}" data-key="${escapeHtml(key)}">
+  <button class="project-header${active}" type="button" data-key="${escapeHtml(key)}" title="${escapeHtml(key)}${active ? " — active project" : " — click to make this the active project"}">
     <span class="project-caret" data-key="${escapeHtml(key)}">${collapsed ? "▸" : "▾"}</span>
     <span class="project-name">${escapeHtml(name)}</span>
+    ${marker}
     <span class="project-count muted">${list.length}</span>
   </button>
   ${rows}
@@ -2686,6 +2690,25 @@ async function sendPrompt() {
 
 // Wire buttons
 $("btn-new-session").onclick = startAcp;
+$("btn-new-project") &&
+  ($("btn-new-project").onclick = async () => {
+    try {
+      const picked = await window.__TAURI__.dialog.open({
+        directory: true,
+        multiple: false,
+        title: "Choose a project folder",
+        defaultPath: $("cwd").value || undefined,
+      });
+      if (picked) {
+        setProjectCwd(picked); // registers the project + makes it active
+        pushEvent(`project added · ${String(picked).split("/").filter(Boolean).pop()}`, "ok", null, {
+          force: true,
+        });
+      }
+    } catch (e) {
+      toastError(e);
+    }
+  });
 $("btn-login").onclick = loginWithGrok;
 $("btn-logout").onclick = logoutGrok;
 
