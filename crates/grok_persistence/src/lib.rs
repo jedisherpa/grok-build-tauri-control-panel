@@ -283,58 +283,42 @@ impl Persistence {
             params![id.to_string()],
         )?;
         conn.execute("DELETE FROM sessions WHERE id=?1", params![id.to_string()])?;
-        Ok(())
-    }
-
-    pub fn next_seq(&self, session_id: Uuid) -> Result<u64> {
-        let conn = self.conn()?;
-        let max: i64 = conn.query_row(
-            "SELECT COALESCE(MAX(seq), 0) FROM transcripts WHERE session_id=?1",
-            params![session_id.to_string()],
-            |r| r.get(0),
-        )?;
-        Ok((max as u64).saturating_add(1))
-    }
-
-    pub fn append_transcript(&self, chunk: &TranscriptChunk) -> Result<()> {
-        let _g = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
-        let conn = self.conn()?;
-        // Ensure parent session row exists so we never orphan history.
-        let exists: i64 = conn.query_row(
-            "SELECT COUNT(1) FROM sessions WHERE id=?1",
-            params![chunk.session_id.to_string()],
-            |r| r.get(0),
-        )?;
-        if exists == 0 {
-            let now = Utc::now().to_rfc3339();
-            conn.execute(
-                r#"
-                INSERT OR IGNORE INTO sessions
-                  (id, cwd, mode, model, status, worktree, acp_session_id, metadata_json, created_at, updated_at)
-                VALUES (?1, '', 'acp', '', 'unknown', NULL, NULL, '{}', ?2, ?2)
-                "#,
-                params![chunk.session_id.to_string(), now],
-            )?;
-        }
+        // Tombstone: late events for this id must not resurrect a ghost row.
         conn.execute(
-            "INSERT OR REPLACE INTO transcripts (session_id, seq, kind, payload, at) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                chunk.session_id.to_string(),
-                chunk.seq as i64,
-                chunk.kind,
-                chunk.payload,
-                chunk.at.to_rfc3339(),
-            ],
+            "INSERT INTO kv (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![format!("tombstone_{id}"), Utc::now().to_rfc3339()],
         )?;
-        // Touch session
-        let _ = conn.execute(
-            "UPDATE sessions SET updated_at=?1 WHERE id=?2",
-            params![Utc::now().to_rfc3339(), chunk.session_id.to_string()],
-        );
         Ok(())
+    }
+
+    /// Idempotent parent-row creation (caller must hold write_lock).
+    fn ensure_session_row(&self, conn: &Connection, session_id: Uuid) -> Result<bool> {
+        // Deleted sessions stay deleted.
+        let tombstoned: i64 = conn.query_row(
+            "SELECT COUNT(1) FROM kv WHERE key=?1",
+            params![format!("tombstone_{session_id}")],
+            |r| r.get(0),
+        )?;
+        if tombstoned > 0 {
+            return Ok(false);
+        }
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            r#"
+            INSERT OR IGNORE INTO sessions
+              (id, cwd, mode, model, status, worktree, acp_session_id, metadata_json, created_at, updated_at)
+            VALUES (?1, '', 'acp', '', 'unknown', NULL, NULL, '{}', ?2, ?2)
+            "#,
+            params![session_id.to_string(), now],
+        )?;
+        Ok(true)
     }
 
     /// Append a transcript line with auto-incrementing seq.
+    ///
+    /// MAX(seq) and the INSERT happen under one write lock/connection — two
+    /// concurrent appenders previously computed the same seq and the second
+    /// silently replaced the first row.
     pub fn append_message(
         &self,
         session_id: Uuid,
@@ -342,14 +326,33 @@ impl Persistence {
         payload: impl Into<String>,
         at: DateTime<Utc>,
     ) -> Result<u64> {
-        let seq = self.next_seq(session_id)?;
-        self.append_transcript(&TranscriptChunk {
-            session_id,
-            seq,
-            kind: kind.to_string(),
-            payload: payload.into(),
-            at,
-        })?;
+        let _g = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let conn = self.conn()?;
+        if !self.ensure_session_row(&conn, session_id)? {
+            return Err(PersistenceError::NotFound(format!(
+                "session {session_id} was deleted"
+            )));
+        }
+        let max: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(seq), 0) FROM transcripts WHERE session_id=?1",
+            params![session_id.to_string()],
+            |r| r.get(0),
+        )?;
+        let seq = (max as u64).saturating_add(1);
+        conn.execute(
+            "INSERT INTO transcripts (session_id, seq, kind, payload, at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                session_id.to_string(),
+                seq as i64,
+                kind,
+                payload.into(),
+                at.to_rfc3339(),
+            ],
+        )?;
+        let _ = conn.execute(
+            "UPDATE sessions SET updated_at=?1 WHERE id=?2",
+            params![Utc::now().to_rfc3339(), session_id.to_string()],
+        );
         Ok(seq)
     }
 
@@ -525,9 +528,11 @@ fn kind_to_role(kind: &str) -> String {
 }
 
 fn parse_dt(s: &str) -> DateTime<Utc> {
+    // Epoch, not now(): a garbage stored timestamp must not float a stale
+    // thread to the top of the recency-sorted list.
     DateTime::parse_from_rfc3339(s)
         .map(|d| d.with_timezone(&Utc))
-        .unwrap_or_else(|_| Utc::now())
+        .unwrap_or(DateTime::<Utc>::UNIX_EPOCH)
 }
 
 #[cfg(test)]

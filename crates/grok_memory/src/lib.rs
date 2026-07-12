@@ -52,7 +52,16 @@ impl MemoryService {
         let path = root.join("memory.json");
         let store = if path.exists() {
             let raw = tokio::fs::read_to_string(&path).await?;
-            serde_json::from_str(&raw).unwrap_or_default()
+            match serde_json::from_str(&raw) {
+                Ok(s) => s,
+                Err(e) => {
+                    // Don't treat corruption as "empty" — the next persist()
+                    // would silently wipe every entry. Keep the file aside.
+                    let backup = path.with_extension("json.corrupt");
+                    let _ = tokio::fs::rename(&path, &backup).await;
+                    return Err(MemoryError::Json(e));
+                }
+            }
         } else {
             MemoryStore::default()
         };
@@ -175,7 +184,11 @@ impl MemoryService {
     async fn persist(&self) -> Result<()> {
         let store = self.store.read().await;
         let raw = serde_json::to_string_pretty(&*store)?;
-        tokio::fs::write(self.json_path(), raw).await?;
+        // tmp + rename: a crash mid-write must not truncate memory.json.
+        let path = self.json_path();
+        let tmp = path.with_extension("json.tmp");
+        tokio::fs::write(&tmp, raw).await?;
+        tokio::fs::rename(&tmp, &path).await?;
         Ok(())
     }
 }

@@ -54,7 +54,13 @@ pub fn run() {
                             commands::persist_control_event(&persistence, &ev);
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                            // Leave a visible marker: silence here reads as a
+                            // complete transcript when rows were dropped.
                             warn!(n, "persistence event bus lagged");
+                            let _ = persistence.set_kv(
+                                "last_transcript_gap",
+                                &format!("{} events dropped at {}", n, chrono::Utc::now()),
+                            );
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
@@ -80,8 +86,6 @@ pub fn run() {
             commands::submit_grok_login_code,
             commands::open_grok_login_url,
             commands::cancel_grok_login,
-            commands::login_with_grok,
-            commands::login_with_device,
             commands::logout_grok,
             commands::start_session,
             commands::start_mock_session,

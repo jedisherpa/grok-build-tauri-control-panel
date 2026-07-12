@@ -47,18 +47,32 @@ impl AppState {
             .context("path discovery")?;
         let _ = paths.ensure_dirs();
 
-        let mut config = GrokConfig::load(&paths).unwrap_or_default();
-        // Always re-resolve binary so GUI gets absolute path to ~/.grok/bin/grok.
-        match grok_config::discover_grok_binary() {
+        // Resolve the binary against the BASE (global-only) config and save
+        // that — saving the overlay-merged view would silently promote
+        // project-scoped settings into the user's global config.
+        let resolved_binary = match grok_config::discover_grok_binary() {
             Ok(bin) => {
                 info!(binary = %bin.display(), "resolved grok binary");
-                config.grok_binary = Some(bin);
+                Some(bin)
             }
-            Err(e) => warn!(error = %e, "grok binary not found — install Grok Build CLI"),
+            Err(e) => {
+                warn!(error = %e, "grok binary not found — install Grok Build CLI");
+                None
+            }
+        };
+        {
+            let mut base = GrokConfig::load_base(&paths).unwrap_or_default();
+            if resolved_binary.is_some() {
+                base.grok_binary = resolved_binary.clone();
+            }
+            let _ = base.save(&paths.config_file);
         }
 
-        // Persist panel settings (never writes Grok CLI ~/.grok/config.toml).
-        let _ = config.save(&paths.config_file);
+        // Runtime config: global + project overlay.
+        let mut config = GrokConfig::load(&paths).unwrap_or_default();
+        if resolved_binary.is_some() {
+            config.grok_binary = resolved_binary;
+        }
 
         let binary = config
             .resolve_grok_binary()
@@ -111,12 +125,16 @@ impl AppState {
                 let persistence = persistence_for_jobs.clone();
                 async move {
                     info!(job_id = %job.id, name = %job.name, "scheduler firing job");
-                    let cwd = job
-                        .cwd
-                        .clone()
-                        .unwrap_or_else(|| std::env::current_dir()
-                            .map(|p| p.display().to_string())
-                            .unwrap_or_else(|_| "/tmp".into()));
+                    // A Finder-launched app's current_dir is `/` — running an
+                    // agent from filesystem root is never what anyone wants.
+                    let Some(cwd) = job.cwd.clone().filter(|c| !c.trim().is_empty()) else {
+                        warn!(job_id = %job.id, "scheduled job has no cwd; skipping run");
+                        let _ = persistence.set_kv(
+                            &format!("last_job_error_{}", job.id),
+                            "job has no cwd configured",
+                        );
+                        return;
+                    };
 
                     // Prefer headless one-shot for scheduled routines
                     let opts = grok_control_core::SpawnOptions {
@@ -146,6 +164,24 @@ impl AppState {
                 }
             }))
             .await;
+
+        // Durable routines: persist the job list on every change and reload
+        // it at startup (jobs previously lived only in memory).
+        {
+            let persistence_for_sched = persistence.clone();
+            scheduler
+                .set_change_hook(move |jobs| {
+                    if let Ok(json) = serde_json::to_string(&jobs) {
+                        let _ = persistence_for_sched.set_kv("scheduler_jobs", &json);
+                    }
+                })
+                .await;
+            if let Ok(Some(json)) = persistence.get_kv("scheduler_jobs") {
+                if let Ok(jobs) = serde_json::from_str::<Vec<ScheduledJob>>(&json) {
+                    scheduler.restore_jobs(jobs).await;
+                }
+            }
+        }
 
         // Discovery log (Phase 0)
         match discover_environment() {

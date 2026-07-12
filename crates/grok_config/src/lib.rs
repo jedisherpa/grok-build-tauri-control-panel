@@ -145,6 +145,18 @@ impl Default for PermissionDefaults {
 }
 
 impl GrokConfig {
+    /// Load ONLY the user-global config (no project overlay). Use this when
+    /// the result will be saved back to the global path — saving the merged
+    /// view would permanently promote project-scoped settings to global.
+    pub fn load_base(paths: &GrokPaths) -> Result<Self> {
+        let mut cfg = Self::default();
+        if paths.config_file.exists() {
+            let raw = fs::read_to_string(&paths.config_file)?;
+            cfg = toml::from_str(&raw)?;
+        }
+        Ok(cfg)
+    }
+
     /// Load config from paths, falling back to defaults.
     pub fn load(paths: &GrokPaths) -> Result<Self> {
         let mut cfg = Self::default();
@@ -189,12 +201,15 @@ impl GrokConfig {
         Ok(())
     }
 
-    /// Shallow merge: overlay non-default fields win for simple fields; maps extend.
+    /// Shallow merge: overlay wins only for fields that differ from the
+    /// defaults; maps extend. An overlay file that omits a key must never
+    /// reset the user's global value (scalars used to be copied blindly).
     pub fn merge_overlay(mut self, overlay: GrokConfig) -> Self {
-        if overlay.default_model != Self::default().default_model {
+        let defaults = Self::default();
+        if overlay.default_model != defaults.default_model {
             self.default_model = overlay.default_model;
         }
-        if overlay.default_effort != Self::default().default_effort {
+        if overlay.default_effort != defaults.default_effort {
             self.default_effort = overlay.default_effort;
         }
         if overlay.grok_binary.is_some() {
@@ -204,20 +219,30 @@ impl GrokConfig {
             self.default_backend = overlay.default_backend;
         }
         self.backends.extend(overlay.backends);
-        if overlay.max_concurrent_sessions != Self::default().max_concurrent_sessions {
+        if overlay.max_concurrent_sessions != defaults.max_concurrent_sessions {
             self.max_concurrent_sessions = overlay.max_concurrent_sessions;
         }
-        if overlay.session_timeout_secs != Self::default().session_timeout_secs {
+        if overlay.session_timeout_secs != defaults.session_timeout_secs {
             self.session_timeout_secs = overlay.session_timeout_secs;
         }
-        self.always_approve_default = overlay.always_approve_default;
-        self.plan_mode_default = overlay.plan_mode_default;
-        self.sandbox_profile = overlay.sandbox_profile;
+        if overlay.always_approve_default != defaults.always_approve_default {
+            self.always_approve_default = overlay.always_approve_default;
+        }
+        if overlay.plan_mode_default != defaults.plan_mode_default {
+            self.plan_mode_default = overlay.plan_mode_default;
+        }
+        if overlay.sandbox_profile != defaults.sandbox_profile {
+            self.sandbox_profile = overlay.sandbox_profile;
+        }
         if overlay.worktrees_root.is_some() {
             self.worktrees_root = overlay.worktrees_root;
         }
-        self.memory_enabled = overlay.memory_enabled;
-        self.scheduler_enabled = overlay.scheduler_enabled;
+        if overlay.memory_enabled != defaults.memory_enabled {
+            self.memory_enabled = overlay.memory_enabled;
+        }
+        if overlay.scheduler_enabled != defaults.scheduler_enabled {
+            self.scheduler_enabled = overlay.scheduler_enabled;
+        }
         self.mcp_servers.extend(overlay.mcp_servers);
         self.skills.extend(overlay.skills);
         self.plugins.extend(overlay.plugins);
@@ -225,9 +250,15 @@ impl GrokConfig {
             self.permissions.allow = overlay.permissions.allow;
         }
         if !overlay.permissions.deny.is_empty() {
-            self.permissions.deny = overlay.permissions.deny;
+            // Deny rules are additive — an overlay can tighten, never loosen.
+            let mut deny = self.permissions.deny.clone();
+            deny.extend(overlay.permissions.deny);
+            deny.dedup();
+            self.permissions.deny = deny;
         }
-        self.permissions.trust_repo = overlay.permissions.trust_repo;
+        if overlay.permissions.trust_repo != defaults.permissions.trust_repo {
+            self.permissions.trust_repo = overlay.permissions.trust_repo;
+        }
         self.env.extend(overlay.env);
         self
     }

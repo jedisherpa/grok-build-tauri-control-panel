@@ -158,7 +158,9 @@ pub struct PlanStep {
     pub status: String,
 }
 
-const DEFAULT_CAPACITY: usize = 512;
+// Heavy token streaming can burst thousands of events; a lagged receiver
+// permanently loses transcript rows, so keep generous headroom.
+const DEFAULT_CAPACITY: usize = 8192;
 
 #[derive(Debug)]
 pub struct EventBus {

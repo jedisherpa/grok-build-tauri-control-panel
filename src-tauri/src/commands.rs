@@ -158,29 +158,6 @@ pub async fn cancel_grok_login(state: State<'_, AppState>) -> Result<(), String>
     Ok(())
 }
 
-/// Legacy blocking helpers (still available).
-#[tauri::command]
-pub async fn login_with_grok(
-    state: State<'_, AppState>,
-) -> Result<grok_cli_wrapper::LoginResult, String> {
-    state
-        .grok_cli
-        .login_oauth(std::time::Duration::from_secs(300))
-        .await
-        .map_err(err)
-}
-
-#[tauri::command]
-pub async fn login_with_device(
-    state: State<'_, AppState>,
-) -> Result<grok_cli_wrapper::LoginResult, String> {
-    state
-        .grok_cli
-        .login_device(std::time::Duration::from_secs(300))
-        .await
-        .map_err(err)
-}
-
 #[tauri::command]
 pub async fn logout_grok(state: State<'_, AppState>) -> Result<grok_cli_wrapper::AuthStatus, String> {
     state.login.cancel().await;
