@@ -2051,6 +2051,18 @@ pub fn persist_control_event(db: &grok_persistence::Persistence, ev: &ControlEve
             };
             db.append_message(*session_id, "system", body, *at).map(|_| ())
         }
+        // Plan documents lifted out of plan-presenting tool calls
+        // (ExitPlanMode etc.) — durable as real plan rows.
+        Raw {
+            session_id: Some(session_id),
+            payload,
+        } if payload.get("channel").and_then(|v| v.as_str()) == Some("plan_doc") => {
+            let Some(text) = payload.get("text").and_then(|v| v.as_str()) else {
+                return Ok(());
+            };
+            db.append_message(*session_id, "plan", text, Utc::now())
+                .map(|_| ())
+        }
         // Raw ACP protocol lines: persist (merged into bounded multiline
         // rows) so the View toggle can reveal history across restarts.
         // Skip our own side channels (explain/usage/thread label events).

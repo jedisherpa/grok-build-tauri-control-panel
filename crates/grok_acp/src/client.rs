@@ -1884,6 +1884,26 @@ impl AcpClient {
 
         match update_type_norm.as_str() {
             "tool_call" | "toolcall" => {
+                let tool_name = update
+                    .get("title")
+                    .or_else(|| update.get("toolName"))
+                    .or_else(|| update.get("name"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("tool")
+                    .to_string();
+                let raw_input = update
+                    .get("rawInput")
+                    .or_else(|| update.get("arguments"))
+                    .or_else(|| update.get("input"));
+                // Plan-presenting tools (Claude Code's ExitPlanMode et al.)
+                // carry the finished plan inside the tool input — surface it
+                // as a real plan document instead of a truncated arg dump.
+                if let Some(plan) = extract_tool_plan(&tool_name, raw_input) {
+                    bus.emit(ControlEvent::Raw {
+                        session_id: Some(sid),
+                        payload: json!({ "channel": "plan_doc", "text": plan }),
+                    });
+                }
                 bus.emit_tool_call(
                     sid,
                     ToolCallEvent {
@@ -1895,19 +1915,8 @@ impl AcpClient {
                                 other => other.to_string(),
                             })
                             .unwrap_or_else(|| Uuid::new_v4().to_string()),
-                        tool: update
-                            .get("title")
-                            .or_else(|| update.get("toolName"))
-                            .or_else(|| update.get("name"))
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("tool")
-                            .to_string(),
-                        args_summary: update
-                            .get("rawInput")
-                            .or_else(|| update.get("arguments"))
-                            .or_else(|| update.get("input"))
-                            .map(|v| v.to_string())
-                            .unwrap_or_default(),
+                        tool: tool_name,
+                        args_summary: raw_input.map(|v| v.to_string()).unwrap_or_default(),
                         status: ToolCallStatus::Running,
                         result_summary: None,
                         at: Utc::now(),
@@ -2091,6 +2100,25 @@ impl AcpClient {
             }
         }
     }
+}
+
+/// Pull a plan document out of a plan-presenting tool call's input
+/// (Claude Code's `ExitPlanMode` / `exit_plan_mode` carries `{ plan: "…" }`).
+fn extract_tool_plan(tool_name: &str, raw_input: Option<&Value>) -> Option<String> {
+    let name = tool_name.to_lowercase();
+    if !name.contains("plan") {
+        return None;
+    }
+    let input = raw_input?;
+    let plan = input
+        .get("plan")
+        .or_else(|| input.get("content"))
+        .and_then(|v| v.as_str())?
+        .trim();
+    if plan.len() < 20 {
+        return None;
+    }
+    Some(plan.to_string())
 }
 
 /// Does this advertised mode id represent a native plan mode?
@@ -2330,6 +2358,17 @@ mod tests {
             lexical_normalize(Path::new("/a/b/../c/./d")),
             PathBuf::from("/a/c/d")
         );
+    }
+
+    #[test]
+    fn extracts_plan_from_exit_plan_mode_tool() {
+        let input = json!({ "plan": "## Steps\n1. do the thing\n2. verify it works" });
+        assert!(extract_tool_plan("ExitPlanMode", Some(&input)).is_some());
+        assert!(extract_tool_plan("exit_plan_mode", Some(&input)).is_some());
+        // Non-plan tools and short/missing plans are ignored.
+        assert!(extract_tool_plan("Bash", Some(&input)).is_none());
+        assert!(extract_tool_plan("ExitPlanMode", Some(&json!({ "plan": "hi" }))).is_none());
+        assert!(extract_tool_plan("ExitPlanMode", None).is_none());
     }
 
     #[test]

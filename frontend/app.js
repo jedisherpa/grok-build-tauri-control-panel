@@ -901,8 +901,9 @@ function renderTranscript({ keepScroll = false } = {}) {
         const label = role === "agent" ? backendName : termPrefix(role);
         const streamCls = e.streaming ? " streaming" : "";
         // Agent-authored text renders markdown; everything else stays literal.
+        // Plans are markdown documents (headers, lists) — render them fully.
         let body =
-          role === "agent" || role === "thought" || role === "user"
+          role === "agent" || role === "thought" || role === "user" || role === "plan"
             ? renderMarkdown(e.body)
             : escapeHtml(e.body);
         if (role === "approval") {
@@ -1516,15 +1517,20 @@ function handleControlEvent(ev) {
     if (state.tools.length > 80) state.tools.length = 80;
     renderTools();
     const terminal = isToolTerminal(status);
-    appendTranscript(
-      sid,
-      "tool",
-      `$ ${tool}  [${status}]\n${String(summary).slice(0, 2000)}${
-        te.result_summary || te.resultSummary
-          ? `\n→ ${String(te.result_summary || te.resultSummary).slice(0, 800)}`
-          : ""
-      }`
-    );
+    // Plan-presenting tools already rendered their plan via plan_doc —
+    // don't also dump the raw JSON args into the thread.
+    const isPlanTool = /plan/i.test(tool) && /"plan"\s*:/.test(String(summary));
+    if (!isPlanTool) {
+      appendTranscript(
+        sid,
+        "tool",
+        `$ ${tool}  [${status}]\n${String(summary).slice(0, 2000)}${
+          te.result_summary || te.resultSummary
+            ? `\n→ ${String(te.result_summary || te.resultSummary).slice(0, 800)}`
+            : ""
+        }`
+      );
+    }
     pushEvent(`tool · ${tool} · ${status}`, terminal ? "ok" : "", null, {
       force: true,
       milestone: terminal && String(status).toLowerCase().includes("fail"),
@@ -1664,6 +1670,14 @@ function handleControlEvent(ev) {
     const payload = ev.payload || ev;
     if (payload?.channel === "explain") {
       handleExplainEvent(sid, payload);
+      return;
+    }
+    if (payload?.channel === "plan_doc" && payload?.text) {
+      // A finished plan lifted out of a plan-presenting tool call — render
+      // as a proper plan document, not a truncated arg dump.
+      endAgentStream(sid);
+      appendTranscript(sid, "plan", String(payload.text));
+      pushEvent("📋 plan ready", "ok", "boom", { force: true, milestone: true });
       return;
     }
     if (payload?.channel === "thread" && payload?.kind === "label") {
