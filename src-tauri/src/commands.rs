@@ -460,8 +460,9 @@ pub async fn start_session(
     mut opts: SpawnOptions,
 ) -> Result<SessionIdResponse, String> {
     // Resolve MCP attachments via McpManager (names + auto + high-risk approval).
+    let mut mcp_skipped = Vec::new();
     if !opts.mcp_server_names.is_empty() || opts.include_auto_mcp {
-        let payload = state
+        let resolution = state
             .mcp
             .session_mcp_payload(
                 &opts.mcp_server_names,
@@ -470,11 +471,22 @@ pub async fn start_session(
             )
             .await
             .map_err(err)?;
-        if !payload.is_empty() {
-            opts.mcp_servers = payload;
-        }
+        opts.mcp_servers = resolution.payload;
+        opts.mcp_server_names = resolution.attached_names;
+        mcp_skipped = resolution.skipped;
     }
     let id = state.registry.spawn_agent(&cwd, opts).await.map_err(err)?;
+    // Tell the thread why a server was left out — otherwise it just looks broken.
+    for s in &mcp_skipped {
+        let msg = format!("⚠ MCP `{}` skipped: {}", s.name, s.reason);
+        let _ = state
+            .persistence
+            .append_message(id, "system", &msg, Utc::now());
+        state.event_bus.emit(grok_events::ControlEvent::Raw {
+            session_id: Some(id),
+            payload: serde_json::json!({ "channel": "term", "stream": "mcp", "line": msg }),
+        });
+    }
     let _ = state.persistence.set_kv("last_cwd", &cwd);
     persist_session(&state, id).await;
     Ok(SessionIdResponse {
@@ -656,17 +668,28 @@ async fn resume_saved_session(
         plan_mode.unwrap_or(true)
     };
     opts.mcp_server_names = extract_mcp_from_meta(&rec.metadata_json);
+    // Re-apply the high-risk approvals granted when the thread was created —
+    // resuming must not silently drop approved servers (e.g. playwright).
+    opts.approved_high_risk_mcp = extract_approved_mcp_from_meta(&rec.metadata_json);
     if matches!(opts.mode, grok_control_core::AgentMode::Headless) {
         opts.mode = grok_control_core::AgentMode::Acp;
     }
 
     if !opts.mcp_server_names.is_empty() {
-        if let Ok(payload) = state
+        let resolution = state
             .mcp
-            .session_mcp_payload(&opts.mcp_server_names, &[], false)
+            .session_mcp_payload(&opts.mcp_server_names, &opts.approved_high_risk_mcp, false)
             .await
-        {
-            opts.mcp_servers = payload;
+            .map_err(|e| format!("MCP resolution failed on resume: {e}"))?;
+        opts.mcp_servers = resolution.payload;
+        opts.mcp_server_names = resolution.attached_names;
+        for s in &resolution.skipped {
+            let _ = state.persistence.append_message(
+                id,
+                "system",
+                format!("⚠ MCP `{}` skipped on resume: {}", s.name, s.reason),
+                Utc::now(),
+            );
         }
     }
 
@@ -1060,12 +1083,23 @@ pub async fn preview_session_mcp(
     names: Vec<String>,
     approved_high_risk: Vec<String>,
     include_auto: bool,
-) -> Result<Vec<serde_json::Value>, String> {
-    state
+) -> Result<serde_json::Value, String> {
+    let res = state
         .mcp
         .session_mcp_payload(&names, &approved_high_risk, include_auto)
         .await
-        .map_err(err)
+        .map_err(err)?;
+    // Webview gets masked secrets only.
+    let masked: Vec<serde_json::Value> = res
+        .payload
+        .iter()
+        .map(grok_mcp::mask_payload_for_preview)
+        .collect();
+    Ok(serde_json::json!({
+        "servers": masked,
+        "attached": res.attached_names,
+        "skipped": res.skipped,
+    }))
 }
 
 #[tauri::command]
@@ -1345,6 +1379,18 @@ fn extract_backend_from_meta(json: &str) -> grok_config::Backend {
                 .and_then(|b| b.as_str())
                 .and_then(grok_config::Backend::from_key)
         })
+        .unwrap_or_default()
+}
+
+fn extract_approved_mcp_from_meta(json: &str) -> Vec<String> {
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|v| {
+            v.pointer("/metadata/approvedHighRiskMcp")
+                .or_else(|| v.pointer("/metadata/approved_high_risk_mcp"))
+                .cloned()
+        })
+        .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default()
 }
 

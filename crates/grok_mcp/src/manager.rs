@@ -15,7 +15,7 @@ use grok_events::{ControlEvent, EventBus};
 
 use crate::catalog::{builtin_catalog, catalog_entry, McpCatalogEntry};
 use crate::credentials::CredentialStore;
-use crate::injection::{build_session_mcp_payload, resolve_attachments};
+use crate::injection::{build_session_mcp_payload, resolve_attachments, SkippedMcp};
 use crate::security::{validate_server, SecurityVerdict, validate_custom_server};
 use crate::types::{
     AddMcpRequest, McpScope, McpServerConfigExt, McpTransport, UpdateMcpRequest,
@@ -55,6 +55,15 @@ pub struct DoctorReport {
     pub messages: Vec<String>,
     pub checked_at: DateTime<Utc>,
     pub cli_output: Option<String>,
+}
+
+/// Outcome of pre-spawn MCP resolution for a session.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct SessionMcpResolution {
+    /// ACP `mcpServers` payload for the servers that passed all checks.
+    pub payload: Vec<serde_json::Value>,
+    pub attached_names: Vec<String>,
+    pub skipped: Vec<SkippedMcp>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -211,17 +220,20 @@ impl McpManager {
 
         validate_server(&server).map_err(McpError::Security)?;
 
-        // Optional CLI mirror
-        if self.prefer_cli {
-            if let Err(e) = self.cli_add(&server).await {
-                warn!(error = %e, name = %server.name, "grok mcp add failed; config-only");
-            }
-        }
-
+        // Save the panel config first — the CLI mirror is secondary, and a
+        // failed save must not leave the CLI with a server the panel can't see.
         {
             let mut cfg = self.config.write().await;
             cfg.set_mcp_server(server.name.clone(), server.to_config_entry());
             cfg.save(&self.paths.config_file)?;
+        }
+
+        // Optional CLI mirror (only when enabled — a disabled server must not
+        // load in terminal `grok` sessions).
+        if self.prefer_cli && server.enabled {
+            if let Err(e) = self.cli_add(&server).await {
+                warn!(error = %e, name = %server.name, "grok mcp add failed; config-only");
+            }
         }
 
         self.event_bus.emit(ControlEvent::McpChanged {
@@ -281,8 +293,15 @@ impl McpManager {
                     .as_deref()
                     .ok_or_else(|| McpError::Invalid("missing command".into()))?;
                 let arg_refs: Vec<&str> = server.args.iter().map(String::as_str).collect();
+                // Resolve credentials so the CLI-side copy can authenticate;
+                // unresolved placeholders must not be mirrored (they'd fail
+                // opaquely in every terminal grok session).
+                let env = self.credentials.resolve_env(&server.env)?;
+                let mut env_pairs: Vec<(String, String)> =
+                    env.into_iter().filter(|(k, _)| !k.starts_with("_panel_")).collect();
+                env_pairs.sort();
                 self.grok_cli
-                    .mcp_add(&server.name, cmd, &arg_refs)
+                    .mcp_add(&server.name, cmd, &arg_refs, &env_pairs)
                     .await?;
             }
             McpTransport::Http | McpTransport::Sse => {
@@ -290,13 +309,36 @@ impl McpManager {
                     .url
                     .as_deref()
                     .ok_or_else(|| McpError::Invalid("missing url".into()))?;
-                let _ = self
-                    .grok_cli
-                    .mcp_add_http(&server.name, url, server.transport.as_str())
-                    .await;
+                let headers = self.credentials.resolve_env(&server.headers)?;
+                let mut header_pairs: Vec<(String, String)> = headers.into_iter().collect();
+                header_pairs.sort();
+                self.grok_cli
+                    .mcp_add_http(&server.name, url, server.transport.as_str(), &header_pairs)
+                    .await?;
             }
         }
         Ok(())
+    }
+
+    /// Mirror the enabled/disabled state into the grok CLI's global registry.
+    /// The CLI has no disable flag, so disable = remove, enable = re-add.
+    async fn cli_sync_enabled(&self, server: &McpServerConfigExt) {
+        if !self.prefer_cli {
+            return;
+        }
+        let res = if server.enabled {
+            self.cli_add(server).await
+        } else {
+            self.grok_cli
+                .mcp_remove(&server.name)
+                .await
+                .map(|_| ())
+                .map_err(McpError::Cli)
+        };
+        if let Err(e) = res {
+            warn!(error = %e, name = %server.name, enabled = server.enabled,
+                "grok CLI mirror sync failed; panel config still updated");
+        }
     }
 
     pub async fn update(&self, req: UpdateMcpRequest) -> Result<McpServerConfigExt> {
@@ -343,6 +385,9 @@ impl McpManager {
             cfg.set_mcp_server(server.name.clone(), server.to_config_entry());
             cfg.save(&self.paths.config_file)?;
         }
+        // Keep the grok CLI's global registry in sync — without this, a
+        // panel-disabled server keeps loading in every terminal session.
+        self.cli_sync_enabled(&server).await;
         self.event_bus.emit(ControlEvent::McpChanged {
             name: server.name.clone(),
             enabled: server.enabled,
@@ -446,7 +491,7 @@ impl McpManager {
 
             if let Some(ref cmd) = s.command {
                 if s.transport == McpTransport::Stdio {
-                    let found = which::which(cmd).is_ok() || cmd == "npx" || cmd == "grok";
+                    let found = which::which(cmd).is_ok();
                     if !found {
                         if status != DoctorStatus::Error {
                             status = DoctorStatus::Warn;
@@ -515,27 +560,76 @@ impl McpManager {
         Ok(tools)
     }
 
-    /// Build ACP mcpServers payload for spawn, applying attachment policy.
+    /// Build ACP mcpServers payload for spawn, applying attachment policy and
+    /// pre-spawn health checks. Servers that would fail at load (missing
+    /// credentials, missing binary, missing paths) are excluded and reported
+    /// in `skipped` so the thread can say why instead of showing agent-side
+    /// load errors.
     pub async fn session_mcp_payload(
         &self,
         requested_names: &[String],
         approved_high_risk: &[String],
         include_auto: bool,
-    ) -> Result<Vec<serde_json::Value>> {
+    ) -> Result<SessionMcpResolution> {
         let available = self.list().await;
-        let attached = resolve_attachments(
+        let mut res = resolve_attachments(
             &available,
             requested_names,
             approved_high_risk,
             include_auto,
         );
-        // Resolve credentials into env for payload
-        let mut resolved = Vec::new();
-        for mut s in attached {
-            s.env = self.credentials.resolve_env(&s.env)?;
-            resolved.push(s);
+        let mut healthy = Vec::new();
+        for mut s in res.attached {
+            // Missing binary → guaranteed spawn failure.
+            if s.transport == McpTransport::Stdio {
+                if let Some(ref cmd) = s.command {
+                    if which::which(cmd).is_err() {
+                        res.skipped.push(SkippedMcp {
+                            name: s.name.clone(),
+                            reason: format!("command `{cmd}` not found on PATH"),
+                        });
+                        continue;
+                    }
+                }
+            }
+            // Missing allowed paths → filesystem server errors at load.
+            if s.kind == "filesystem" {
+                if let Some(missing) = s.allowed_paths.iter().find(|p| !p.exists()) {
+                    res.skipped.push(SkippedMcp {
+                        name: s.name.clone(),
+                        reason: format!("allowed path missing: {}", missing.display()),
+                    });
+                    continue;
+                }
+            }
+            // Unresolvable credentials → guaranteed auth failure.
+            match self.credentials.resolve_env(&s.env) {
+                Ok(env) => s.env = env,
+                Err(e) => {
+                    res.skipped.push(SkippedMcp {
+                        name: s.name.clone(),
+                        reason: e.to_string(),
+                    });
+                    continue;
+                }
+            }
+            match self.credentials.resolve_env(&s.headers) {
+                Ok(headers) => s.headers = headers,
+                Err(e) => {
+                    res.skipped.push(SkippedMcp {
+                        name: s.name.clone(),
+                        reason: e.to_string(),
+                    });
+                    continue;
+                }
+            }
+            healthy.push(s);
         }
-        Ok(build_session_mcp_payload(&resolved))
+        Ok(SessionMcpResolution {
+            payload: build_session_mcp_payload(&healthy),
+            attached_names: healthy.iter().map(|s| s.name.clone()).collect(),
+            skipped: res.skipped,
+        })
     }
 
     pub fn credentials(&self) -> &CredentialStore {

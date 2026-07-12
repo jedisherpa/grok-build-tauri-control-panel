@@ -1,4 +1,4 @@
-//! Built-in catalog for the 7 MCP server integrations.
+//! Built-in catalog of MCP server integrations.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -62,7 +62,11 @@ pub struct McpCatalogEntry {
     pub template: McpServerConfigExt,
 }
 
-/// Full built-in catalog (all 7 integrations).
+/// Full built-in catalog.
+///
+/// Note: the former "grok_build" entry (`grok mcp serve build-tools`) was
+/// removed — the installed grok CLI has no `mcp serve` subcommand, so that
+/// server could never start.
 pub fn builtin_catalog() -> Vec<McpCatalogEntry> {
     vec![
         filesystem_entry(),
@@ -70,7 +74,6 @@ pub fn builtin_catalog() -> Vec<McpCatalogEntry> {
         linear_entry(),
         x_twitter_entry(),
         browser_entry(),
-        grok_build_entry(),
         custom_entry(),
     ]
 }
@@ -148,7 +151,9 @@ fn github_entry() -> McpCatalogEntry {
             kind: "github".into(),
             description: Some("GitHub MCP".into()),
             credential_keys: vec!["GITHUB_TOKEN".into()],
-            auto_attach: true,
+            // Opt-in: auto-attach without a token guarantees load errors in
+            // every session. Users can flip this on once GITHUB_TOKEN is set.
+            auto_attach: false,
             scope: McpScope::Project,
             startup_timeout_sec: 60,
             ..Default::default()
@@ -180,6 +185,11 @@ fn linear_entry() -> McpCatalogEntry {
             url: Some("https://mcp.linear.app/mcp".into()),
             kind: "linear".into(),
             description: Some("Linear MCP (HTTP)".into()),
+            headers: {
+                let mut h = HashMap::new();
+                h.insert("Authorization".into(), "Bearer ${LINEAR_API_KEY}".into());
+                h
+            },
             credential_keys: vec!["LINEAR_API_KEY".into()],
             auto_attach: false,
             scope: McpScope::Global,
@@ -213,6 +223,11 @@ fn x_twitter_entry() -> McpCatalogEntry {
             url: Some("https://api.x.com/mcp".into()),
             kind: "x_twitter".into(),
             description: Some("X/Twitter official MCP".into()),
+            headers: {
+                let mut h = HashMap::new();
+                h.insert("Authorization".into(), "Bearer ${X_API_BEARER}".into());
+                h
+            },
             credential_keys: vec!["X_API_BEARER".into()],
             requires_approval: true,
             auto_attach: false,
@@ -259,49 +274,6 @@ fn browser_entry() -> McpCatalogEntry {
                 e.insert("PLAYWRIGHT_HEADLESS".into(), "1".into());
                 e
             },
-            ..Default::default()
-        },
-    }
-}
-
-fn grok_build_entry() -> McpCatalogEntry {
-    let mut env = HashMap::new();
-    env.insert("XAI_API_KEY".into(), "${XAI_API_KEY}".into());
-    McpCatalogEntry {
-        id: "grok_build".into(),
-        kind: McpServerKind::GrokBuild,
-        title: "Grok Build Delegate".into(),
-        description: "Self-referential MCP wrappers for grok_chat, grok_review, grok_challenge, grok_consult".into(),
-        transport: McpTransport::Stdio,
-        default_name: "grok-build".into(),
-        high_risk: true,
-        requires_approval: true,
-        credential_keys: vec!["XAI_API_KEY".into()],
-        docs_url: None,
-        example_tools: vec![
-            "grok_chat".into(),
-            "grok_review".into(),
-            "grok_challenge".into(),
-            "grok_consult".into(),
-        ],
-        template: McpServerConfigExt {
-            name: "grok-build".into(),
-            transport: McpTransport::Stdio,
-            command: Some("grok".into()),
-            args: vec!["mcp", "serve", "build-tools"]
-                .into_iter()
-                .map(String::from)
-                .collect(),
-            env,
-            kind: "grok_build".into(),
-            description: Some("Internal Grok Build delegate MCP".into()),
-            high_risk: true,
-            requires_approval: true,
-            rate_limit_per_min: Some(10),
-            auto_attach: false,
-            scope: McpScope::Session,
-            startup_timeout_sec: 60,
-            credential_keys: vec!["XAI_API_KEY".into()],
             ..Default::default()
         },
     }
@@ -374,8 +346,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn catalog_has_seven() {
-        assert_eq!(builtin_catalog().len(), 7);
+    fn catalog_has_six() {
+        assert_eq!(builtin_catalog().len(), 6);
     }
 
     #[test]

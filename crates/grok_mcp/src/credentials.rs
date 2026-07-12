@@ -16,6 +16,8 @@ pub enum CredentialError {
     Json(#[from] serde_json::Error),
     #[error("not found: {0}")]
     NotFound(String),
+    #[error("unresolved credential placeholders: {0}")]
+    Unresolved(String),
 }
 
 pub type Result<T> = std::result::Result<T, CredentialError>;
@@ -106,28 +108,43 @@ impl CredentialStore {
     }
 
     /// Resolve `${VAR}` or credential-store keys in env map for spawn.
+    ///
+    /// A placeholder that resolves to nothing is an error (listing the missing
+    /// keys) — passing the literal `${VAR}` string to a server guarantees an
+    /// opaque auth failure at load time.
     pub fn resolve_env(&self, env: &HashMap<String, String>) -> Result<HashMap<String, String>> {
         let store = self.load()?;
         let mut out = HashMap::new();
+        let mut missing: Vec<String> = Vec::new();
         for (k, v) in env {
-            let resolved = if let Some(inner) = v.strip_prefix("${").and_then(|s| s.strip_suffix('}')) {
-                store
+            if let Some(inner) = v.strip_prefix("${").and_then(|s| s.strip_suffix('}')) {
+                match store
                     .secrets
                     .get(inner)
                     .cloned()
                     .or_else(|| std::env::var(inner).ok())
-                    .unwrap_or_else(|| v.clone())
+                {
+                    Some(val) => {
+                        out.insert(k.clone(), val);
+                    }
+                    None => missing.push(inner.to_string()),
+                }
             } else if looks_like_secret_key(k) && v.starts_with("cred:") {
                 let key = v.trim_start_matches("cred:");
-                store
-                    .secrets
-                    .get(key)
-                    .cloned()
-                    .unwrap_or_else(|| v.clone())
+                match store.secrets.get(key).cloned() {
+                    Some(val) => {
+                        out.insert(k.clone(), val);
+                    }
+                    None => missing.push(key.to_string()),
+                }
             } else {
-                v.clone()
-            };
-            out.insert(k.clone(), resolved);
+                out.insert(k.clone(), v.clone());
+            }
+        }
+        if !missing.is_empty() {
+            missing.sort();
+            missing.dedup();
+            return Err(CredentialError::Unresolved(missing.join(", ")));
         }
         Ok(out)
     }

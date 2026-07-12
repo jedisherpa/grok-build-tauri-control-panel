@@ -145,6 +145,7 @@ impl SessionRegistry {
             always_approve: opts.always_approve,
             sandbox_profile: opts.sandbox_profile.clone(),
             mcp_servers: opts.mcp_server_names.clone(),
+            approved_high_risk_mcp: opts.approved_high_risk_mcp.clone(),
             created_at: created_at.unwrap_or(now),
             last_activity: now,
             label: None,

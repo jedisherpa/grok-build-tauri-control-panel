@@ -30,6 +30,10 @@ pub struct SessionMetadata {
     pub sandbox_profile: Option<String>,
     /// MCP server names attached at spawn time.
     pub mcp_servers: Vec<String>,
+    /// High-risk MCP approvals granted for this session (persisted so resume
+    /// doesn't silently drop approved servers).
+    #[serde(default)]
+    pub approved_high_risk_mcp: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub last_activity: DateTime<Utc>,
     pub label: Option<String>,

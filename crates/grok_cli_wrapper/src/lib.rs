@@ -160,19 +160,42 @@ impl GrokCli {
         self.run_args(&["mcp", "list"], None).await
     }
 
-    pub async fn mcp_add(&self, name: &str, command: &str, args: &[&str]) -> Result<String> {
+    /// `grok mcp add [-e K=V]... NAME COMMAND -- ARGS...`
+    /// Env vars ride along so the CLI-registered copy can actually
+    /// authenticate; `--` keeps server args (e.g. `-y`) away from grok's parser.
+    pub async fn mcp_add(
+        &self,
+        name: &str,
+        command: &str,
+        args: &[&str],
+        env: &[(String, String)],
+    ) -> Result<String> {
         validate_name(name)?;
-        let mut a = vec!["mcp", "add", name, command];
-        a.extend(args);
+        let env_flags: Vec<String> = env
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
+        let mut a: Vec<&str> = vec!["mcp", "add"];
+        for pair in &env_flags {
+            a.push("-e");
+            a.push(pair);
+        }
+        a.push(name);
+        a.push(command);
+        if !args.is_empty() {
+            a.push("--");
+            a.extend(args);
+        }
         self.run_args(&a, None).await
     }
 
-    /// `grok mcp add --transport http|sse NAME URL`
+    /// `grok mcp add --transport http|sse [-H 'Name: value']... NAME URL`
     pub async fn mcp_add_http(
         &self,
         name: &str,
         url: &str,
         transport: &str,
+        headers: &[(String, String)],
     ) -> Result<String> {
         validate_name(name)?;
         if !(url.starts_with("https://")
@@ -181,10 +204,18 @@ impl GrokCli {
         {
             return Err(CliError::InvalidArg("url must be https or localhost".into()));
         }
-        self.run_args(
-            &["mcp", "add", "--transport", transport, name, url],
-            None,
-        )
+        let header_flags: Vec<String> = headers
+            .iter()
+            .map(|(k, v)| format!("{k}: {v}"))
+            .collect();
+        let mut a: Vec<&str> = vec!["mcp", "add", "--transport", transport];
+        for h in &header_flags {
+            a.push("-H");
+            a.push(h);
+        }
+        a.push(name);
+        a.push(url);
+        self.run_args(&a, None)
         .await
     }
 

@@ -2123,9 +2123,9 @@ async function startAcp() {
     if (!cwd) throw new Error("Set project cwd (absolute path)");
     const model = currentModel();
     const mcpNames = parseCsv($("mcp-attach-session")?.value || "");
-    const highRisk = mcpNames.filter((n) =>
-      /playwright|browser|grok-build|custom|^x$/i.test(n)
-    );
+    // Typing a server name into the attach box IS the user's approval —
+    // the backend still gates unknown/auto servers on its high-risk policy.
+    const highRisk = [...mcpNames];
     const opts = {
       mode: "acp",
       backend,
@@ -2580,6 +2580,27 @@ $("prompt").addEventListener("keydown", (e) => {
 });
 
 // MCP view
+/** Populate the MCP catalog picker from the backend catalog (single source
+ *  of truth for ids, titles, and which servers need credentials). */
+async function loadMcpCatalog() {
+  try {
+    const cat = await invoke("list_mcp_catalog");
+    state.mcpCatalog = Array.isArray(cat) ? cat : [];
+    const sel = $("mcp-catalog");
+    if (sel && state.mcpCatalog.length) {
+      sel.innerHTML = state.mcpCatalog
+        .map((e) => {
+          const creds = e.credentialKeys || e.credential_keys || [];
+          const needs = creds.length ? ` (needs ${creds.join(", ")})` : "";
+          return `<option value="${escapeHtml(e.id)}">${escapeHtml(e.title || e.id)}${escapeHtml(needs)}</option>`;
+        })
+        .join("");
+    }
+  } catch (e) {
+    console.warn("mcp catalog load failed", e);
+  }
+}
+
 $("btn-mcp-list").onclick = async () => {
   try {
     $("mcp-out").textContent = JSON.stringify(await invoke("list_mcp_servers"), null, 2);
@@ -2817,6 +2838,7 @@ async function boot() {
   try {
     await refreshStatus();
     await loadBackends();
+    await loadMcpCatalog();
     await refreshSessions();
     await refreshDevStatus();
     noteTurn("idle");

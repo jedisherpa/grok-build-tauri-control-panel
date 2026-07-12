@@ -621,6 +621,7 @@ impl AcpClient {
             Ok(r) => r,
             Err(AcpError::Rpc { code, message }) if !opts.mcp_servers.is_empty() => {
                 warn!(code, %message, "session/load with MCP failed; retrying bare");
+                self.emit_mcp_dropped(&opts.mcp_servers, &message);
                 let mut bare = json!({
                     "sessionId": session_id,
                     "cwd": self.config.cwd.display().to_string(),
@@ -692,6 +693,7 @@ impl AcpClient {
             Err(AcpError::Rpc { code, message }) if !opts.mcp_servers.is_empty() => {
                 // Retry without MCP if attach payload was invalid.
                 warn!(code, %message, "session/new with MCP failed; retrying without MCP");
+                self.emit_mcp_dropped(&opts.mcp_servers, &message);
                 let mut bare = json!({
                     "cwd": self.config.cwd.display().to_string(),
                     "mcpServers": [],
@@ -1611,6 +1613,24 @@ impl AcpClient {
                 });
             }
         }
+    }
+
+    /// Surface a bare-retry MCP drop in the thread instead of only a log line —
+    /// the user believes those tools are available otherwise.
+    fn emit_mcp_dropped(&self, servers: &[Value], error: &str) {
+        let Some(bus) = &self.event_bus else { return };
+        let names: Vec<&str> = servers
+            .iter()
+            .filter_map(|s| s.get("name").and_then(|v| v.as_str()))
+            .collect();
+        Self::emit_term(
+            bus,
+            self.control_session_id,
+            format!(
+                "⚠ MCP servers dropped after agent error ({}): {error} — session continues without them",
+                if names.is_empty() { "?".into() } else { names.join(", ") },
+            ),
+        );
     }
 
     fn emit_term(bus: &EventBus, sid: Uuid, line: impl Into<String>) {
