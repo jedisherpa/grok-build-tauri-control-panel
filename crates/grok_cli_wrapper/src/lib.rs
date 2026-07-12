@@ -198,11 +198,19 @@ impl GrokCli {
         headers: &[(String, String)],
     ) -> Result<String> {
         validate_name(name)?;
-        if !(url.starts_with("https://")
-            || url.starts_with("http://localhost")
-            || url.starts_with("http://127.0.0.1"))
-        {
-            return Err(CliError::InvalidArg("url must be https or localhost".into()));
+        // Parse the host — prefix checks accepted `http://127.0.0.1.evil.com`.
+        let allowed = url::Url::parse(url)
+            .map(|u| match u.scheme() {
+                "https" => true,
+                "http" => matches!(
+                    u.host_str(),
+                    Some("localhost") | Some("127.0.0.1") | Some("[::1]") | Some("::1")
+                ),
+                _ => false,
+            })
+            .unwrap_or(false);
+        if !allowed {
+            return Err(CliError::InvalidArg("url must be https or loopback http".into()));
         }
         let header_flags: Vec<String> = headers
             .iter()

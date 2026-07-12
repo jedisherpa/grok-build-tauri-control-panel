@@ -130,6 +130,20 @@ impl TerminalRegistry {
             .and_then(|v| v.as_str())
             .map(PathBuf::from)
             .unwrap_or_else(|| self.default_cwd.clone());
+        // Terminals must stay inside the workspace — an agent-supplied cwd
+        // outside it defeats the fs sandbox entirely.
+        let workspace = self
+            .default_cwd
+            .canonicalize()
+            .unwrap_or_else(|_| self.default_cwd.clone());
+        let cwd_canon = cwd.canonicalize().unwrap_or_else(|_| cwd.clone());
+        if cwd_canon != workspace && !cwd_canon.starts_with(&workspace) {
+            return Err(AcpError::Protocol(format!(
+                "terminal cwd outside workspace: {}",
+                cwd.display()
+            )));
+        }
+        let cwd = cwd_canon;
 
         let output_limit = p
             .get("outputByteLimit")

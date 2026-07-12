@@ -187,6 +187,10 @@ impl SessionRegistry {
             .backend_config(backend)
             .map(|c| c.env.clone())
             .unwrap_or_default();
+        // Deny rules: global config deny list + per-spawn deny list, enforced
+        // by the ACP client ahead of any approval.
+        let mut deny_patterns = cfg.permissions.deny.clone();
+        deny_patterns.extend(opts.permission_deny.iter().cloned());
         drop(cfg);
 
         let now = Utc::now();
@@ -242,6 +246,7 @@ impl SessionRegistry {
                         always_approve: opts.always_approve,
                         sandbox_profile: opts.sandbox_profile.clone(),
                         extra_env: Vec::new(),
+                        deny_patterns,
                     };
                     let resolved = resolved.expect("resolved backend for live ACP spawn");
                     let desc = descriptor(backend);
@@ -530,7 +535,13 @@ impl SessionRegistry {
 
     pub async fn remove_session(&self, id: Uuid) -> Result<()> {
         let _ = self.cancel_session(id).await;
-        self.sessions.remove(&id);
+        // cancel() only sends session/cancel — the grok child (and any MCP
+        // servers it spawned) keeps running unless we kill it.
+        if let Some((_, handle)) = self.sessions.remove(&id) {
+            if let Some(client) = handle.acp_client {
+                let _ = client.shutdown().await;
+            }
+        }
         Ok(())
     }
 
@@ -544,7 +555,11 @@ impl SessionRegistry {
             if let Err(e) = self.cancel_session(id).await {
                 warn!(%id, error = %e, "error cancelling session during shutdown");
             }
-            self.sessions.remove(&id);
+            if let Some((_, handle)) = self.sessions.remove(&id) {
+                if let Some(client) = handle.acp_client {
+                    let _ = client.shutdown().await;
+                }
+            }
         }
     }
 }

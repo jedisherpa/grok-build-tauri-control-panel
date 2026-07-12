@@ -305,10 +305,13 @@ pub async fn haven_get_config(
     state: State<'_, AppState>,
 ) -> Result<crate::haven::HavenConfig, String> {
     let mut cfg = state.haven.config().await;
-    // Never return full token to UI logs — mask middle.
-    if cfg.auth_token.len() > 12 {
-        let t = &cfg.auth_token;
-        cfg.auth_token = format!("{}…{}", &t[..6], &t[t.len() - 4..]);
+    // Never return full token to UI logs — mask middle (char-safe: byte
+    // slicing panics on multibyte tokens).
+    let chars: Vec<char> = cfg.auth_token.chars().collect();
+    if chars.len() > 12 {
+        let head: String = chars[..6].iter().collect();
+        let tail: String = chars[chars.len() - 4..].iter().collect();
+        cfg.auth_token = format!("{head}…{tail}");
     }
     Ok(cfg)
 }
@@ -322,6 +325,10 @@ pub async fn haven_set_config(
     let existing = state.haven.config().await;
     if config.auth_token.contains('…') || config.auth_token.contains("...") {
         config.auth_token = existing.auth_token;
+    }
+    // A bearer token over plaintext http is readable by anyone on the path.
+    if config.base_url.starts_with("http://") && !config.auth_token.is_empty() {
+        return Err("haven base_url must be https when an auth token is set".into());
     }
     state.haven.set_config(config).await?;
     Ok(state.haven.connect_and_status().await)

@@ -1321,6 +1321,7 @@ dependencies = [
  "chrono",
  "futures",
  "grok_events",
+ "grok_permissions",
  "serde",
  "serde_json",
  "tempfile",
@@ -1344,6 +1345,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "url",
  "uuid",
 ]
 
@@ -1445,6 +1447,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "url",
  "uuid",
  "which",
 ]

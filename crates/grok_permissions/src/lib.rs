@@ -238,6 +238,16 @@ pub fn builtin_presets() -> Vec<PermissionPreset> {
 
 /// Glob-ish matching for tool rules.
 /// Supports `*` (any chars) and exact tool names.
+/// True when any deny pattern matches `tool(detail)` or the bare tool name.
+/// Used by the ACP approval path to hard-block denied tools before the
+/// approval card is even shown.
+pub fn matches_any_pattern(patterns: &[String], tool: &str, detail: &str) -> bool {
+    let candidate = format!("{tool}({detail})");
+    patterns
+        .iter()
+        .any(|p| pattern_matches(p, &candidate) || pattern_matches(p, tool))
+}
+
 fn pattern_matches(pattern: &str, candidate: &str) -> bool {
     if pattern == candidate || pattern == "*" {
         return true;

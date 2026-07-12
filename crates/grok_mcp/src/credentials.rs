@@ -38,6 +38,8 @@ pub struct McpCredential {
 
 pub struct CredentialStore {
     path: PathBuf,
+    /// Serializes load-modify-save so concurrent set/remove can't lose writes.
+    write_lock: std::sync::Mutex<()>,
 }
 
 impl CredentialStore {
@@ -46,7 +48,10 @@ impl CredentialStore {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        Ok(Self { path })
+        Ok(Self {
+            path,
+            write_lock: std::sync::Mutex::new(()),
+        })
     }
 
     pub fn default_path(grok_dir: &Path) -> PathBuf {
@@ -58,24 +63,43 @@ impl CredentialStore {
             return Ok(CredentialStoreFile::default());
         }
         let raw = std::fs::read_to_string(&self.path)?;
-        Ok(serde_json::from_str(&raw).unwrap_or_default())
+        match serde_json::from_str(&raw) {
+            Ok(file) => Ok(file),
+            Err(e) => {
+                // A corrupt store must not silently read as empty — the next
+                // save() would then permanently wipe every credential. Keep
+                // the bad file for recovery and surface the error.
+                let backup = self.path.with_extension("json.corrupt");
+                let _ = std::fs::rename(&self.path, &backup);
+                Err(CredentialError::Json(e))
+            }
+        }
     }
 
     fn save(&self, file: &CredentialStoreFile) -> Result<()> {
         let raw = serde_json::to_string_pretty(file)?;
         let tmp = self.path.with_extension("json.tmp");
-        std::fs::write(&tmp, raw)?;
-        std::fs::rename(&tmp, &self.path)?;
-        // Best-effort restrict permissions on Unix
-        #[cfg(unix)]
+        // Create the temp file 0600 BEFORE writing secrets — write-then-chmod
+        // leaves a window where the content is world-readable.
         {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&self.path, std::fs::Permissions::from_mode(0o600));
+            use std::io::Write;
+            let mut opts = std::fs::OpenOptions::new();
+            opts.write(true).create(true).truncate(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                opts.mode(0o600);
+            }
+            let mut f = opts.open(&tmp)?;
+            f.write_all(raw.as_bytes())?;
+            f.sync_all()?;
         }
+        std::fs::rename(&tmp, &self.path)?;
         Ok(())
     }
 
     pub fn set(&self, key: &str, value: &str) -> Result<()> {
+        let _guard = self.write_lock.lock().expect("credential lock");
         let mut file = self.load()?;
         file.secrets.insert(key.to_string(), value.to_string());
         self.save(&file)
@@ -87,6 +111,7 @@ impl CredentialStore {
     }
 
     pub fn remove(&self, key: &str) -> Result<()> {
+        let _guard = self.write_lock.lock().expect("credential lock");
         let mut file = self.load()?;
         file.secrets.remove(key);
         self.save(&file)

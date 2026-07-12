@@ -37,6 +37,9 @@ pub struct SpawnOptions {
     pub always_approve: bool,
     pub sandbox_profile: Option<String>,
     pub extra_env: Vec<(String, String)>,
+    /// Deny rules (e.g. `Bash(rm *)`) enforced before any approval —
+    /// matching requests are rejected without asking.
+    pub deny_patterns: Vec<String>,
 }
 
 impl Default for SpawnOptions {
@@ -49,6 +52,7 @@ impl Default for SpawnOptions {
             always_approve: false,
             sandbox_profile: Some("workspace".into()),
             extra_env: Vec::new(),
+            deny_patterns: Vec::new(),
         }
     }
 }
@@ -171,6 +175,8 @@ pub struct AcpClient {
     pending_permissions: Mutex<HashMap<String, PendingPermission>>,
     /// Set during deliberate shutdown so process death isn't reported as failure.
     shutting_down: std::sync::atomic::AtomicBool,
+    /// Deny rules enforced ahead of the approval flow.
+    deny_patterns: Vec<String>,
     brain_mode: RwLock<BrainMode>,
     /// Injected once on first prompt when brain is history-only.
     pending_context: Mutex<Option<String>>,
@@ -302,6 +308,7 @@ impl AcpClient {
             always_approve: std::sync::atomic::AtomicBool::new(opts.always_approve),
             pending_permissions: Mutex::new(HashMap::new()),
             shutting_down: std::sync::atomic::AtomicBool::new(false),
+            deny_patterns: opts.deny_patterns.clone(),
             brain_mode: RwLock::new(BrainMode::Fresh),
             pending_context: Mutex::new(pending_context),
             load_session_supported: RwLock::new(false),
@@ -355,6 +362,7 @@ impl AcpClient {
             always_approve: std::sync::atomic::AtomicBool::new(false),
             pending_permissions: Mutex::new(HashMap::new()),
             shutting_down: std::sync::atomic::AtomicBool::new(false),
+            deny_patterns: Vec::new(),
             brain_mode: RwLock::new(BrainMode::Fresh),
             pending_context: Mutex::new(None),
             load_session_supported: RwLock::new(false),
@@ -1291,6 +1299,34 @@ impl AcpClient {
                 let summary = permission_summary(&req.params, &tool);
                 let request_id = id_key(&req.id);
 
+                // Deny rules are absolute: they beat yolo and skip the card.
+                if !self.deny_patterns.is_empty()
+                    && grok_permissions::matches_any_pattern(&self.deny_patterns, &tool, &summary)
+                {
+                    let reject = options
+                        .iter()
+                        .find(|o| {
+                            let k = o.kind.to_lowercase();
+                            k.contains("reject") || k.contains("deny")
+                        })
+                        .map(|o| o.id.clone());
+                    let outcome = match reject {
+                        Some(oid) => json!({
+                            "outcome": { "outcome": "selected", "optionId": oid }
+                        }),
+                        None => json!({ "outcome": { "outcome": "cancelled" } }),
+                    };
+                    transport.send_response(req.id, outcome).await?;
+                    if let Some(bus) = &self.event_bus {
+                        Self::emit_term(
+                            bus,
+                            self.control_session_id,
+                            format!("⛔ denied by permission rule: {tool} — {summary}"),
+                        );
+                    }
+                    return Ok(());
+                }
+
                 if self.always_approve.load(std::sync::atomic::Ordering::Relaxed) {
                     match pick_auto_approve_option(&options) {
                         Some(picked) => {
@@ -1451,7 +1487,32 @@ impl AcpClient {
         } else {
             self.config.cwd.join(p)
         };
-        let abs = abs.canonicalize().unwrap_or(abs);
+        // Canonicalize when the file exists; otherwise canonicalize the
+        // deepest existing ancestor and re-append the remainder lexically.
+        // Without this, `<cwd>/../../etc/x` passed the starts_with check for
+        // not-yet-existing files (component-wise compare, `..` kept literal).
+        let abs = match abs.canonicalize() {
+            Ok(c) => c,
+            Err(_) => {
+                let normalized = lexical_normalize(&abs);
+                let mut existing = normalized.clone();
+                let mut tail = Vec::new();
+                while !existing.exists() {
+                    match (existing.parent(), existing.file_name()) {
+                        (Some(parent), Some(name)) => {
+                            tail.push(name.to_os_string());
+                            existing = parent.to_path_buf();
+                        }
+                        _ => break,
+                    }
+                }
+                let mut base = existing.canonicalize().unwrap_or(existing);
+                for name in tail.iter().rev() {
+                    base.push(name);
+                }
+                base
+            }
+        };
         let cwd = self
             .config
             .cwd
@@ -1980,6 +2041,23 @@ impl AcpClient {
     }
 }
 
+/// Resolve `.` and `..` components lexically (no filesystem access).
+fn lexical_normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if !out.pop() {
+                    out.push("..");
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
 /// Parse the options array of a `session/request_permission` request.
 fn parse_permission_options(params: &Option<Value>) -> Vec<PermissionOptionInfo> {
     params
@@ -2167,6 +2245,24 @@ mod tests {
         let c = AcpClient::mock_for_tests("sess-1", None);
         let err = c.send_prompt("   ").await.unwrap_err();
         assert!(matches!(err, AcpError::Protocol(_)));
+    }
+
+    #[test]
+    fn sandbox_blocks_dotdot_escape_for_new_files() {
+        let c = AcpClient::mock_for_tests("sess-1", None);
+        // cwd is /tmp — a not-yet-existing path escaping via `..` must fail.
+        assert!(c.resolve_sandbox_path("/tmp/x/../../etc/new_file_nope").is_err());
+        assert!(c.resolve_sandbox_path("../../etc/new_file_nope").is_err());
+        // A new file inside the workspace is fine.
+        assert!(c.resolve_sandbox_path("subdir/new_file.txt").is_ok());
+    }
+
+    #[test]
+    fn lexical_normalize_resolves_components() {
+        assert_eq!(
+            lexical_normalize(Path::new("/a/b/../c/./d")),
+            PathBuf::from("/a/c/d")
+        );
     }
 
     #[test]

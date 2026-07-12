@@ -45,25 +45,40 @@ pub fn validate_filesystem_paths(paths: &[PathBuf], read_only: bool) -> Security
                 reason: format!("path traversal not allowed: {}", p.display()),
             };
         }
-        let s = p.to_string_lossy();
-        for exact in DENIED_EXACT {
-            if s == *exact {
-                return SecurityVerdict::Deny {
-                    reason: format!("refusing sensitive path: {exact}"),
-                };
-            }
-        }
-        for denied in DENIED_PATH_SUFFIXES {
-            if s.contains(denied) {
-                return SecurityVerdict::Deny {
-                    reason: format!("refusing sensitive path containing `{denied}`"),
-                };
-            }
-        }
         if !p.exists() {
             return SecurityVerdict::Deny {
                 reason: format!("path does not exist: {}", p.display()),
             };
+        }
+        // Canonicalize so a symlink (~/notes -> ~/.ssh) can't smuggle a
+        // denied target past the string checks.
+        let canonical = p.canonicalize().unwrap_or_else(|_| p.clone());
+        for candidate in [p, &canonical] {
+            let s = candidate.to_string_lossy();
+            for exact in DENIED_EXACT {
+                if s == *exact {
+                    return SecurityVerdict::Deny {
+                        reason: format!("refusing sensitive path: {exact}"),
+                    };
+                }
+            }
+            // Component-suffix match, not substring — `/Users/me/.ssh-notes`
+            // is fine; `/Users/me/.ssh` and children are not.
+            for denied in DENIED_PATH_SUFFIXES {
+                let denied_parts: Vec<&str> = denied.split('/').collect();
+                let parts: Vec<String> = candidate
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect();
+                if parts
+                    .windows(denied_parts.len())
+                    .any(|w| w.iter().map(String::as_str).eq(denied_parts.iter().copied()))
+                {
+                    return SecurityVerdict::Deny {
+                        reason: format!("refusing sensitive path containing `{denied}`"),
+                    };
+                }
+            }
         }
     }
     if !read_only {
@@ -116,6 +131,13 @@ pub fn validate_custom_server(cfg: &McpServerConfigExt) -> SecurityVerdict {
                         reason: "args contain NUL".into(),
                     };
                 }
+                // Args are exec'd without a shell locally, but they also get
+                // mirrored into `grok mcp add` — keep metachars out of them.
+                if a.contains('`') || a.contains("$(") || a.contains(";\n") {
+                    return SecurityVerdict::Deny {
+                        reason: format!("arg contains shell metacharacters: {a}"),
+                    };
+                }
             }
             if cfg.high_risk || cfg.kind == "browser" || cfg.kind == "custom" {
                 return SecurityVerdict::Warn {
@@ -130,20 +152,29 @@ pub fn validate_custom_server(cfg: &McpServerConfigExt) -> SecurityVerdict {
                     reason: "http/sse transport requires url".into(),
                 };
             };
-            if !(url.starts_with("https://") || url.starts_with("http://127.0.0.1") || url.starts_with("http://localhost"))
-            {
+            if !is_allowed_mcp_url(url) {
                 return SecurityVerdict::Deny {
-                    reason: "only https (or localhost http) URLs are allowed".into(),
-                };
-            }
-            if url.starts_with("http://") && !url.contains("localhost") && !url.contains("127.0.0.1")
-            {
-                return SecurityVerdict::Deny {
-                    reason: "plain http only allowed for localhost".into(),
+                    reason: "only https (or loopback http) URLs are allowed".into(),
                 };
             }
             SecurityVerdict::Allow
         }
+    }
+}
+
+/// https anywhere; plain http only to a real loopback host. Parses the host
+/// properly — prefix/substring checks accepted `http://127.0.0.1.evil.com`.
+pub fn is_allowed_mcp_url(url: &str) -> bool {
+    let Ok(parsed) = url::Url::parse(url) else {
+        return false;
+    };
+    match parsed.scheme() {
+        "https" => true,
+        "http" => matches!(
+            parsed.host_str(),
+            Some("localhost") | Some("127.0.0.1") | Some("[::1]") | Some("::1")
+        ),
+        _ => false,
     }
 }
 
@@ -163,10 +194,14 @@ pub fn validate_server(cfg: &McpServerConfigExt) -> Result<(), String> {
 
 /// Mask secret-looking values for logs/UI.
 pub fn mask_secret(value: &str) -> String {
-    if value.len() <= 8 {
+    // char-based, not byte-sliced — multibyte input must not panic.
+    let chars: Vec<char> = value.chars().collect();
+    if chars.len() <= 8 {
         return "****".into();
     }
-    format!("{}…{}", &value[..4], &value[value.len() - 2..])
+    let head: String = chars[..4].iter().collect();
+    let tail: String = chars[chars.len() - 2..].iter().collect();
+    format!("{head}…{tail}")
 }
 
 pub fn looks_like_secret_key(key: &str) -> bool {
