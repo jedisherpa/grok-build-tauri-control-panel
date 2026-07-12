@@ -1,13 +1,14 @@
 :root {
   color-scheme: dark;
-  --bg: #0c0e12;
-  --bg-elev: #12151c;
-  --bg-soft: #161a22;
-  --border: #252a35;
-  --border-hi: #343b4a;
-  --text: #e8ecf4;
-  --muted: #8b93a7;
-  --dim: #5c6578;
+  /* Near-void blacks — base is pure black, slight lift only for panels */
+  --bg: #000000;
+  --bg-elev: #050506;
+  --bg-soft: #0a0a0c;
+  --border: #16161a;
+  --border-hi: #222228;
+  --text: #ececf0;
+  --muted: #84848f;
+  --dim: #52525a;
   --accent: #7dd3fc;
   --accent-dim: #38bdf8;
   --ok: #4ade80;
@@ -64,7 +65,7 @@ body {
 .logo {
   width: 28px; height: 28px; border-radius: 8px;
   display: grid; place-items: center;
-  background: linear-gradient(145deg, #1e293b, #0f172a);
+  background: linear-gradient(145deg, #0c0c0e, #000000);
   border: 1px solid var(--border-hi);
   color: var(--accent);
   font-family: var(--font);
@@ -184,7 +185,7 @@ body {
   letter-spacing: 0.12em;
   text-align: center;
   color: var(--accent);
-  background: #0a0d12;
+  background: #000000;
   border: 1px solid color-mix(in srgb, var(--accent) 35%, var(--border));
   border-radius: 8px;
   padding: 10px 8px;
@@ -192,7 +193,7 @@ body {
 }
 #auth-paste-code {
   width: 100%;
-  background: #0a0d12;
+  background: #000000;
   border: 1px solid var(--border);
   color: var(--text);
   border-radius: 6px;
@@ -324,7 +325,7 @@ body {
   font-size: 12.5px;
   line-height: 1.45;
   background:
-    linear-gradient(180deg, #0a0c10 0%, var(--bg) 48px);
+    linear-gradient(180deg, #000000 0%, var(--bg) 48px);
 }
 #view-chat {
   position: relative;
@@ -551,7 +552,7 @@ body {
   flex-shrink: 0;
   border-top: 1px solid var(--border);
   padding: 10px;
-  background: linear-gradient(180deg, #12151c 0%, #0e1218 100%);
+  background: linear-gradient(180deg, #050506 0%, #000000 100%);
   display: flex;
   flex-direction: column;
   gap: 8px;

@@ -486,18 +486,18 @@
   padding: 4px 2px;
   border-radius: 6px;
   color: var(--dim);
-  background: #0a0d12;
+  background: #000000;
   border: 1px solid transparent;
 }
 .turn-stages .stage.done {
   color: var(--ok);
   border-color: color-mix(in srgb, var(--ok) 30%, transparent);
-  background: color-mix(in srgb, var(--ok) 8%, #0a0d12);
+  background: color-mix(in srgb, var(--ok) 8%, #000000);
 }
 .turn-stages .stage.active {
   color: var(--bomb-fuse-hot);
   border-color: color-mix(in srgb, var(--bomb-fuse) 45%, transparent);
-  background: color-mix(in srgb, var(--bomb-fuse) 12%, #0a0d12);
+  background: color-mix(in srgb, var(--bomb-fuse) 12%, #000000);
   animation: stage-pulse 1.4s ease-in-out infinite;
 }
 .turn-stages .stage.error {
@@ -507,7 +507,7 @@
 .turn-dock-meter {
   height: 3px;
   border-radius: 2px;
-  background: #0a0d12;
+  background: #000000;
   overflow: hidden;
 }
 .turn-dock-meter > i {
