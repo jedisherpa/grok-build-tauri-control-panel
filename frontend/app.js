@@ -580,6 +580,12 @@ function appendTranscript(sessionId, role, body, at = nowIso(), opts = {}) {
     for (let i = list.length - 1, hops = 0; i >= 0 && hops < 8; i--, hops++) {
       const entry = list[i];
       if (entry.role === role && entry.streaming) {
+        // Rotate giant stream blocks: one multi-MB text node re-escaped on
+        // every render tanks the whole transcript.
+        if ((entry.body || "").length > 64_000) {
+          entry.streaming = false;
+          break;
+        }
         if (role === "term") {
           entry.body = (entry.body || "") + (entry.body ? "\n" : "") + text;
         } else {
@@ -626,6 +632,12 @@ function appendTranscript(sessionId, role, body, at = nowIso(), opts = {}) {
   }
 }
 
+/** True when the user is following the tail (within a small threshold). */
+function isNearBottom(root) {
+  if (!root) return true;
+  return root.scrollHeight - root.scrollTop - root.clientHeight < 48;
+}
+
 /** Fast path: update only the last streaming block. */
 /// Pin the transcript to the bottom reliably: once now, once after layout,
 /// and once more after async content (bomb sprites) settles height.
@@ -648,7 +660,9 @@ function patchLastTranscriptBody(entry) {
     renderTranscript();
     return;
   }
-  const blocks = root.querySelectorAll(".t-block");
+  const follow = isNearBottom(root);
+  // Skip the synthetic live-hint row — patching it froze the real bubble.
+  const blocks = root.querySelectorAll(".t-block:not(.term-live)");
   const last = blocks[blocks.length - 1];
   if (
     !last ||
@@ -668,7 +682,8 @@ function patchLastTranscriptBody(entry) {
   body.textContent = entry.body || "";
   if (time) time.textContent = shortTime(entry.at || "");
   last.classList.toggle("streaming", !!entry.streaming);
-  scrollTranscriptBottom();
+  // Only follow the stream if the user was already at the bottom.
+  if (follow) scrollTranscriptBottom();
 }
 
 function shortTime(iso) {
@@ -739,8 +754,14 @@ function resolveApprovalEntry(sessionId, requestId, resolution) {
 }
 
 function renderTranscript({ keepScroll = false } = {}) {
-  const prevScroll = keepScroll ? $("transcript")?.scrollTop : null;
-  const root = $("transcript");
+  // Respect the reader: full re-renders only pin to bottom when the user was
+  // already following the tail. Switching threads always starts at the tail.
+  const rootEl = $("transcript");
+  const switchedSession = renderTranscript._lastSid !== state.selectedSession;
+  renderTranscript._lastSid = state.selectedSession;
+  const wasNearBottom = switchedSession || isNearBottom(rootEl);
+  const prevScroll = rootEl?.scrollTop ?? null;
+  const root = rootEl;
   const sid = state.selectedSession;
   if (!sid) {
     root.innerHTML = `<div class="welcome">
@@ -850,7 +871,7 @@ function renderTranscript({ keepScroll = false } = {}) {
       }
     };
   });
-  if (keepScroll && prevScroll != null) {
+  if ((keepScroll || !wasNearBottom) && prevScroll != null) {
     root.scrollTop = prevScroll;
   } else {
     scrollTranscriptBottom();
@@ -1230,12 +1251,15 @@ function handleControlEvent(ev) {
     if (sid) endTurnPresence(sid, "error", "Cancelled");
     refreshSessions();
   } else if (type === "error") {
-    const errSid = sid || state.selectedSession;
-    endAgentStream(errSid);
-    appendTranscript(errSid, "error", ev.message || "error");
+    // Session-less errors are host-level — status feed only. Attributing them
+    // to whatever thread happens to be selected caused phantom red rows.
     pushEvent(ev.message || "error", "err", "error", { force: true, milestone: true });
     if (!state.ready) setStatus("error", ev.message || "error");
-    if (errSid) endTurnPresence(errSid, "error", ev.message || "error");
+    if (sid) {
+      endAgentStream(sid);
+      appendTranscript(sid, "error", ev.message || "error");
+      endTurnPresence(sid, "error", ev.message || "error");
+    }
   } else if (type === "approval_required" || type === "approvalRequired") {
     const autoApproved = !!(ev.auto_approved ?? ev.autoApproved);
     if (autoApproved) {
@@ -1287,13 +1311,18 @@ function handleControlEvent(ev) {
       return;
     }
     if (payload?.channel === "term" && payload?.line) {
-      const tSid = sid || state.selectedSession;
-      appendTranscript(tSid, "term", String(payload.line), nowIso(), { stream: true });
-      if (tSid && P.turnActive(presenceFor(tSid))) {
+      // Only the owning session's thread gets the line — never the selected
+      // one as a fallback (another session's stderr showed up mid-thread).
+      if (!sid) {
+        pushEvent(String(payload.line).slice(0, 120), "", null);
+        return;
+      }
+      appendTranscript(sid, "term", String(payload.line), nowIso(), { stream: true });
+      if (P.turnActive(presenceFor(sid))) {
         noteTurn(
-          presenceFor(tSid).phase === "idle" ? "think" : presenceFor(tSid).phase,
+          presenceFor(sid).phase === "idle" ? "think" : presenceFor(sid).phase,
           { note: String(payload.line).slice(0, 80) },
-          tSid
+          sid
         );
       }
       return;
@@ -1304,37 +1333,36 @@ function handleControlEvent(ev) {
       payload?.text ||
       (typeof payload?.message === "string" ? payload.message : null);
     if (maybe && typeof maybe === "string" && maybe.trim() && !isNoiseAgentText(maybe)) {
-      const tSid = sid || state.selectedSession;
-      appendTranscript(tSid, "agent", maybe, nowIso(), { stream: true });
-      if (tSid) {
-        const p = presenceFor(tSid);
-        noteTurn(
-          "reply",
-          {
-            replyChars: (p.replyChars || 0) + maybe.length,
-            preview: clipPreview(maybe),
-          },
-          tSid
-        );
-      }
-    } else {
+      if (!sid) return; // agent text without a session id has nowhere to go
+      appendTranscript(sid, "agent", maybe, nowIso(), { stream: true });
+      const p = presenceFor(sid);
+      noteTurn(
+        "reply",
+        {
+          replyChars: (p.replyChars || 0) + maybe.length,
+          preview: clipPreview(maybe),
+        },
+        sid
+      );
+    } else if (sid) {
+      // Unrecognized payload for a known session → its own thread, clipped.
       const dump = JSON.stringify(payload);
       if (dump && dump !== "{}" && dump !== "null") {
         appendTranscript(
-          sid || state.selectedSession,
+          sid,
           "term",
           dump.length > 400 ? dump.slice(0, 400) + "…" : dump,
           nowIso(),
           { stream: true }
         );
       }
+    } else {
+      console.debug("unattributed raw event", payload);
     }
+  } else if (sid) {
+    appendTranscript(sid, "term", `event ${type} · ${shortId(sid)}`);
   } else {
-    appendTranscript(
-      sid || state.selectedSession,
-      "term",
-      `event ${type}${sid ? ` · ${shortId(sid)}` : ""}`
-    );
+    pushEvent(`event ${type}`, "", null);
   }
 }
 
@@ -1570,9 +1598,14 @@ async function refreshSessions() {
     if (!stillThere) {
       const next = state.sessions[0]?.id || null;
       await selectSession(next);
-    } else {
+    } else if (!state.transcriptLoaded.has(state.selectedSession)) {
+      // First sight of this thread: hydrate from SQLite. Already-loaded
+      // threads update via events — a full innerHTML rebuild on every status
+      // change destroyed the DOM mid-scroll.
       await loadTranscriptFromDb(state.selectedSession);
       renderTranscript();
+      updateBombChrome();
+    } else {
       updateBombChrome();
     }
   } catch (e) {
@@ -2187,6 +2220,12 @@ async function sendPrompt() {
   try {
     const prompt = $("prompt").value;
     if (!prompt.trim()) throw new Error("Empty prompt");
+    if (state.selectedSession && turnActive()) {
+      pushEvent("turn in progress — wait for it to finish or cancel first", "err", "wait", {
+        force: true,
+      });
+      return;
+    }
     if (!state.selectedSession) {
       // No thread selected — start one with the current cwd/agent settings.
       await startAcp();

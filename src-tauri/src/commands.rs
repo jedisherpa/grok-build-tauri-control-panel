@@ -1516,7 +1516,9 @@ pub fn persist_control_event(db: &grok_persistence::Persistence, ev: &ControlEve
             message,
             at,
         } => {
-            let _ = db.update_session_status(*session_id, "failed");
+            // Errors are rows, not verdicts — terminal failures arrive as
+            // SessionStatusChanged(Failed). Flipping the record here made a
+            // recovered thread show a permanent failed badge after reboot.
             db.append_message(*session_id, "error", message.clone(), *at)
                 .map(|_| ())
         }
