@@ -1272,10 +1272,13 @@ async function selectSession(id) {
     state.turn = state.presenceBySession.get(id) || (P ? P.emptyPresence() : { phase: "idle" });
     state.presenceBySession.set(id, state.turn);
   }
-  renderThreads();
   const sess = state.sessions.find((s) => s.id === id);
+  // Selecting a thread activates its PROJECT (not its worktree path — using
+  // the raw cwd made + nest new threads inside another thread's worktree).
   // Don't discard a path the user just typed for their next session.
-  if (sess?.cwd && !state.cwdDirty) setProjectCwd(sess.cwd, { remember: false });
+  const projectKey = sess?.projectRoot || sess?.project_root || sess?.cwd;
+  if (projectKey && !state.cwdDirty) setProjectCwd(projectKey, { remember: false });
+  renderThreads();
   syncSelectorsToSession(sess);
   if (id) await loadTranscriptFromDb(id);
   renderTranscript();
