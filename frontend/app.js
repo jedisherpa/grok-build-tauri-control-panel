@@ -38,6 +38,8 @@ const state = {
   lastEventKey: "",
   /** Persisted project folders (sidebar groups exist even with 0 threads). */
   projects: [],
+  /** Show raw ACP protocol lines in the transcript (off by default — noise). */
+  showAcpLines: localStorage.getItem("bomb.showAcp") === "1",
   /** sessionId → ELI12 explainer cards for the right panel. */
   explainBySession: new Map(),
   explainPending: false,
@@ -569,7 +571,10 @@ function appendTranscript(sessionId, role, body, at = nowIso(), opts = {}) {
           entry.body = (entry.body || "") + text;
         }
         entry.at = at;
-        if (sessionId === state.selectedSession) {
+        // Hidden ACP rows still buffer (the toggle can reveal them later)
+        // but must not touch the DOM — patching would hit a visible bubble.
+        const visible = role !== "term" || state.showAcpLines;
+        if (visible && sessionId === state.selectedSession) {
           if (i === list.length - 1) {
             patchLastTranscriptBody(entry);
           } else {
@@ -604,7 +609,8 @@ function appendTranscript(sessionId, role, body, at = nowIso(), opts = {}) {
   if (list.length > 2000) {
     list.splice(0, list.length - 2000);
   }
-  if (sessionId === state.selectedSession) {
+  const visible = role !== "term" || state.showAcpLines;
+  if (visible && sessionId === state.selectedSession) {
     renderTranscript();
   }
 }
@@ -850,7 +856,11 @@ function renderTranscript({ keepScroll = false } = {}) {
   $("composer-model").textContent = [backendName, sess?.model].filter(Boolean).join(" · ");
   updateThreadGitRow(sess);
 
-  const entries = getTranscript(sid);
+  // Raw ACP protocol rows are hidden unless the View setting enables them
+  // (they still buffer, so flipping the toggle reveals full history).
+  const entries = getTranscript(sid).filter(
+    (e) => state.showAcpLines || e.role !== "term"
+  );
   if (!entries.length) {
     root.innerHTML = `<div class="welcome">
 <div class="welcome-hero">
@@ -3604,6 +3614,19 @@ function wireExplainer() {
   wireAccordion("log-toggle", "event-feed", "log-caret", "log", false);
   wireAccordion("agents-toggle", "agent-list", "agents-caret", "agents", true);
   wireAccordion("tools-toggle", "tool-list", "tools-caret", "tools", true);
+  wireAccordion("view-toggle", "view-settings", "view-caret", "view", false);
+
+  // View settings: raw ACP protocol lines in threads (default hidden).
+  const acpToggle = $("toggle-acp-lines");
+  if (acpToggle) {
+    acpToggle.checked = state.showAcpLines;
+    acpToggle.onchange = () => {
+      state.showAcpLines = acpToggle.checked;
+      localStorage.setItem("bomb.showAcp", state.showAcpLines ? "1" : "0");
+      renderTranscript();
+      pushEvent(`ACP lines ${state.showAcpLines ? "shown" : "hidden"}`, "ok", null, { force: true });
+    };
+  }
 }
 
 /** Collapsible right-bar section with persisted state. */

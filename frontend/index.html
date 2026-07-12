@@ -377,6 +377,19 @@
         </div>
 
         <div class="right-block">
+          <button class="section-label agent-talk-header" id="view-toggle" type="button" aria-expanded="false">
+            <span>View</span>
+            <span class="section-meta muted" id="view-caret">▸</span>
+          </button>
+          <div id="view-settings" class="view-settings" style="display:none">
+            <label class="view-setting" title="Raw protocol/log lines from the agent process (status updates, session JSON, stderr)">
+              <input type="checkbox" id="toggle-acp-lines" />
+              <span>Show ACP protocol lines in threads</span>
+            </label>
+          </div>
+        </div>
+
+        <div class="right-block">
           <button class="section-label agent-talk-header" id="log-toggle" type="button" aria-expanded="false">
             <span>Log</span>
             <span class="section-meta muted" id="log-caret">▸</span>

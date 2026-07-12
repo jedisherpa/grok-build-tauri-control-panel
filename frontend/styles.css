@@ -683,6 +683,15 @@ body {
 /* (LIVE hint bar removed — the turn dock below the transcript is the single
    source of live turn status.) */
 
+/* View settings (right sidebar) */
+.view-settings { padding: 4px 2px 6px; }
+.view-setting {
+  display: flex; align-items: center; gap: 7px;
+  font-size: 11px; color: var(--muted); cursor: pointer;
+}
+.view-setting:hover { color: var(--text); }
+.view-setting input { accent-color: var(--accent); margin: 0; }
+
 .t-role {
   font-size: 10px;
   text-transform: uppercase;
