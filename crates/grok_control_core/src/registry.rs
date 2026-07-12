@@ -83,12 +83,40 @@ impl SessionRegistry {
         config: Arc<tokio::sync::RwLock<GrokConfig>>,
         grok_cli: Arc<GrokCli>,
     ) -> Arc<Self> {
-        Arc::new(Self {
+        let registry = Arc::new(Self {
             sessions: Arc::new(DashMap::new()),
-            event_bus,
+            event_bus: event_bus.clone(),
             config,
             grok_cli,
-        })
+        });
+        // Mirror status events into live metadata. The ACP client reports
+        // turn completion (Idle) only on the event bus; without this the
+        // thread list — which reads metadata — shows "running" forever
+        // after the first prompt.
+        if tokio::runtime::Handle::try_current().is_ok() {
+            let sessions = registry.sessions.clone();
+            let mut rx = event_bus.subscribe();
+            tokio::spawn(async move {
+                loop {
+                    match rx.recv().await {
+                        Ok(grok_events::ControlEvent::SessionStatusChanged {
+                            session_id,
+                            status,
+                            ..
+                        }) => {
+                            if let Some(mut entry) = sessions.get_mut(&session_id) {
+                                entry.metadata.status = status;
+                                entry.metadata.last_activity = Utc::now();
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
+        }
+        registry
     }
 
     /// Start a session. The thread appears (status `Starting`) immediately;
