@@ -212,14 +212,16 @@ body {
 .thread-title {
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
 }
-.thread-delete {
-  margin-left: auto; flex-shrink: 0;
+.thread-delete, .thread-rename {
+  flex-shrink: 0;
   background: transparent; border: none; cursor: pointer;
   color: var(--dim); font-size: 11px; padding: 0 2px;
   opacity: 0; transition: opacity 0.12s;
 }
-.thread-item:hover .thread-delete { opacity: 1; }
+.thread-rename { margin-left: auto; }
+.thread-item:hover .thread-delete, .thread-item:hover .thread-rename { opacity: 1; }
 .thread-delete:hover { color: var(--err); }
+.thread-rename:hover { color: var(--accent); }
 
 .badge.branch {
   color: var(--ok);

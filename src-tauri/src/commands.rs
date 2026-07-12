@@ -1099,6 +1099,41 @@ pub async fn respond_approval(
         .map_err(err)
 }
 
+/// Rename a thread (manual override of the smart name). Works for live and
+/// saved threads; manual names are never overwritten by the auto-titler
+/// (which only fires when a thread has no label at its first prompt).
+#[tauri::command]
+pub async fn rename_thread(
+    state: State<'_, AppState>,
+    id: String,
+    label: String,
+) -> Result<(), String> {
+    let id = Uuid::parse_str(&id).map_err(err)?;
+    let label = label.trim();
+    if label.is_empty() {
+        return Err("name cannot be empty".into());
+    }
+    let label: String = label.chars().take(60).collect();
+
+    if state.registry.set_label(id, &label).is_ok() {
+        persist_session(&state, id).await;
+    } else {
+        // Saved thread: patch the label inside the persisted metadata.
+        let mut rec = state.persistence.get_session(id).map_err(err)?;
+        let mut v: serde_json::Value =
+            serde_json::from_str(&rec.metadata_json).unwrap_or_else(|_| serde_json::json!({}));
+        if !v.get("metadata").map(|m| m.is_object()).unwrap_or(false) {
+            v["metadata"] = serde_json::json!({});
+        }
+        v["metadata"]["label"] = serde_json::json!(label);
+        rec.metadata_json = v.to_string();
+        rec.updated_at = Utc::now();
+        state.persistence.upsert_session(&rec).map_err(err)?;
+    }
+    emit_thread_label(&state, id, &label);
+    Ok(())
+}
+
 // ── Projects (persisted folder list for the sidebar) ─────────────────────
 
 #[tauri::command]

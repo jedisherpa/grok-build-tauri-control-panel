@@ -103,6 +103,7 @@ pub fn run() {
             commands::set_explainer_enabled,
             commands::set_explainer_provider,
             commands::respond_approval,
+            commands::rename_thread,
             commands::land_thread,
             commands::sync_thread,
             commands::list_projects,

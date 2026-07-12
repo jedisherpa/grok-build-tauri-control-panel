@@ -979,9 +979,11 @@ function renderThreadRow(s) {
           : "idle";
   const bombMood = isMock ? "idle" : moodFromStatus(status);
   const msgs = s.messageCount ?? s.message_count ?? 0;
-  const liveTag = live
-    ? ""
-    : `<span class="badge saved" title="Restored from disk">saved</span>`;
+  // Not-live threads get ONE badge: "saved" (restored from disk, no agent
+  // attached — resumes on next send). Stale status + a second pill was noise.
+  const statusBadge = live
+    ? `<span class="badge ${badgeCls}">${bombHtml(bombMood, "xs")}${escapeHtml(status)}</span>`
+    : `<span class="badge saved" title="No agent attached — resumes automatically on your next message">${bombHtml("idle", "xs")}saved</span>`;
   const backend = String(s.backend || "grok").toLowerCase();
   const backendTag =
     backend === "grok"
@@ -1004,11 +1006,12 @@ function renderThreadRow(s) {
   const title = s.label
     ? escapeHtml(s.label)
     : `${escapeHtml(mode)} · ${escapeHtml(shortId(id))}`;
-  return `<div class="thread-item ${selected}${live ? "" : " restored"}" data-id="${escapeHtml(id)}" title="${escapeHtml(shortId(id))} · ${escapeHtml(s.cwd || "")}">
+  return `<div class="thread-item ${selected}${live ? "" : " restored"}" data-id="${escapeHtml(id)}" title="${escapeHtml(shortId(id))} · ${escapeHtml(s.cwd || "")} — double-click to rename">
   <div class="name">${bombHtml(bombMood, "xs")} <span class="thread-title">${title}</span>
+    <button class="thread-rename" type="button" data-id="${escapeHtml(id)}" title="Rename thread">✎</button>
     <button class="thread-delete" type="button" data-id="${escapeHtml(id)}" title="Delete thread">✕</button></div>
-  <div class="meta"><span class="badge ${badgeCls}">${bombHtml(bombMood, "xs")}${escapeHtml(status)}</span>
-  ${liveTag}${backendTag}${brainTag}${worktreeTag}${syncTag}
+  <div class="meta">${statusBadge}
+  ${backendTag}${brainTag}${worktreeTag}${syncTag}
   <span>${escapeHtml(isMock ? "mock" : model || "—")}</span>
   ${msgs ? `<span class="muted">${msgs} msg</span>` : ""}</div>
 </div>`;
@@ -1087,7 +1090,37 @@ function renderThreads() {
       deleteThread(el.dataset.id);
     };
   });
+  root.querySelectorAll(".thread-rename").forEach((el) => {
+    el.onclick = (ev) => {
+      ev.stopPropagation();
+      renameThread(el.dataset.id);
+    };
+  });
+  root.querySelectorAll(".thread-item").forEach((el) => {
+    el.ondblclick = (ev) => {
+      ev.stopPropagation();
+      renameThread(el.dataset.id);
+    };
+  });
   updateBombChrome();
+}
+
+async function renameThread(id) {
+  const sess = state.sessions.find((s) => s.id === id);
+  if (!sess) return;
+  const current = sess.label || "";
+  const name = prompt("Rename thread", current);
+  if (name == null) return; // cancelled
+  const trimmed = name.trim();
+  if (!trimmed || trimmed === current) return;
+  try {
+    await invoke("rename_thread", { id, label: trimmed });
+    sess.label = trimmed;
+    renderThreads();
+    pushEvent(`renamed → ${trimmed}`, "ok", null, { force: true });
+  } catch (e) {
+    toastError(e);
+  }
 }
 
 /** Show Land/Sync controls only for threads that own a worktree. */
