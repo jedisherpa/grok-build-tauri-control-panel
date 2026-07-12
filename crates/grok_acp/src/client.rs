@@ -1415,6 +1415,7 @@ impl AcpClient {
                                     options,
                                     auto_approved: true,
                                     selected_option: Some(picked),
+                                    plan_approval: plan_extracted.is_some(),
                                     at: Utc::now(),
                                 });
                             }
@@ -1455,6 +1456,7 @@ impl AcpClient {
                             options,
                             auto_approved: false,
                             selected_option: None,
+                            plan_approval: plan_extracted.is_some(),
                             at: Utc::now(),
                         });
                         bus.emit_status(self.control_session_id, SessionStatus::WaitingApproval)

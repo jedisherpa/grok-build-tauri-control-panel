@@ -80,6 +80,10 @@ pub enum ControlEvent {
         options: Vec<PermissionOptionInfo>,
         auto_approved: bool,
         selected_option: Option<String>,
+        /// True when this approval presents a plan (enables the
+        /// "code with a different model" handoff in the UI).
+        #[serde(default)]
+        plan_approval: bool,
         at: DateTime<Utc>,
     },
     ApprovalResolved {

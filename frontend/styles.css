@@ -620,6 +620,20 @@ body {
 .approval-resolved {
   margin-top: 6px; font-size: 10px; color: var(--muted);
 }
+/* Plan handoff: execute with a different backend/model */
+.code-with {
+  display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  margin-top: 8px; padding-top: 8px;
+  border-top: 1px dashed var(--border);
+  font-size: 10px;
+}
+.code-with select {
+  font-size: 10px; min-width: 0; max-width: 130px;
+}
+.code-with .code-with-go {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+}
 .approval-explain {
   margin-top: 8px; padding: 6px 8px; border-radius: 6px;
   font-size: 11px; line-height: 1.45; color: var(--text);

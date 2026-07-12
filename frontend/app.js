@@ -929,10 +929,25 @@ function renderTranscript({ keepScroll = false } = {}) {
           // Restored rows have no live request behind them (it died with the
           // old agent process) — render an inert card, never dead buttons.
           const isLive = !!e.meta;
+          // Plan approvals can be handed to a DIFFERENT backend/model for
+          // execution instead of continuing with the one that planned.
+          const codeWith =
+            m.planApproval && isLive && !m.resolved
+              ? `<div class="code-with">
+  <span class="muted">or code it with</span>
+  <select class="code-with-backend">${(state.backends || [])
+    .filter((b) => b.available)
+    .map((b) => `<option value="${escapeHtml(b.id)}">${escapeHtml(b.displayName || b.id)}</option>`)
+    .join("")}</select>
+  <select class="code-with-model"></select>
+  <button class="approval-btn code-with-go" data-sid="${escapeHtml(String(m.sid || sid))}"
+    data-request-id="${escapeHtml(String(m.requestId || ""))}">⚡ Code</button>
+</div>`
+              : "";
           const foot = m.resolved
             ? `${explain}<div class="approval-resolved">resolved · ${escapeHtml(String(m.resolved))}</div>`
             : isLive
-              ? `${explain}<div class="approval-actions">${buttons}${deny}</div>`
+              ? `${explain}<div class="approval-actions">${buttons}${deny}</div>${codeWith}`
               : `${explain}<div class="approval-resolved">from a previous session — see the rows below for how it resolved</div>`;
           return `<div class="t-block approval${m.resolved || !isLive ? "" : " pending"}">
   <div class="t-role"><span class="t-ts">${escapeHtml(shortTime(e.at || ""))}</span>${bombHtml("wait", "xs")}<span>${label}</span></div>
@@ -966,6 +981,23 @@ function renderTranscript({ keepScroll = false } = {}) {
         renderTranscript({ keepScroll: true });
       }
     };
+  });
+  // Populate the "code it with" model pickers on plan approval cards.
+  root.querySelectorAll(".code-with").forEach((row) => {
+    const backendSel = row.querySelector(".code-with-backend");
+    const modelSel = row.querySelector(".code-with-model");
+    if (!backendSel || !modelSel) return;
+    const fill = () => {
+      const b = (state.backends || []).find((x) => x.id === backendSel.value);
+      modelSel.innerHTML = (b?.models || [])
+        .map((mo) => `<option value="${escapeHtml(mo)}">${escapeHtml(mo)}</option>`)
+        .join("");
+    };
+    backendSel.onchange = fill;
+    for (const el of [backendSel, modelSel]) {
+      el.onclick = (ev) => ev.stopPropagation();
+    }
+    fill();
   });
   if ((keepScroll || !wasNearBottom) && prevScroll != null) {
     root.scrollTop = prevScroll;
@@ -1659,6 +1691,7 @@ function handleControlEvent(ev) {
       meta: {
         requestId: ev.request_id || ev.requestId || "",
         options: ev.options || [],
+        planApproval: !!(ev.plan_approval ?? ev.planApproval),
         sid,
       },
     });
@@ -3710,8 +3743,61 @@ function wireAccordion(toggleId, bodyId, caretId, key, defaultOpen) {
   apply();
 }
 
+/** Hand a just-planned thread to a different backend/model for execution:
+ *  decline the pending plan approval, switch the thread (send_prompt's
+ *  backend/model switch restarts it with history — including the plan —
+ *  injected), and send an execute-the-plan prompt. */
+async function codeWithModel(sid, requestId, backend, model) {
+  try {
+    // Decline the planner's approval — the new agent takes it from here.
+    await invoke("respond_approval", { id: sid, requestId, optionId: null }).catch(() => {});
+    resolveApprovalEntry(sid, requestId, `handed to ${backend} · ${model}`);
+    // The declined approval leaves turn presence active for a beat — clear it
+    // so the handoff send isn't blocked by the mid-turn guard (the backend
+    // switch kills the old agent process regardless).
+    noteTurn("idle", {}, sid);
+
+    // Reflect the switch in the composer controls so the send uses them.
+    const bsel = $("agent-backend");
+    if (bsel && bsel.value !== backend) {
+      bsel.value = backend;
+      localStorage.setItem("bomb.backend", backend);
+      populateModelSelect((state.backends || []).find((b) => b.id === backend));
+    }
+    const msel = $("agent-model");
+    if (msel) msel.value = model;
+    // Execution run: plan mode off (the planning already happened).
+    setMode("plan-mode", false);
+
+    pushEvent(`⚡ handing the plan to ${backend} · ${model}`, "ok", "boom", {
+      force: true,
+      milestone: true,
+    });
+    const promptBox = $("prompt");
+    if (promptBox) {
+      promptBox.value =
+        "Execute the plan above exactly. It was prepared in plan mode — implement every step in order, then run the verification it describes. Don't re-plan.";
+    }
+    await sendPrompt();
+  } catch (e2) {
+    toastError(e2);
+  }
+}
+
 // Approval cards: delegated listener — innerHTML rebuilds kill per-button handlers.
 $("transcript")?.addEventListener("click", async (e) => {
+  const goBtn = e.target.closest?.(".code-with-go");
+  if (goBtn && !goBtn.disabled) {
+    e.stopPropagation();
+    const row = goBtn.closest(".code-with");
+    const backend = row?.querySelector(".code-with-backend")?.value;
+    const model = row?.querySelector(".code-with-model")?.value;
+    if (backend && model) {
+      goBtn.disabled = true;
+      codeWithModel(goBtn.dataset.sid, goBtn.dataset.requestId, backend, model);
+    }
+    return;
+  }
   const btn = e.target.closest?.(".approval-btn");
   if (!btn || btn.disabled) return;
   const actions = btn.closest(".approval-actions");
