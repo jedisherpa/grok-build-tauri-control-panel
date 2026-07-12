@@ -10,10 +10,15 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{debug, info, warn};
 
+pub mod backends;
 pub mod env_bootstrap;
 pub mod paths;
 pub mod sandbox;
 
+pub use backends::{
+    Backend, BackendConfig, BackendDescriptor, LaunchVia, ResolvedBackend, descriptor,
+    resolve_backend,
+};
 pub use env_bootstrap::{bootstrap_process_env, child_path_env, preferred_grok_candidates};
 pub use paths::{GrokPaths, discover_grok_binary};
 pub use sandbox::SandboxProfile;
@@ -30,6 +35,8 @@ pub enum ConfigError {
     TomlEdit(String),
     #[error("grok binary not found")]
     BinaryNotFound,
+    #[error("{0} backend not found (no binary on PATH and npx unavailable)")]
+    BackendNotFound(&'static str),
     #[error("invalid config: {0}")]
     Invalid(String),
 }
@@ -42,6 +49,9 @@ pub type Result<T> = std::result::Result<T, ConfigError>;
 pub struct GrokConfig {
     pub default_model: String,
     pub default_effort: String,
+    pub default_backend: Backend,
+    /// Per-backend overrides keyed by "grok" | "claude" | "codex".
+    pub backends: HashMap<String, BackendConfig>,
     pub grok_binary: Option<PathBuf>,
     pub max_concurrent_sessions: usize,
     pub session_timeout_secs: u64,
@@ -63,6 +73,8 @@ impl Default for GrokConfig {
         Self {
             default_model: "grok-4".to_string(),
             default_effort: "high".to_string(),
+            default_backend: Backend::Grok,
+            backends: HashMap::new(),
             grok_binary: None,
             max_concurrent_sessions: 10,
             session_timeout_secs: 3600,
@@ -188,6 +200,10 @@ impl GrokConfig {
         if overlay.grok_binary.is_some() {
             self.grok_binary = overlay.grok_binary;
         }
+        if overlay.default_backend != Backend::default() {
+            self.default_backend = overlay.default_backend;
+        }
+        self.backends.extend(overlay.backends);
         if overlay.max_concurrent_sessions != Self::default().max_concurrent_sessions {
             self.max_concurrent_sessions = overlay.max_concurrent_sessions;
         }
@@ -214,6 +230,38 @@ impl GrokConfig {
         self.permissions.trust_repo = overlay.permissions.trust_repo;
         self.env.extend(overlay.env);
         self
+    }
+
+    /// Per-backend user overrides, if configured.
+    pub fn backend_config(&self, backend: Backend) -> Option<&BackendConfig> {
+        self.backends.get(backend.key())
+    }
+
+    /// Default model for a backend: per-backend config → legacy top-level
+    /// default_model (Grok only) → built-in descriptor default.
+    pub fn model_for(&self, backend: Backend) -> String {
+        if let Some(m) = self
+            .backend_config(backend)
+            .and_then(|c| c.default_model.clone())
+        {
+            return m;
+        }
+        if backend == Backend::Grok {
+            return self.default_model.clone();
+        }
+        backends::descriptor(backend).default_model.to_string()
+    }
+
+    /// Model catalog for a backend: config override when non-empty, else built-in.
+    pub fn models_for(&self, backend: Backend) -> Vec<String> {
+        match self.backend_config(backend) {
+            Some(c) if !c.models.is_empty() => c.models.clone(),
+            _ => backends::descriptor(backend)
+                .model_catalog
+                .iter()
+                .map(|m| m.to_string())
+                .collect(),
+        }
     }
 
     /// Resolve the grok binary path or error.
@@ -330,6 +378,60 @@ mod tests {
         let loaded = GrokConfig::load(&paths).unwrap();
         assert_eq!(loaded.default_model, "grok-test");
         assert!(loaded.mcp_servers.contains_key("github"));
+    }
+
+    #[test]
+    fn old_config_without_backends_table_loads() {
+        // Pre-multi-backend config.toml: no default_backend, no [backends].
+        let raw = r#"
+default_model = "grok-4"
+default_effort = "high"
+max_concurrent_sessions = 10
+"#;
+        let cfg: GrokConfig = toml::from_str(raw).unwrap();
+        assert_eq!(cfg.default_backend, Backend::Grok);
+        assert!(cfg.backends.is_empty());
+        // Round-trips with the new fields serialized.
+        let s = toml::to_string_pretty(&cfg).unwrap();
+        let back: GrokConfig = toml::from_str(&s).unwrap();
+        assert_eq!(back.default_backend, Backend::Grok);
+    }
+
+    #[test]
+    fn model_for_fallback_chain() {
+        let mut cfg = GrokConfig::default();
+        // Built-in descriptor defaults when nothing configured.
+        assert_eq!(cfg.model_for(Backend::Claude), "claude-fable-5");
+        assert_eq!(cfg.model_for(Backend::Codex), "gpt-5.6-terra");
+        // Grok falls back to legacy top-level default_model.
+        cfg.default_model = "grok-code-fast-1".into();
+        assert_eq!(cfg.model_for(Backend::Grok), "grok-code-fast-1");
+        // Per-backend config wins.
+        cfg.backends.insert(
+            "claude".into(),
+            BackendConfig {
+                default_model: Some("claude-opus-4-8".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(cfg.model_for(Backend::Claude), "claude-opus-4-8");
+        // Catalog override.
+        assert_eq!(
+            cfg.models_for(Backend::Codex),
+            backends::descriptor(Backend::Codex)
+                .model_catalog
+                .iter()
+                .map(|m| m.to_string())
+                .collect::<Vec<_>>()
+        );
+        cfg.backends.insert(
+            "codex".into(),
+            BackendConfig {
+                models: vec!["gpt-5-codex".into()],
+                ..Default::default()
+            },
+        );
+        assert_eq!(cfg.models_for(Backend::Codex), vec!["gpt-5-codex".to_string()]);
     }
 
     #[test]

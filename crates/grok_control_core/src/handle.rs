@@ -7,6 +7,7 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use grok_acp::{AcpClient, BrainMode};
+use grok_config::Backend;
 use grok_events::SessionStatus;
 
 use crate::options::AgentMode;
@@ -19,6 +20,9 @@ pub struct SessionMetadata {
     pub cwd: String,
     pub worktree: Option<String>,
     pub model: String,
+    /// Agent backend this session runs on; old records default to grok.
+    #[serde(default)]
+    pub backend: Backend,
     pub mode: AgentMode,
     pub status: SessionStatus,
     pub plan_mode: bool,

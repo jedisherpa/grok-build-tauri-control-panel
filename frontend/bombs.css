@@ -707,24 +707,10 @@
 }
 
 /* ── Composer busy rail ──────────────────────────────────────────────────── */
+/* Removed: the full-width sweeping laser doubled up with the turn-dock meter
+   and overlaid the whole column. The dock meter is the one busy indicator. */
 .composer.busy {
   position: relative;
-}
-.composer.busy::before {
-  content: "";
-  position: absolute;
-  top: 0; left: 0; right: 0;
-  height: 2px;
-  background: linear-gradient(
-    90deg,
-    transparent,
-    var(--bomb-fuse),
-    var(--bomb-fuse-hot),
-    var(--bomb-fuse),
-    transparent
-  );
-  background-size: 200% 100%;
-  animation: fuse-meter-run 1.2s linear infinite;
 }
 .composer-meta .live-mood {
   display: inline-flex;

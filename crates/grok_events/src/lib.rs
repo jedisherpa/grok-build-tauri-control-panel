@@ -77,6 +77,16 @@ pub enum ControlEvent {
         request_id: String,
         tool: String,
         summary: String,
+        options: Vec<PermissionOptionInfo>,
+        auto_approved: bool,
+        selected_option: Option<String>,
+        at: DateTime<Utc>,
+    },
+    ApprovalResolved {
+        session_id: Uuid,
+        request_id: String,
+        option_id: Option<String>,
+        cancelled: bool,
         at: DateTime<Utc>,
     },
     Error {
@@ -102,6 +112,14 @@ pub enum ControlEvent {
         session_id: Option<Uuid>,
         payload: Value,
     },
+}
+
+/// One option offered by the agent in a `session/request_permission` request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PermissionOptionInfo {
+    pub id: String,
+    pub kind: String,
+    pub label: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

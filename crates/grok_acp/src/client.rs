@@ -1,5 +1,6 @@
 //! High-level ACP client: spawn, initialize, auth, session, prompt, event loop.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -14,13 +15,15 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use grok_events::{
-    ControlEvent, EventBus, PlanStep, PlanUpdateEvent, SessionStatus, ToolCallEvent, ToolCallStatus,
+    ControlEvent, EventBus, PermissionOptionInfo, PlanStep, PlanUpdateEvent, SessionStatus,
+    ToolCallEvent, ToolCallStatus,
 };
 
 use crate::error::{AcpError, Result};
 use crate::messages::{
-    AuthenticateParams, ClientCapabilities, ClientInfo, FsCapabilities, IncomingAgentRequest,
-    InitializeParams, JsonRpcNotification, PromptContent, SessionPromptParams,
+    id_key, AuthenticateParams, ClientCapabilities, ClientInfo, FsCapabilities,
+    IncomingAgentRequest, InitializeParams, JsonRpcNotification, PromptContent,
+    SessionPromptParams,
 };
 use crate::terminals::TerminalRegistry;
 use crate::transport::NdjsonTransport;
@@ -91,7 +94,12 @@ pub struct ConnectOpts {
 
 #[derive(Debug, Clone)]
 pub struct AcpClientConfig {
-    pub grok_path: PathBuf,
+    /// Program to exec (agent binary or npx for adapter packages).
+    pub program: PathBuf,
+    /// Args producing an ACP stdio server (e.g. ["agent","stdio"], ["acp"], npx pkg).
+    pub args: Vec<String>,
+    /// Backend-specific env applied to the child (API keys, base URLs).
+    pub env: Vec<(String, String)>,
     pub cwd: PathBuf,
     pub client_name: String,
     pub client_version: String,
@@ -99,14 +107,22 @@ pub struct AcpClientConfig {
     pub request_timeout: Duration,
     /// Max wait for a full agent turn on session/prompt (long coding jobs).
     pub prompt_timeout: Duration,
-    /// Preferred auth method; may be overridden by agent-advertised methods.
-    pub auth_method_id: String,
+    /// Ordered auth-method preference matched against agent-advertised methods.
+    pub auth_preference: Vec<String>,
+    /// Skip authenticate entirely when the agent advertises no auth methods
+    /// (adapters riding an already-logged-in CLI).
+    pub skip_auth_when_unadvertised: bool,
+    /// Short label for logs/errors ("grok", "claude", "codex").
+    pub backend_label: String,
 }
 
 impl AcpClientConfig {
+    /// Grok defaults (compat constructor; also used by tests).
     pub fn new(grok_path: impl Into<PathBuf>, cwd: impl Into<PathBuf>) -> Self {
         Self {
-            grok_path: grok_path.into(),
+            program: grok_path.into(),
+            args: vec!["agent".into(), "stdio".into()],
+            env: Vec::new(),
             cwd: cwd.into(),
             client_name: "BombCode".into(),
             client_version: env!("CARGO_PKG_VERSION").into(),
@@ -114,9 +130,23 @@ impl AcpClientConfig {
             // Long agent turns stream via notifications; still cap runaway jobs.
             prompt_timeout: Duration::from_secs(60 * 60 * 2), // 2 hours
             // Grok Build advertises cached_token + grok.com (not xai.api_key).
-            auth_method_id: "cached_token".into(),
+            auth_preference: vec![
+                "cached_token".into(),
+                "grok.com".into(),
+                "xai.api_key".into(),
+            ],
+            skip_auth_when_unadvertised: false,
+            backend_label: "grok".into(),
         }
     }
+}
+
+/// A `session/request_permission` we have not yet answered — awaiting the user.
+#[derive(Debug)]
+struct PendingPermission {
+    /// Original wire id; permission responses are JSON-RPC responses to it.
+    rpc_id: Value,
+    options: Vec<PermissionOptionInfo>,
 }
 
 pub struct AcpClient {
@@ -132,6 +162,8 @@ pub struct AcpClient {
     agent_request_rx: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<IncomingAgentRequest>>>,
     /// When true, auto-allow tool permission requests (yolo).
     always_approve: bool,
+    /// Permission requests parked until the user answers via respond_approval.
+    pending_permissions: Mutex<HashMap<String, PendingPermission>>,
     brain_mode: RwLock<BrainMode>,
     /// Injected once on first prompt when brain is history-only.
     pending_context: Mutex<Option<String>>,
@@ -162,15 +194,16 @@ impl AcpClient {
         if !config.cwd.is_absolute() {
             return Err(AcpError::Spawn("cwd must be absolute".into()));
         }
-        if !config.grok_path.exists() {
+        if !config.program.exists() {
             return Err(AcpError::Spawn(format!(
-                "grok binary not found: {}",
-                config.grok_path.display()
+                "{} agent binary not found: {}",
+                config.backend_label,
+                config.program.display()
             )));
         }
 
-        let mut cmd = Command::new(&config.grok_path);
-        cmd.args(["agent", "stdio"])
+        let mut cmd = Command::new(&config.program);
+        cmd.args(&config.args)
             .current_dir(&config.cwd)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -185,18 +218,20 @@ impl AcpClient {
         if let Ok(home) = std::env::var("HOME") {
             cmd.env("HOME", home);
         }
-        if let Ok(key) = std::env::var("XAI_API_KEY") {
-            if !key.is_empty() {
-                cmd.env("XAI_API_KEY", key);
-            }
+        for (k, v) in &config.env {
+            cmd.env(k, v);
         }
         for (k, v) in &opts.extra_env {
             cmd.env(k, v);
         }
 
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| AcpError::Spawn(format!("failed to spawn grok agent stdio: {e}")))?;
+        let mut child = cmd.spawn().map_err(|e| {
+            AcpError::Spawn(format!(
+                "failed to spawn {} ACP agent ({}): {e}",
+                config.backend_label,
+                config.program.display()
+            ))
+        })?;
 
         let stdin = child
             .stdin
@@ -255,6 +290,7 @@ impl AcpClient {
             notification_rx: Mutex::new(Some(notif_rx)),
             agent_request_rx: Mutex::new(Some(agent_req_rx)),
             always_approve: opts.always_approve,
+            pending_permissions: Mutex::new(HashMap::new()),
             brain_mode: RwLock::new(BrainMode::Fresh),
             pending_context: Mutex::new(pending_context),
             load_session_supported: RwLock::new(false),
@@ -302,6 +338,7 @@ impl AcpClient {
             notification_rx: Mutex::new(None),
             agent_request_rx: Mutex::new(None),
             always_approve: false,
+            pending_permissions: Mutex::new(HashMap::new()),
             brain_mode: RwLock::new(BrainMode::Fresh),
             pending_context: Mutex::new(None),
             load_session_supported: RwLock::new(false),
@@ -389,23 +426,33 @@ impl AcpClient {
 
     fn pick_auth_method(&self, advertised: &[String]) -> String {
         // Prefer cached CLI login, then first advertised method.
-        const PREFERRED: &[&str] = &["cached_token", "grok.com", "xai.api_key"];
+        let preferred = &self.config.auth_preference;
+        let fallback = || {
+            preferred
+                .first()
+                .cloned()
+                .unwrap_or_else(|| "cached_token".into())
+        };
         if advertised.is_empty() {
-            return self.config.auth_method_id.clone();
+            return fallback();
         }
-        for p in PREFERRED {
-            if advertised.iter().any(|m| m == *p) {
-                return (*p).to_string();
+        for p in preferred {
+            if advertised.iter().any(|m| m == p) {
+                return p.clone();
             }
         }
-        advertised
-            .first()
-            .cloned()
-            .unwrap_or_else(|| self.config.auth_method_id.clone())
+        advertised.first().cloned().unwrap_or_else(fallback)
     }
 
     async fn authenticate(&self) -> Result<()> {
         let advertised = self.auth_methods.read().await.clone();
+        if advertised.is_empty() && self.config.skip_auth_when_unadvertised {
+            info!(
+                backend = %self.config.backend_label,
+                "agent advertises no auth methods; skipping authenticate (CLI login assumed)"
+            );
+            return Ok(());
+        }
         let method_id = self.pick_auth_method(&advertised);
         info!(%method_id, "ACP authenticate");
 
@@ -667,8 +714,20 @@ impl AcpClient {
     }
 
     async fn apply_mode_after_session(&self, opts: &SpawnOptions) {
+        // Mode ids differ per agent (grok: always_approve; claude adapter:
+        // bypassPermissions). set_mode is best-effort, so try aliases in order;
+        // "plan" is shared vocabulary. Yolo also auto-approves client-side.
         if opts.always_approve {
-            let _ = self.set_mode("always_approve").await;
+            let aliases: &[&str] = if self.config.backend_label == "grok" {
+                &["always_approve"]
+            } else {
+                &["bypassPermissions", "always_approve", "yolo"]
+            };
+            for alias in aliases {
+                if self.set_mode(alias).await.is_ok() {
+                    break;
+                }
+            }
         } else if opts.plan_mode {
             let _ = self.set_mode("plan").await;
         }
@@ -836,6 +895,8 @@ impl AcpClient {
     }
 
     pub async fn cancel(&self) -> Result<()> {
+        // Cancelled turns must resolve pending permission requests (ACP spec).
+        self.drain_pending_permissions().await;
         // Mock / offline clients have no transport — treat cancel as local status update.
         let has_transport = self.transport.read().await.is_some();
         if has_transport {
@@ -888,27 +949,93 @@ impl AcpClient {
         }
     }
 
-    pub async fn respond_approval(&self, request_id: &str, approved: bool) -> Result<()> {
-        if self.transport.read().await.is_none() {
-            debug!(%request_id, approved, "respond_approval (mock/local)");
-            return Ok(());
-        }
-        let params = json!({
-            "requestId": request_id,
-            "approved": approved,
-        });
-        match self
-            .request_timeout("session/approve", Some(params.clone()))
+    /// Answer a parked `session/request_permission`. `option_id: None` = cancel.
+    ///
+    /// The `HashMap::remove` is the duplicate-response guard: a second call for
+    /// the same request errors without touching the wire.
+    pub async fn respond_approval(&self, request_id: &str, option_id: Option<&str>) -> Result<()> {
+        let pending = self
+            .pending_permissions
+            .lock()
             .await
-        {
-            Ok(_) => Ok(()),
-            Err(AcpError::Rpc { .. }) => {
-                let _ = self
-                    .request_timeout("client/permission/respond", Some(params))
-                    .await;
-                Ok(())
+            .remove(request_id)
+            .ok_or_else(|| {
+                AcpError::Protocol(format!("no pending permission request: {request_id}"))
+            })?;
+
+        let outcome = match option_id {
+            Some(oid) => {
+                if !pending.options.is_empty() && !pending.options.iter().any(|o| o.id == oid) {
+                    // Put it back so a corrected retry can still answer.
+                    let valid: Vec<&str> = pending.options.iter().map(|o| o.id.as_str()).collect();
+                    let msg = format!(
+                        "unknown option '{oid}' for permission request {request_id} (valid: {})",
+                        valid.join(", ")
+                    );
+                    self.pending_permissions
+                        .lock()
+                        .await
+                        .insert(request_id.to_string(), pending);
+                    return Err(AcpError::Protocol(msg));
+                }
+                json!({ "outcome": { "outcome": "selected", "optionId": oid } })
             }
-            Err(e) => Err(e),
+            None => json!({ "outcome": { "outcome": "cancelled" } }),
+        };
+
+        if let Some(transport) = self.transport.read().await.clone() {
+            transport.send_response(pending.rpc_id, outcome).await?;
+        } else {
+            debug!(%request_id, ?option_id, "respond_approval (mock/local)");
+        }
+
+        if let Some(bus) = &self.event_bus {
+            bus.emit(ControlEvent::ApprovalResolved {
+                session_id: self.control_session_id,
+                request_id: request_id.to_string(),
+                option_id: option_id.map(str::to_string),
+                cancelled: option_id.is_none(),
+                at: Utc::now(),
+            });
+            if self.pending_permissions.lock().await.is_empty() {
+                // Permission requests only arrive mid-turn; the prompt-completion
+                // path still emits Idle at end of turn.
+                bus.emit_status(self.control_session_id, SessionStatus::Running)
+                    .await;
+            }
+        }
+        Ok(())
+    }
+
+    /// Answer every parked permission request as cancelled (turn cancel / shutdown).
+    async fn drain_pending_permissions(&self) {
+        let drained: Vec<(String, PendingPermission)> = {
+            let mut map = self.pending_permissions.lock().await;
+            map.drain().collect()
+        };
+        if drained.is_empty() {
+            return;
+        }
+        let transport = self.transport.read().await.clone();
+        for (request_id, pending) in drained {
+            if let Some(t) = &transport {
+                // Best-effort: the process may already be gone.
+                let _ = t
+                    .send_response(
+                        pending.rpc_id,
+                        json!({ "outcome": { "outcome": "cancelled" } }),
+                    )
+                    .await;
+            }
+            if let Some(bus) = &self.event_bus {
+                bus.emit(ControlEvent::ApprovalResolved {
+                    session_id: self.control_session_id,
+                    request_id,
+                    option_id: None,
+                    cancelled: true,
+                    at: Utc::now(),
+                });
+            }
         }
     }
 
@@ -1008,28 +1135,86 @@ impl AcpClient {
                 }
             }
             "session/request_permission" | "session/requestPermission" => {
-                let outcome = self.permission_outcome(&req.params).await;
-                if let Some(bus) = &self.event_bus {
-                    let tool = req
-                        .params
-                        .as_ref()
-                        .and_then(|p| p.get("toolCall"))
-                        .and_then(|t| t.get("title").or_else(|| t.get("toolName")))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("tool");
-                    bus.emit(ControlEvent::ApprovalRequired {
-                        session_id: self.control_session_id,
-                        request_id: req.id.to_string(),
-                        tool: tool.to_string(),
-                        summary: if self.always_approve {
-                            "auto-approved (yolo)".into()
-                        } else {
-                            "auto-allowed for session progress (plan mode soft-approve)".into()
+                let options = parse_permission_options(&req.params);
+                let tool = req
+                    .params
+                    .as_ref()
+                    .and_then(|p| p.get("toolCall"))
+                    .and_then(|t| t.get("title").or_else(|| t.get("toolName")))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("tool")
+                    .to_string();
+                let summary = permission_summary(&req.params, &tool);
+                let request_id = id_key(&req.id);
+
+                if self.always_approve {
+                    match pick_auto_approve_option(&options) {
+                        Some(picked) => {
+                            transport
+                                .send_response(
+                                    req.id,
+                                    json!({
+                                        "outcome": { "outcome": "selected", "optionId": picked }
+                                    }),
+                                )
+                                .await?;
+                            if let Some(bus) = &self.event_bus {
+                                bus.emit(ControlEvent::ApprovalRequired {
+                                    session_id: self.control_session_id,
+                                    request_id,
+                                    tool,
+                                    summary,
+                                    options,
+                                    auto_approved: true,
+                                    selected_option: Some(picked),
+                                    at: Utc::now(),
+                                });
+                            }
+                        }
+                        None => {
+                            // Only always-allow / reject options offered — never
+                            // silently flip the agent into permanent yolo.
+                            transport
+                                .send_response(
+                                    req.id,
+                                    json!({ "outcome": { "outcome": "cancelled" } }),
+                                )
+                                .await?;
+                            if let Some(bus) = &self.event_bus {
+                                bus.emit_error(
+                                    Some(self.control_session_id),
+                                    format!(
+                                        "permission request for {tool} offered no one-shot allow option; cancelled — respond manually with yolo off"
+                                    ),
+                                );
+                            }
+                        }
+                    }
+                } else {
+                    self.pending_permissions.lock().await.insert(
+                        request_id.clone(),
+                        PendingPermission {
+                            rpc_id: req.id,
+                            options: options.clone(),
                         },
-                        at: Utc::now(),
-                    });
+                    );
+                    if let Some(bus) = &self.event_bus {
+                        bus.emit(ControlEvent::ApprovalRequired {
+                            session_id: self.control_session_id,
+                            request_id,
+                            tool,
+                            summary,
+                            options,
+                            auto_approved: false,
+                            selected_option: None,
+                            at: Utc::now(),
+                        });
+                        bus.emit_status(self.control_session_id, SessionStatus::WaitingApproval)
+                            .await;
+                    }
+                    // Deliberately no response here: the request stays open on the
+                    // wire until respond_approval / cancel / shutdown answers it.
                 }
-                transport.send_response(req.id, outcome).await?;
             }
             // ACP terminal host — required for Grok run_terminal_command.
             m if m.starts_with("terminal/") => {
@@ -1113,48 +1298,6 @@ impl AcpClient {
             }
         }
         Ok(())
-    }
-
-    async fn permission_outcome(&self, params: &Option<Value>) -> Value {
-        // Pick first allow-ish option if present; else selected generic allow.
-        let options = params
-            .as_ref()
-            .and_then(|p| p.get("options"))
-            .and_then(|o| o.as_array())
-            .cloned()
-            .unwrap_or_default();
-
-        let option_id = options
-            .iter()
-            .find_map(|o| {
-                let id = o.get("optionId").or_else(|| o.get("id"))?.as_str()?;
-                let kind = o
-                    .get("kind")
-                    .or_else(|| o.get("name"))
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    .to_lowercase();
-                if kind.contains("allow") || kind.contains("approve") || kind.contains("yes") {
-                    Some(id.to_string())
-                } else {
-                    None
-                }
-            })
-            .or_else(|| {
-                options
-                    .first()
-                    .and_then(|o| o.get("optionId").or_else(|| o.get("id")))
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string())
-            })
-            .unwrap_or_else(|| "allow".into());
-
-        json!({
-            "outcome": {
-                "outcome": "selected",
-                "optionId": option_id
-            }
-        })
     }
 
     fn resolve_sandbox_path(&self, path: &str) -> Result<PathBuf> {
@@ -1353,29 +1496,9 @@ impl AcpClient {
                     },
                 );
             }
-            m if m.contains("permission") || m.contains("approval") => {
-                bus.emit(ControlEvent::ApprovalRequired {
-                    session_id: sid,
-                    request_id: params
-                        .get("requestId")
-                        .or_else(|| params.get("id"))
-                        .map(|v| v.to_string())
-                        .unwrap_or_else(|| Uuid::new_v4().to_string()),
-                    tool: params
-                        .get("tool")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("unknown")
-                        .to_string(),
-                    summary: params
-                        .get("summary")
-                        .or_else(|| params.get("description"))
-                        .and_then(|v| v.as_str())
-                        .unwrap_or("approval required")
-                        .to_string(),
-                    at: Utc::now(),
-                });
-                bus.emit_status(sid, SessionStatus::WaitingApproval).await;
-            }
+            // Permission requests arrive as agent→client *requests* and are handled
+            // in handle_agent_request; permission-flavored notifications are just
+            // informational, so let them fall through to Raw.
             _ => {
                 bus.emit(ControlEvent::Raw {
                     session_id: Some(sid),
@@ -1685,6 +1808,94 @@ impl AcpClient {
     }
 }
 
+/// Parse the options array of a `session/request_permission` request.
+fn parse_permission_options(params: &Option<Value>) -> Vec<PermissionOptionInfo> {
+    params
+        .as_ref()
+        .and_then(|p| p.get("options"))
+        .and_then(|o| o.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|o| {
+                    let id = o
+                        .get("optionId")
+                        .or_else(|| o.get("id"))
+                        .and_then(|v| v.as_str())?
+                        .to_string();
+                    let kind = o
+                        .get("kind")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("")
+                        .to_string();
+                    let label = o
+                        .get("name")
+                        .or_else(|| o.get("label"))
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                        .unwrap_or_else(|| if kind.is_empty() { id.clone() } else { kind.clone() });
+                    Some(PermissionOptionInfo { id, kind, label })
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Pick the option yolo mode auto-selects: a one-shot allow, never `allow_always`
+/// (selecting it would flip the agent itself into permanent always-allow mode).
+fn pick_auto_approve_option(options: &[PermissionOptionInfo]) -> Option<String> {
+    let is_always = |o: &PermissionOptionInfo| {
+        o.kind.eq_ignore_ascii_case("allow_always")
+            || o.kind.eq_ignore_ascii_case("allowalways")
+            || o.label.to_lowercase().contains("always")
+    };
+    let is_reject = |o: &PermissionOptionInfo| {
+        let k = o.kind.to_lowercase();
+        k.contains("reject") || k.contains("deny") || k.contains("cancel")
+    };
+
+    options
+        .iter()
+        .find(|o| o.kind.eq_ignore_ascii_case("allow_once") || o.kind.eq_ignore_ascii_case("allowonce"))
+        .or_else(|| {
+            options
+                .iter()
+                .find(|o| o.kind.to_lowercase().starts_with("allow") && !is_always(o))
+        })
+        .or_else(|| {
+            options.iter().find(|o| {
+                let l = o.label.to_lowercase();
+                (l.contains("allow") || l.contains("approve") || l.contains("yes"))
+                    && !is_always(o)
+                    && !is_reject(o)
+            })
+        })
+        .or_else(|| options.iter().find(|o| !is_always(o) && !is_reject(o)))
+        .map(|o| o.id.clone())
+}
+
+/// Human-readable one-liner for the approval card body.
+fn permission_summary(params: &Option<Value>, tool: &str) -> String {
+    let detail = params
+        .as_ref()
+        .and_then(|p| p.get("toolCall"))
+        .and_then(|t| {
+            t.get("command")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+                .or_else(|| t.get("rawInput").map(|v| v.to_string()))
+        })
+        .unwrap_or_default();
+    let mut s = if detail.is_empty() {
+        format!("{tool} requests permission")
+    } else {
+        format!("{tool}: {detail}")
+    };
+    if s.chars().count() > 200 {
+        s = s.chars().take(200).collect::<String>() + "…";
+    }
+    s
+}
+
 /// Pull plain text from ACP ContentBlock shapes (and common variants).
 fn extract_text_content(content: Option<&Value>) -> Option<String> {
     let content = content?;
@@ -1742,6 +1953,7 @@ fn extract_agent_text(update: &Value) -> Option<String> {
 
 impl AcpClient {
     pub async fn shutdown(&self) -> Result<()> {
+        self.drain_pending_permissions().await;
         let _ = self.cancel().await;
         let mut child_guard = self.child.lock().await;
         if let Some(mut child) = child_guard.take() {
@@ -1781,6 +1993,86 @@ mod tests {
         let c = AcpClient::mock_for_tests("sess-1", None);
         let err = c.send_prompt("   ").await.unwrap_err();
         assert!(matches!(err, AcpError::Protocol(_)));
+    }
+
+    #[test]
+    fn auto_approve_prefers_allow_once_never_always() {
+        let opts = parse_permission_options(&Some(json!({
+            "options": [
+                { "optionId": "always", "kind": "allow_always", "name": "Always allow" },
+                { "optionId": "once", "kind": "allow_once", "name": "Allow once" },
+                { "optionId": "no", "kind": "reject_once", "name": "Deny" }
+            ]
+        })));
+        assert_eq!(pick_auto_approve_option(&opts).as_deref(), Some("once"));
+
+        let only_always = parse_permission_options(&Some(json!({
+            "options": [
+                { "optionId": "always", "kind": "allow_always", "name": "Always allow" },
+                { "optionId": "no", "kind": "reject_once", "name": "Deny" }
+            ]
+        })));
+        assert_eq!(pick_auto_approve_option(&only_always), None);
+    }
+
+    #[test]
+    fn parses_option_field_variants() {
+        let opts = parse_permission_options(&Some(json!({
+            "options": [
+                { "id": "a", "kind": "allow_once" },
+                { "optionId": "b", "label": "Deny it" }
+            ]
+        })));
+        assert_eq!(opts.len(), 2);
+        assert_eq!(opts[0].id, "a");
+        assert_eq!(opts[0].label, "allow_once");
+        assert_eq!(opts[1].id, "b");
+        assert_eq!(opts[1].label, "Deny it");
+    }
+
+    #[tokio::test]
+    async fn respond_approval_unknown_request_errors() {
+        let c = AcpClient::mock_for_tests("sess-1", None);
+        let err = c.respond_approval("nope", Some("allow")).await.unwrap_err();
+        assert!(matches!(err, AcpError::Protocol(_)));
+    }
+
+    #[tokio::test]
+    async fn respond_approval_is_single_shot() {
+        let c = AcpClient::mock_for_tests("sess-1", None);
+        c.pending_permissions.lock().await.insert(
+            "42".into(),
+            PendingPermission {
+                rpc_id: json!(42),
+                options: vec![PermissionOptionInfo {
+                    id: "allow".into(),
+                    kind: "allow_once".into(),
+                    label: "Allow once".into(),
+                }],
+            },
+        );
+        c.respond_approval("42", Some("allow")).await.unwrap();
+        let err = c.respond_approval("42", Some("allow")).await.unwrap_err();
+        assert!(matches!(err, AcpError::Protocol(_)));
+    }
+
+    #[tokio::test]
+    async fn respond_approval_rejects_unknown_option_and_keeps_pending() {
+        let c = AcpClient::mock_for_tests("sess-1", None);
+        c.pending_permissions.lock().await.insert(
+            "7".into(),
+            PendingPermission {
+                rpc_id: json!(7),
+                options: vec![PermissionOptionInfo {
+                    id: "allow".into(),
+                    kind: "allow_once".into(),
+                    label: "Allow once".into(),
+                }],
+            },
+        );
+        assert!(c.respond_approval("7", Some("bogus")).await.is_err());
+        // Still answerable with a valid option after the bad attempt.
+        c.respond_approval("7", Some("allow")).await.unwrap();
     }
 
     #[test]

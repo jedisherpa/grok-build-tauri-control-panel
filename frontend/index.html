@@ -81,32 +81,35 @@
       <main class="col col-center">
         <header class="col-header center-header">
           <div class="cwd-block">
-            <div class="cwd-line">
-              <span class="muted">cwd</span>
-              <input id="cwd" type="text" spellcheck="false" placeholder="/absolute/project/path" />
-              <button id="btn-new-folder" class="btn ghost" type="button" title="Create a new project folder">+ Folder</button>
-            </div>
-            <div id="new-folder-panel" class="new-folder-panel" style="display:none">
-              <div class="new-folder-row">
-                <input id="new-folder-name" type="text" spellcheck="false" placeholder="project-name" autocomplete="off" />
-                <button id="btn-create-folder" class="btn primary" type="button">Create</button>
-                <button id="btn-cancel-folder" class="btn ghost" type="button">Cancel</button>
+            <input id="cwd" type="hidden" />
+            <button id="project-chip" class="project-chip" type="button" title="Choose project folder">
+              <span class="chip-icon" aria-hidden="true"></span>
+              <span id="project-chip-name">choose project</span>
+              <span class="chip-caret" aria-hidden="true">▾</span>
+            </button>
+            <div id="project-menu" class="project-menu" style="display:none">
+              <div class="project-menu-label muted">Recent projects</div>
+              <div id="project-recents" class="project-recents">
+                <div class="empty-hint">No recent projects</div>
               </div>
-              <div class="suggest-label muted">Suggestions · philosophers &amp; mystics</div>
-              <div id="folder-suggestions" class="folder-suggestions"></div>
+              <div class="project-menu-row">
+                <button id="btn-browse-folder" class="btn ghost" type="button">Browse…</button>
+                <button id="btn-new-folder" class="btn ghost" type="button">New folder…</button>
+              </div>
+              <div class="project-menu-row">
+                <input id="project-path-input" type="text" spellcheck="false" placeholder="/absolute/project/path" />
+                <button id="btn-project-path-set" class="btn primary" type="button">Set</button>
+              </div>
+              <div id="new-folder-panel" class="new-folder-panel" style="display:none">
+                <div class="new-folder-row">
+                  <input id="new-folder-name" type="text" spellcheck="false" placeholder="project-name" autocomplete="off" />
+                  <button id="btn-create-folder" class="btn primary" type="button">Create</button>
+                  <button id="btn-cancel-folder" class="btn ghost" type="button">Cancel</button>
+                </div>
+                <div class="suggest-label muted">Suggestions · philosophers &amp; mystics</div>
+                <div id="folder-suggestions" class="folder-suggestions"></div>
+              </div>
             </div>
-          </div>
-          <div class="header-actions">
-            <label class="toggle" title="Plan mode">
-              <input id="plan-mode" type="checkbox" checked />
-              <span>plan</span>
-            </label>
-            <label class="toggle" title="Always approve tools">
-              <input id="always-approve" type="checkbox" />
-              <span>yolo</span>
-            </label>
-            <button id="btn-start-acp" class="btn primary">Start</button>
-            <button id="btn-cancel" class="btn danger ghost">Cancel</button>
           </div>
         </header>
 
@@ -163,6 +166,26 @@
                 spellcheck="false"
               ></textarea>
               <button id="btn-send" class="btn primary">Send</button>
+            </div>
+            <div class="composer-bar">
+              <div class="composer-agent">
+                <select id="agent-backend" title="Agent backend"></select>
+                <span class="composer-sep" aria-hidden="true">·</span>
+                <select id="agent-model" title="Model"></select>
+                <input
+                  id="agent-model-custom"
+                  type="text"
+                  spellcheck="false"
+                  placeholder="custom model id"
+                  style="display:none"
+                />
+              </div>
+              <div class="mode-group" role="group" aria-label="Session mode">
+                <button id="plan-mode" class="mode-btn active" type="button" aria-pressed="true"
+                  title="Plan mode — agent proposes a plan before acting">plan</button>
+                <button id="always-approve" class="mode-btn yolo" type="button" aria-pressed="false"
+                  title="Yolo — auto-approve all tool calls">yolo</button>
+              </div>
             </div>
           </footer>
         </section>
@@ -234,7 +257,7 @@
               <button id="btn-shutdown" class="btn danger ghost">Shutdown all</button>
             </div>
             <div class="toolbar">
-              <input id="model" type="text" placeholder="model (optional)" />
+              <input id="model" type="text" placeholder="legacy model override (header selector wins)" />
               <input id="mcp-attach-session" type="text" placeholder="MCP attach: github, docs-fs" class="grow" />
             </div>
             <pre id="sys-out" class="mono-pane"></pre>
@@ -296,6 +319,16 @@
             <button id="btn-dev-open" class="btn ghost" title="Open preview in browser" style="display:none">Open</button>
             <button id="btn-dev-folder" class="btn ghost" title="Reveal project folder">Folder</button>
             <button id="btn-dev-stop" class="btn danger ghost" title="Stop dev server" style="display:none">Stop</button>
+          </div>
+        </div>
+
+        <div class="right-block agent-talk-block">
+          <button class="section-label agent-talk-header" id="agent-talk-toggle" type="button" aria-expanded="true">
+            <span>Agent Talk</span>
+            <span class="section-meta muted" id="agent-talk-caret">▾</span>
+          </button>
+          <div id="agent-talk-body" class="agent-talk-body">
+            <canvas id="agent-talk-canvas" height="150"></canvas>
           </div>
         </div>
       </aside>

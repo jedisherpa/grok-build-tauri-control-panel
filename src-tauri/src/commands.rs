@@ -40,6 +40,54 @@ pub async fn get_config(state: State<'_, AppState>) -> Result<GrokConfig, String
     Ok(state.config.read().await.clone())
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackendInfo {
+    pub id: String,
+    pub display_name: String,
+    pub available: bool,
+    /// "binary:/abs/path" | "npx" | null when unavailable.
+    pub via: Option<String>,
+    /// Why the backend is unavailable, when it is.
+    pub reason: Option<String>,
+    pub default_model: String,
+    pub models: Vec<String>,
+    pub supports_headless: bool,
+}
+
+#[tauri::command]
+pub async fn list_backends(state: State<'_, AppState>) -> Result<Vec<BackendInfo>, String> {
+    let cfg = state.config.read().await.clone();
+    Ok(grok_config::Backend::ALL
+        .iter()
+        .map(|&b| {
+            let desc = grok_config::descriptor(b);
+            let (available, via, reason) = match grok_config::resolve_backend(b, &cfg) {
+                Ok(r) => {
+                    let via = match r.via {
+                        grok_config::LaunchVia::Binary => {
+                            format!("binary:{}", r.program.display())
+                        }
+                        grok_config::LaunchVia::Npx => "npx".to_string(),
+                    };
+                    (true, Some(via), None)
+                }
+                Err(e) => (false, None, Some(e.to_string())),
+            };
+            BackendInfo {
+                id: b.key().to_string(),
+                display_name: desc.display_name.to_string(),
+                available,
+                via,
+                reason,
+                default_model: cfg.model_for(b),
+                models: cfg.models_for(b),
+                supports_headless: desc.supports_headless,
+            }
+        })
+        .collect())
+}
+
 #[tauri::command]
 pub async fn save_config(state: State<'_, AppState>, config: GrokConfig) -> Result<(), String> {
     {
@@ -484,13 +532,46 @@ pub async fn send_prompt(
     state: State<'_, AppState>,
     id: String,
     prompt: String,
+    backend: Option<String>,
+    model: Option<String>,
 ) -> Result<(), String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
+
+    let want_backend = backend.as_deref().and_then(grok_config::Backend::from_key);
+    let want_model = model.filter(|m| {
+        let t = m.trim();
+        !t.is_empty() && !t.eq_ignore_ascii_case("default")
+    });
+
+    // Switching backend/model mid-thread: restart the thread under the new
+    // agent. Cross-agent session/load can't work, so the resume ladder lands
+    // on history-only and injects the prior transcript as context.
+    if state.registry.is_live(id) {
+        let snap = state.registry.get_snapshot(id).map_err(err)?;
+        let cur = &snap.metadata;
+        let backend_changed = want_backend.is_some_and(|b| b != cur.backend);
+        let model_changed = want_model
+            .as_deref()
+            .is_some_and(|m| !m.eq_ignore_ascii_case(&cur.model) && cur.model != "mock");
+        if backend_changed || (model_changed && cur.mode == grok_control_core::AgentMode::Acp) {
+            let label = format!(
+                "🔀 switching to {} · {} — prior chat carries over as context",
+                want_backend.unwrap_or(cur.backend).key(),
+                want_model.clone().unwrap_or_else(|| cur.model.clone()),
+            );
+            persist_session(&state, id).await;
+            state.registry.remove_session(id).await.map_err(err)?;
+            let _ = state
+                .persistence
+                .append_message(id, "system", &label, Utc::now());
+            resume_saved_session(&state, id, want_backend, want_model.clone()).await?;
+        }
+    }
 
     // Saved threads after reboot have history in SQLite but no live ACP process.
     // Auto-resume so "Send" picks up the same thread id + transcript.
     if !state.registry.is_live(id) {
-        resume_saved_session(&state, id).await?;
+        resume_saved_session(&state, id, want_backend, want_model).await?;
     }
 
     let prompt_len = prompt.len();
@@ -512,7 +593,15 @@ pub async fn send_prompt(
 
 /// Bring a SQLite thread back online under the same id.
 /// Ladder: session/load → session/resume → session/new + transcript inject.
-async fn resume_saved_session(state: &AppState, id: Uuid) -> Result<(), String> {
+/// Overrides switch the thread to a different backend/model; a backend switch
+/// drops the prior ACP session id (it belongs to another agent) so the ladder
+/// goes straight to history-only transcript injection.
+async fn resume_saved_session(
+    state: &AppState,
+    id: Uuid,
+    override_backend: Option<grok_config::Backend>,
+    override_model: Option<String>,
+) -> Result<(), String> {
     let rec = state
         .persistence
         .get_session(id)
@@ -534,11 +623,17 @@ async fn resume_saved_session(state: &AppState, id: Uuid) -> Result<(), String> 
     } else {
         grok_control_core::AgentMode::Acp
     };
-    opts.model = if rec.model.is_empty() {
-        None
-    } else {
-        Some(rec.model.clone())
-    };
+    let recorded_backend = extract_backend_from_meta(&rec.metadata_json);
+    opts.backend = override_backend.unwrap_or(recorded_backend);
+    let backend_switched = opts.backend != recorded_backend;
+    opts.model = override_model.or_else(|| {
+        if rec.model.is_empty() || backend_switched {
+            // Old model id belongs to the other vendor; let config pick.
+            None
+        } else {
+            Some(rec.model.clone())
+        }
+    });
     opts.worktree = rec.worktree.clone();
     opts.plan_mode = true;
     opts.mcp_server_names = extract_mcp_from_meta(&rec.metadata_json);
@@ -558,7 +653,12 @@ async fn resume_saved_session(state: &AppState, id: Uuid) -> Result<(), String> 
 
     let transcript_context = build_transcript_context(state, id);
     let connect_opts = grok_control_core::ConnectOpts {
-        resume_acp_session_id: rec.acp_session_id.clone().filter(|s| !s.is_empty()),
+        // A prior ACP session id from another agent can't be loaded/resumed.
+        resume_acp_session_id: if backend_switched {
+            None
+        } else {
+            rec.acp_session_id.clone().filter(|s| !s.is_empty())
+        },
         transcript_context: transcript_context.clone(),
     };
 
@@ -665,12 +765,12 @@ pub async fn respond_approval(
     state: State<'_, AppState>,
     id: String,
     request_id: String,
-    approved: bool,
+    option_id: Option<String>,
 ) -> Result<(), String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
     state
         .registry
-        .respond_approval(id, &request_id, approved)
+        .respond_approval(id, &request_id, option_id.as_deref())
         .await
         .map_err(err)
 }
@@ -1156,6 +1256,7 @@ fn build_thread_list(state: &AppState) -> Vec<ThreadDto> {
             cwd: m.cwd,
             mode: mode.into(),
             model: m.model,
+            backend: m.backend.key().to_string(),
             status,
             live: true,
             message_count: msg_count,
@@ -1179,11 +1280,13 @@ fn build_thread_list(state: &AppState) -> Vec<ThreadDto> {
                 other => other.to_string(),
             };
             let mcp = extract_mcp_from_meta(&rec.metadata_json);
+            let backend = extract_backend_from_meta(&rec.metadata_json);
             out.push(ThreadDto {
                 id: rec.id.to_string(),
                 cwd: rec.cwd,
                 mode: rec.mode,
                 model: rec.model,
+                backend: backend.key().to_string(),
                 status,
                 live: false,
                 message_count: rec.message_count,
@@ -1199,6 +1302,17 @@ fn build_thread_list(state: &AppState) -> Vec<ThreadDto> {
 
     out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     out
+}
+
+fn extract_backend_from_meta(json: &str) -> grok_config::Backend {
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|v| {
+            v.pointer("/metadata/backend")
+                .and_then(|b| b.as_str())
+                .and_then(grok_config::Backend::from_key)
+        })
+        .unwrap_or_default()
 }
 
 fn extract_mcp_from_meta(json: &str) -> Vec<String> {
@@ -1229,13 +1343,14 @@ pub fn persist_control_event(db: &grok_persistence::Persistence, ev: &ControlEve
             if lower.starts_with("prompt sent") || lower == "turn complete" {
                 return Ok(());
             }
-            let kind = if text.starts_with('💭') {
-                "thought"
-            } else {
-                "agent"
+            // Keep the chunk's own spacing — these are streaming deltas and
+            // append_message_merged concatenates them into one row.
+            let (kind, body) = match text.strip_prefix('💭') {
+                Some(rest) => ("thought", rest),
+                None => ("agent", text.as_str()),
             };
-            let body = text.strip_prefix('💭').unwrap_or(text).trim_start();
-            db.append_message(*session_id, kind, body, *at).map(|_| ())
+            db.append_message_merged(*session_id, kind, body, *at, 10)
+                .map(|_| ())
         }
         ToolCall { session_id, event } => {
             let payload = serde_json::json!({
@@ -1276,17 +1391,46 @@ pub fn persist_control_event(db: &grok_persistence::Persistence, ev: &ControlEve
             session_id,
             tool,
             summary,
+            auto_approved,
             at,
             ..
         } => {
-            let _ = db.update_session_status(*session_id, "waitingapproval");
-            db.append_message(
-                *session_id,
-                "system",
-                format!("approval required: {tool} — {summary}"),
-                *at,
-            )
-            .map(|_| ())
+            if *auto_approved {
+                db.append_message(
+                    *session_id,
+                    "system",
+                    format!("auto-approved (yolo): {tool}"),
+                    *at,
+                )
+                .map(|_| ())
+            } else {
+                let _ = db.update_session_status(*session_id, "waitingapproval");
+                db.append_message(
+                    *session_id,
+                    "system",
+                    format!("approval required: {tool} — {summary}"),
+                    *at,
+                )
+                .map(|_| ())
+            }
+        }
+        ApprovalResolved {
+            session_id,
+            option_id,
+            cancelled,
+            at,
+            ..
+        } => {
+            let _ = db.update_session_status(*session_id, "running");
+            let body = if *cancelled {
+                "approval cancelled".to_string()
+            } else {
+                format!(
+                    "approval granted: {}",
+                    option_id.as_deref().unwrap_or("selected")
+                )
+            };
+            db.append_message(*session_id, "system", body, *at).map(|_| ())
         }
         Error {
             session_id: Some(session_id),

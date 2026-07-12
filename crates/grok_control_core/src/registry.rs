@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use grok_acp::{AcpClient, AcpClientConfig, AcpSpawnOptions, BrainMode, ConnectOpts};
 use grok_cli_wrapper::{GrokCli, HeadlessSpawnOptions};
-use grok_config::GrokConfig;
+use grok_config::{Backend, GrokConfig, ResolvedBackend, descriptor, resolve_backend};
 use grok_events::{EventBus, SessionStatus};
 
 use crate::error::{CoreError, Result};
@@ -115,11 +115,23 @@ impl SessionRegistry {
             warn!("spawning with always_approve=true — elevated trust mode");
         }
 
+        let backend = opts.backend;
         let model = opts
             .model
             .clone()
-            .unwrap_or_else(|| cfg.default_model.clone());
-        let binary = cfg.resolve_grok_binary()?;
+            .unwrap_or_else(|| cfg.model_for(backend));
+        // Mock threads need no binary; headless resolves via grok_cli.
+        let needs_binary =
+            matches!(opts.mode, AgentMode::Acp) && !model.eq_ignore_ascii_case("mock");
+        let resolved: Option<ResolvedBackend> = if needs_binary {
+            Some(resolve_backend(backend, &cfg)?)
+        } else {
+            None
+        };
+        let backend_env_cfg = cfg
+            .backend_config(backend)
+            .map(|c| c.env.clone())
+            .unwrap_or_default();
         drop(cfg);
 
         let now = Utc::now();
@@ -129,6 +141,7 @@ impl SessionRegistry {
             cwd: cwd.to_string(),
             worktree: opts.worktree.clone(),
             model: model.clone(),
+            backend,
             mode: opts.mode,
             status: SessionStatus::Starting,
             plan_mode: opts.plan_mode && !opts.always_approve,
@@ -174,7 +187,41 @@ impl SessionRegistry {
                         sandbox_profile: opts.sandbox_profile.clone(),
                         extra_env: Vec::new(),
                     };
-                    let client_cfg = AcpClientConfig::new(&binary, cwd_path);
+                    let resolved = resolved.expect("resolved backend for live ACP spawn");
+                    let desc = descriptor(backend);
+
+                    // Forward backend API-key/env vars from the panel process,
+                    // then apply per-backend config env on top.
+                    let mut env: Vec<(String, String)> = Vec::new();
+                    for key in desc.env_passthrough {
+                        if let Ok(v) = std::env::var(key) {
+                            if !v.is_empty() {
+                                env.push(((*key).to_string(), v));
+                            }
+                        }
+                    }
+                    for (k, v) in backend_env_cfg {
+                        env.retain(|(ek, _)| ek != &k);
+                        env.push((k, v));
+                    }
+                    // Some claude adapter versions require the var to be defined;
+                    // empty means "use the CLI login".
+                    if backend == Backend::Claude
+                        && !env.iter().any(|(k, _)| k == "ANTHROPIC_API_KEY")
+                    {
+                        env.push(("ANTHROPIC_API_KEY".into(), String::new()));
+                    }
+
+                    let mut client_cfg = AcpClientConfig::new(&resolved.program, cwd_path);
+                    client_cfg.args = resolved.args.clone();
+                    client_cfg.env = env;
+                    client_cfg.auth_preference = desc
+                        .auth_preference
+                        .iter()
+                        .map(|s| (*s).to_string())
+                        .collect();
+                    client_cfg.skip_auth_when_unadvertised = desc.skip_auth_when_unadvertised;
+                    client_cfg.backend_label = backend.key().to_string();
                     let client = AcpClient::connect_with(
                         client_cfg,
                         &acp_opts,
@@ -337,7 +384,12 @@ impl SessionRegistry {
         Ok(())
     }
 
-    pub async fn respond_approval(&self, id: Uuid, request_id: &str, approved: bool) -> Result<()> {
+    pub async fn respond_approval(
+        &self,
+        id: Uuid,
+        request_id: &str,
+        option_id: Option<&str>,
+    ) -> Result<()> {
         let client = self
             .sessions
             .get(&id)
@@ -345,7 +397,7 @@ impl SessionRegistry {
             .acp_client
             .clone()
             .ok_or(CoreError::NotAcp)?;
-        client.respond_approval(request_id, approved).await?;
+        client.respond_approval(request_id, option_id).await?;
         if let Some(mut entry) = self.sessions.get_mut(&id) {
             entry.metadata.status = SessionStatus::Running;
             entry.touch();

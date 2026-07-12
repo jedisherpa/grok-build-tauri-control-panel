@@ -1,3 +1,4 @@
+use grok_config::Backend;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -14,6 +15,8 @@ pub enum AgentMode {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct SpawnOptions {
+    /// Which agent backend to spawn (grok | claude | codex).
+    pub backend: Backend,
     pub model: Option<String>,
     pub worktree: Option<String>,
     pub mode: AgentMode,
@@ -38,6 +41,7 @@ pub struct SpawnOptions {
 impl Default for SpawnOptions {
     fn default() -> Self {
         Self {
+            backend: Backend::Grok,
             model: None,
             worktree: None,
             mode: AgentMode::Acp,
@@ -62,6 +66,12 @@ impl SpawnOptions {
         if matches!(self.mode, AgentMode::Headless) && self.prompt.as_ref().map(|p| p.trim().is_empty()).unwrap_or(true)
         {
             return Err("headless mode requires a non-empty prompt".into());
+        }
+        if matches!(self.mode, AgentMode::Headless) && self.backend != Backend::Grok {
+            return Err(format!(
+                "headless mode is grok-only (got backend '{}')",
+                self.backend
+            ));
         }
         if self.always_approve && self.plan_mode {
             // Explicit always_approve wins; plan_mode soft-disabled

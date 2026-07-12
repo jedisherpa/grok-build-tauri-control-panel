@@ -109,6 +109,8 @@ body {
   margin-bottom: 4px;
   cursor: pointer;
   background: transparent;
+  min-width: 0;
+  overflow: hidden;
 }
 .thread-item:hover, .agent-card:hover { background: var(--bg-soft); }
 .thread-item.selected {
@@ -123,11 +125,19 @@ body {
 .thread-item .meta {
   color: var(--dim); font-size: 10px; margin-top: 3px;
   display: flex; gap: 6px; align-items: center;
+  flex-wrap: wrap; row-gap: 2px; min-width: 0;
+}
+.thread-item .meta > span { white-space: nowrap; }
+/* Last meta row is the cwd path — ellipsize instead of clipping. */
+.thread-item .meta:last-child {
+  display: block; white-space: nowrap;
+  overflow: hidden; text-overflow: ellipsis;
 }
 .badge {
   display: inline-block; font-size: 9px; text-transform: uppercase;
   letter-spacing: 0.04em; padding: 1px 5px; border-radius: 999px;
   border: 1px solid var(--border); color: var(--muted);
+  white-space: nowrap; flex-shrink: 0;
 }
 .badge.running { color: var(--ok); border-color: color-mix(in srgb, var(--ok) 40%, var(--border)); }
 .badge.idle { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 35%, var(--border)); }
@@ -146,6 +156,16 @@ body {
   color: var(--warn);
   border-color: color-mix(in srgb, var(--warn) 40%, var(--border));
   background: color-mix(in srgb, var(--warn) 8%, transparent);
+}
+.badge.backend-claude {
+  color: #d97757;
+  border-color: color-mix(in srgb, #d97757 45%, var(--border));
+  background: color-mix(in srgb, #d97757 8%, transparent);
+}
+.badge.backend-codex {
+  color: #74aa9c;
+  border-color: color-mix(in srgb, #74aa9c 45%, var(--border));
+  background: color-mix(in srgb, #74aa9c 8%, transparent);
 }
 .thread-item.restored { opacity: 0.92; }
 
@@ -224,27 +244,99 @@ body {
   flex-wrap: wrap;
 }
 .cwd-block {
-  flex: 1;
-  min-width: 220px;
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+.project-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  max-width: 460px;
+  background: var(--bg-soft);
+  border: 1px solid var(--border);
+  color: var(--text);
+  border-radius: 999px;
+  padding: 5px 12px;
+  font-family: var(--font);
+  font-size: 12px;
+  cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+.project-chip:hover {
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  background: color-mix(in srgb, var(--accent) 6%, var(--bg-soft));
+}
+.project-chip .chip-icon {
+  width: 7px; height: 7px; border-radius: 2px; flex-shrink: 0;
+  background: var(--accent);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+#project-chip-name {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+  /* Ellipsize from the left so the folder name (path tail) stays visible. */
+  direction: rtl;
+  text-align: left;
+  unicode-bidi: plaintext;
+}
+.project-chip .chip-caret { color: var(--dim); font-size: 10px; flex-shrink: 0; }
+.project-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 60;
+  width: 340px;
+  max-width: 70vw;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+  padding: 10px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
 }
-.cwd-line {
-  display: flex; align-items: center; gap: 8px; width: 100%;
-  font-family: var(--font); font-size: 12px;
+.project-menu-label {
+  font-size: 10.5px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
-.cwd-line input {
+.project-recents { display: flex; flex-direction: column; gap: 2px; max-height: 220px; overflow-y: auto; }
+.project-recent {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 1px;
+  background: transparent;
+  border: none;
+  border-radius: 6px;
+  padding: 6px 8px;
+  cursor: pointer;
+  text-align: left;
+  font-family: var(--font);
+}
+.project-recent:hover { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+.project-recent-name { color: var(--text); font-size: 12px; }
+.project-recent-path {
+  font-size: 10.5px;
+  max-width: 100%;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.project-menu-row { display: flex; gap: 6px; align-items: center; }
+.project-menu-row input {
   flex: 1; min-width: 0;
   background: var(--bg-soft);
   border: 1px solid var(--border);
   color: var(--text);
   border-radius: 6px;
   padding: 6px 8px;
-  font: inherit;
+  font-family: var(--font);
+  font-size: 11.5px;
 }
-#btn-new-folder {
-  flex-shrink: 0;
+#btn-new-folder,
+#btn-browse-folder {
+  flex: 1;
   font-size: 11px;
   padding: 6px 8px;
   white-space: nowrap;
@@ -307,6 +399,68 @@ body {
   background: color-mix(in srgb, var(--accent) 8%, transparent);
 }
 .header-actions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+/* Composer bottom bar: agent picker left, mode pills right */
+.composer-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 6px;
+}
+.composer-agent {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+.composer-agent select,
+.composer-agent input[type="text"] {
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--muted);
+  border-radius: 6px;
+  padding: 3px 6px;
+  font-family: var(--font);
+  font-size: 11.5px;
+  max-width: 180px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.composer-agent select:hover,
+.composer-agent select:focus,
+.composer-agent input[type="text"]:focus {
+  color: var(--text);
+  border-color: var(--border);
+  background: var(--bg);
+  outline: none;
+}
+.composer-agent input[type="text"] { width: 140px; cursor: text; }
+.composer-sep { color: var(--dim); font-size: 11px; }
+.mode-group { display: flex; gap: 4px; flex-shrink: 0; }
+.mode-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--dim);
+  border-radius: 999px;
+  padding: 3px 12px;
+  font-family: var(--font);
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.mode-btn:hover { color: var(--text); border-color: color-mix(in srgb, var(--text) 25%, var(--border)); }
+.mode-btn.active {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 55%, var(--border));
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+}
+.mode-btn.yolo.active {
+  color: var(--err);
+  border-color: color-mix(in srgb, var(--err) 55%, var(--border));
+  background: color-mix(in srgb, var(--err) 10%, transparent);
+}
 .toggle {
   display: flex; align-items: center; gap: 4px;
   color: var(--muted); font-family: var(--font); font-size: 11px;
@@ -355,6 +509,38 @@ body {
 .t-block.term { border-color: color-mix(in srgb, var(--dim) 80%, var(--accent)); }
 .t-block.error { border-color: var(--err); }
 .t-block.plan { border-color: var(--accent); }
+.t-block.approval { border-color: var(--warn); }
+.t-block.approval.pending {
+  background: color-mix(in srgb, var(--warn) 6%, transparent);
+}
+.approval-actions {
+  display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px;
+}
+.approval-btn {
+  font-family: var(--font); font-size: 11px;
+  padding: 4px 12px; border-radius: 6px; cursor: pointer;
+  background: var(--bg-soft); color: var(--text);
+  border: 1px solid var(--border);
+}
+.approval-btn:hover:not(:disabled) {
+  border-color: color-mix(in srgb, var(--accent) 50%, var(--border));
+}
+.approval-btn:disabled { opacity: 0.5; cursor: default; }
+.approval-btn.kind-allow_once {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 45%, var(--border));
+}
+.approval-btn.kind-allow_always {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
+}
+.approval-btn.kind-reject_once, .approval-btn.kind-reject_always, .approval-btn.kind-cancel {
+  color: var(--err);
+  border-color: color-mix(in srgb, var(--err) 40%, var(--border));
+}
+.approval-resolved {
+  margin-top: 6px; font-size: 10px; color: var(--muted);
+}
 .t-block.streaming {
   background: color-mix(in srgb, var(--agent) 4%, transparent);
 }
@@ -388,6 +574,7 @@ body {
 .t-block.tool .t-role { color: var(--tool); }
 .t-block.term .t-role { color: var(--muted); }
 .t-block.error .t-role { color: var(--err); }
+.t-block.approval .t-role { color: var(--warn); }
 
 .t-body {
   white-space: pre-wrap;
@@ -408,6 +595,77 @@ body {
   font-size: 11.5px;
 }
 .t-body.dim { color: var(--muted); }
+
+/* Agent Talk visualizer */
+.agent-talk-block { flex-shrink: 0; }
+.agent-talk-header {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: transparent;
+  border: none;
+  cursor: pointer;
+  font: inherit;
+  color: inherit;
+  padding: 0;
+}
+.agent-talk-header:hover #agent-talk-caret { color: var(--accent); }
+.agent-talk-body {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg) 60%, black);
+  overflow: hidden;
+  margin-top: 6px;
+}
+#agent-talk-canvas { display: block; width: 100%; height: 150px; }
+/* Markdown inside chat bodies */
+.t-body .md-code {
+  display: block;
+  background: color-mix(in srgb, var(--bg) 70%, black);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  margin: 6px 0;
+  overflow-x: auto;
+  font-size: 11.5px;
+  line-height: 1.45;
+}
+.t-body .md-lang {
+  display: block;
+  color: var(--dim);
+  font-size: 10px;
+  margin-bottom: 4px;
+  text-transform: lowercase;
+}
+.t-body .md-inline {
+  background: color-mix(in srgb, var(--accent) 12%, transparent);
+  border: 1px solid color-mix(in srgb, var(--accent) 25%, var(--border));
+  border-radius: 4px;
+  padding: 0 4px;
+  font-size: 11.5px;
+}
+.t-body .md-h { font-weight: 700; color: var(--accent); }
+.term-toggle {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--dim);
+  border-radius: 5px;
+  padding: 0 6px;
+  font-family: var(--font);
+  font-size: 10px;
+  cursor: pointer;
+  vertical-align: middle;
+}
+.term-toggle:hover { color: var(--accent); border-color: color-mix(in srgb, var(--accent) 40%, var(--border)); }
+.t-body .md-quote {
+  color: var(--muted);
+  border-left: 2px solid var(--border);
+  padding-left: 8px;
+  font-style: italic;
+}
+.t-body a { color: var(--accent); text-decoration: underline; }
+.t-body strong { font-weight: 700; }
 .t-time { color: var(--dim); font-size: 10px; margin-top: 4px; }
 
 /* Live typing caret while agent speech streams */

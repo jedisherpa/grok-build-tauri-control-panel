@@ -19,6 +19,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
+        .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             let app_handle = app.handle().clone();
             let state = tauri::async_runtime::block_on(AppState::initialize())?;
@@ -65,6 +66,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::discover_environment,
+            commands::list_backends,
             commands::get_config,
             commands::save_config,
             commands::capture_baseline,

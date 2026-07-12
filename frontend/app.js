@@ -250,6 +250,7 @@ function flashBoomThenIdle(ms, sid = null) {
 }
 
 function updateBombChrome() {
+  if (typeof updateSendButton === "function") updateSendButton();
   const view = P.formatPresence(state.turn, {
     now: Date.now(),
     phraseIndex: state.phraseIndex,
@@ -498,6 +499,47 @@ function escapeHtml(s) {
     .replace(/"/g, "&quot;");
 }
 
+/// Minimal markdown → HTML for chat bodies. Everything is HTML-escaped first;
+/// only the tags we emit ourselves survive. CSP forbids CDN renderers.
+function renderMarkdown(src) {
+  const codeBlocks = [];
+  // Pull fenced code blocks out before any inline formatting.
+  let text = String(src).replace(/```(\w*)[ \t]*\n?([\s\S]*?)```/g, (_, lang, code) => {
+    const label = lang ? `<span class="md-lang">${escapeHtml(lang)}</span>` : "";
+    codeBlocks.push(
+      `<pre class="md-code">${label}<code>${escapeHtml(code.replace(/\n$/, ""))}</code></pre>`
+    );
+    return `\u0000${codeBlocks.length - 1}\u0000`;
+  });
+  text = escapeHtml(text);
+  // Inline code
+  text = text.replace(/`([^`\n]+)`/g, '<code class="md-inline">$1</code>');
+  // Bold / italic
+  text = text.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+  text = text.replace(/(^|[\s(])\*([^*\n]+)\*/g, "$1<em>$2</em>");
+  // Links — only http(s), escaped upstream
+  text = text.replace(
+    /\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g,
+    '<a href="$2" target="_blank" rel="noopener">$1</a>'
+  );
+  // Line-level: headings, bullets, blockquotes
+  text = text
+    .split("\n")
+    .map((line) => {
+      const h = line.match(/^#{1,6}\s+(.*)$/);
+      if (h) return `<span class="md-h">${h[1]}</span>`;
+      const b = line.match(/^(\s*)[-*]\s+(.*)$/);
+      if (b) return `${b[1]}• ${b[2]}`;
+      const q = line.match(/^&gt;\s?(.*)$/);
+      if (q) return `<span class="md-quote">${q[1]}</span>`;
+      return line;
+    })
+    .join("\n");
+  // Restore code blocks (strip surrounding blank lines — pre has its own box)
+  text = text.replace(/\n?\u0000(\d+)\u0000\n?/g, (_, i) => codeBlocks[+i] || "");
+  return text;
+}
+
 function toastError(e) {
   const msg = e?.message || String(e);
   pushEvent(msg, "err", "error", { force: true, milestone: true });
@@ -531,35 +573,49 @@ function appendTranscript(sessionId, role, body, at = nowIso(), opts = {}) {
   const stream = !!opts.stream;
 
   // Coalesce streaming agent/thought/term chunks into one live block (TTY feel).
+  // Interleaved ACP noise (term/tool/plan rows) must not split a response —
+  // look back past it to find the still-streaming block of the same role.
   if (stream && (role === "agent" || role === "thought" || role === "term") && list.length) {
-    const last = list[list.length - 1];
-    if (last.role === role && last.streaming) {
-      // term lines: newline-join; agent speech: append raw chunks
-      if (role === "term") {
-        last.body = (last.body || "") + (last.body ? "\n" : "") + text;
-      } else {
-        last.body = (last.body || "") + text;
+    for (let i = list.length - 1, hops = 0; i >= 0 && hops < 8; i--, hops++) {
+      const entry = list[i];
+      if (entry.role === role && entry.streaming) {
+        if (role === "term") {
+          entry.body = (entry.body || "") + (entry.body ? "\n" : "") + text;
+        } else {
+          entry.body = (entry.body || "") + text;
+        }
+        entry.at = at;
+        if (sessionId === state.selectedSession) {
+          if (i === list.length - 1) {
+            patchLastTranscriptBody(entry);
+          } else {
+            renderTranscript();
+          }
+        }
+        return;
       }
-      last.at = at;
-      if (sessionId === state.selectedSession) {
-        patchLastTranscriptBody(last);
-      }
-      return;
+      // Skip over noise rows that landed mid-stream; stop at real content.
+      if (entry.role === "term" || entry.role === "tool" || entry.role === "plan") continue;
+      break;
     }
   }
 
-  // Non-stream after stream → close previous stream bubble.
-  if (!stream && list.length) {
-    const last = list[list.length - 1];
-    if (last.streaming) last.streaming = false;
+  // Non-stream after stream → close previous stream bubble. Noise rows
+  // (term/tool/plan) don't end a response that is still streaming.
+  if (!stream && list.length && role !== "term" && role !== "tool" && role !== "plan") {
+    for (const entry of list.slice(-8)) {
+      if (entry.streaming) entry.streaming = false;
+    }
   }
 
-  list.push({
+  const entry = {
     role,
     body: text,
     at,
     streaming: stream && (role === "agent" || role === "thought" || role === "term"),
-  });
+  };
+  if (opts.meta) entry.meta = opts.meta;
+  list.push(entry);
   // Cap memory so huge TTY logs stay snappy
   if (list.length > 2000) {
     list.splice(0, list.length - 2000);
@@ -570,6 +626,21 @@ function appendTranscript(sessionId, role, body, at = nowIso(), opts = {}) {
 }
 
 /** Fast path: update only the last streaming block. */
+/// Pin the transcript to the bottom reliably: once now, once after layout,
+/// and once more after async content (bomb sprites) settles height.
+function scrollTranscriptBottom() {
+  const root = $("transcript");
+  if (!root) return;
+  const pin = () => {
+    root.scrollTop = root.scrollHeight;
+  };
+  pin();
+  requestAnimationFrame(() => {
+    pin();
+    setTimeout(pin, 60);
+  });
+}
+
 function patchLastTranscriptBody(entry) {
   const root = $("transcript");
   if (!root) {
@@ -596,7 +667,7 @@ function patchLastTranscriptBody(entry) {
   body.textContent = entry.body || "";
   if (time) time.textContent = shortTime(entry.at || "");
   last.classList.toggle("streaming", !!entry.streaming);
-  root.scrollTop = root.scrollHeight;
+  scrollTranscriptBottom();
 }
 
 function shortTime(iso) {
@@ -617,6 +688,7 @@ function termPrefix(role) {
   if (role === "plan") return "plan";
   if (role === "error") return "err";
   if (role === "term") return "acp";
+  if (role === "approval") return "ask";
   return "sys";
 }
 
@@ -645,10 +717,28 @@ function roleBombMood(role) {
   if (role === "error") return "error";
   if (role === "term") return "running";
   if (role === "system") return "ready";
+  if (role === "approval") return "wait";
   return "idle";
 }
 
-function renderTranscript() {
+/** Mark an approval card resolved and refresh it if visible. */
+function resolveApprovalEntry(sessionId, requestId, resolution) {
+  if (!sessionId || !requestId) return;
+  const list = getTranscript(sessionId);
+  for (let i = list.length - 1; i >= 0; i--) {
+    const e = list[i];
+    if (e.role === "approval" && e.meta?.requestId === requestId) {
+      e.meta.resolved = resolution;
+      break;
+    }
+  }
+  if (sessionId === state.selectedSession) {
+    renderTranscript({ keepScroll: true });
+  }
+}
+
+function renderTranscript({ keepScroll = false } = {}) {
+  const prevScroll = keepScroll ? $("transcript")?.scrollTop : null;
   const root = $("transcript");
   const sid = state.selectedSession;
   if (!sid) {
@@ -669,8 +759,9 @@ function renderTranscript() {
   }
 
   const sess = state.sessions.find((s) => s.id === sid);
+  const backendName = String(sess?.backend || "grok").toLowerCase();
   $("composer-session").textContent = `${shortId(sid)} · ${sess?.status || "?"}`;
-  $("composer-model").textContent = sess?.model || "";
+  $("composer-model").textContent = [backendName, sess?.model].filter(Boolean).join(" · ");
 
   const entries = getTranscript(sid);
   if (!entries.length) {
@@ -698,17 +789,71 @@ function renderTranscript() {
 
   root.innerHTML =
     entries
-      .map((e) => {
+      .map((e, idx) => {
         const role = e.role || "system";
-        const label = termPrefix(role);
+        // Agent speech is labeled by which agent is talking, not a fixed "grok".
+        const label = role === "agent" ? backendName : termPrefix(role);
         const streamCls = e.streaming ? " streaming" : "";
+        // Agent-authored text renders markdown; everything else stays literal.
+        let body =
+          role === "agent" || role === "thought" || role === "user"
+            ? renderMarkdown(e.body)
+            : escapeHtml(e.body);
+        if (role === "approval") {
+          const m = e.meta || {};
+          const opts = Array.isArray(m.options) ? m.options : [];
+          const buttons = opts
+            .map(
+              (o) => `<button class="approval-btn kind-${escapeHtml(String(o.kind || "other"))}"
+  data-sid="${escapeHtml(String(m.sid || sid))}"
+  data-request-id="${escapeHtml(String(m.requestId || ""))}"
+  data-option-id="${escapeHtml(String(o.id))}"${m.resolved ? " disabled" : ""}>${escapeHtml(o.label || o.kind || o.id)}</button>`
+            )
+            .join("");
+          const deny = m.resolved
+            ? ""
+            : `<button class="approval-btn kind-cancel"
+  data-sid="${escapeHtml(String(m.sid || sid))}"
+  data-request-id="${escapeHtml(String(m.requestId || ""))}"
+  data-option-id="">Cancel</button>`;
+          const foot = m.resolved
+            ? `<div class="approval-resolved">resolved · ${escapeHtml(String(m.resolved))}</div>`
+            : `<div class="approval-actions">${buttons}${deny}</div>`;
+          return `<div class="t-block approval${m.resolved ? "" : " pending"}">
+  <div class="t-role"><span class="t-ts">${escapeHtml(shortTime(e.at || ""))}</span>${bombHtml("wait", "xs")}<span>${label}</span></div>
+  <div class="t-body">${escapeHtml(e.body)}${foot}</div>
+</div>`;
+        }
+        // Multi-line ACP noise collapses to its first line until expanded.
+        const lines = String(e.body || "").split("\n");
+        if (role === "term" && !e.streaming && lines.length > 1) {
+          if (e.expanded) {
+            body = `${escapeHtml(e.body)}\n<button class="term-toggle" type="button" data-idx="${idx}">▾ collapse</button>`;
+          } else {
+            body = `${escapeHtml(lines[0]).slice(0, 400)} <button class="term-toggle" type="button" data-idx="${idx}">▸ ${lines.length - 1} more line${lines.length > 2 ? "s" : ""}</button>`;
+          }
+        }
         return `<div class="t-block ${escapeHtml(role)}${streamCls}">
   <div class="t-role"><span class="t-ts">${escapeHtml(shortTime(e.at || ""))}</span>${bombHtml(roleBombMood(role), "xs")}<span>${label}</span>${e.streaming ? '<span class="stream-caret" aria-hidden="true"></span>' : ""}</div>
-  <div class="t-body">${escapeHtml(e.body)}</div>
+  <div class="t-body">${body}</div>
 </div>`;
       })
       .join("") + liveHint;
-  root.scrollTop = root.scrollHeight;
+  root.querySelectorAll(".term-toggle").forEach((btn) => {
+    btn.onclick = (ev) => {
+      ev.stopPropagation();
+      const entry = entries[Number(btn.dataset.idx)];
+      if (entry) {
+        entry.expanded = !entry.expanded;
+        renderTranscript({ keepScroll: true });
+      }
+    };
+  });
+  if (keepScroll && prevScroll != null) {
+    root.scrollTop = prevScroll;
+  } else {
+    scrollTranscriptBottom();
+  }
   updateBombChrome();
 }
 
@@ -753,6 +898,11 @@ function renderThreads() {
       const liveTag = live
         ? ""
         : `<span class="badge saved" title="Restored from disk">saved</span>`;
+      const backend = String(s.backend || "grok").toLowerCase();
+      const backendTag =
+        backend === "grok"
+          ? ""
+          : `<span class="badge backend-${escapeHtml(backend)}" title="Agent backend">${escapeHtml(backend)}</span>`;
       const brain = String(s.brainMode || s.brain_mode || "").toLowerCase();
       let brainTag = "";
       if (live && brain === "full_brain") {
@@ -763,7 +913,7 @@ function renderThreads() {
       return `<div class="thread-item ${selected}${live ? "" : " restored"}" data-id="${escapeHtml(id)}">
   <div class="name">${bombHtml(bombMood, "xs")} ${escapeHtml(mode)} · ${escapeHtml(shortId(id))}</div>
   <div class="meta"><span class="badge ${badgeCls}">${bombHtml(bombMood, "xs")}${escapeHtml(status)}</span>
-  ${liveTag}${brainTag}
+  ${liveTag}${backendTag}${brainTag}
   <span>${escapeHtml(isMock ? "mock" : model || "—")}</span>
   ${msgs ? `<span class="muted">${msgs} msg</span>` : ""}</div>
   <div class="meta">${escapeHtml(shortCwd)}</div>
@@ -852,7 +1002,8 @@ async function selectSession(id) {
   }
   renderThreads();
   const sess = state.sessions.find((s) => s.id === id);
-  if (sess?.cwd) $("cwd").value = sess.cwd;
+  if (sess?.cwd) setProjectCwd(sess.cwd, { remember: false });
+  syncSelectorsToSession(sess);
   if (id) await loadTranscriptFromDb(id);
   renderTranscript();
   updateBombChrome();
@@ -941,6 +1092,7 @@ function handleControlEvent(ev) {
     const isThought = raw.startsWith("💭");
     const text = isThought ? raw.replace(/^💭\s*/, "") : raw;
     const role = isThought ? "thought" : "agent";
+    talkNote(sid, isThought ? "think" : "speak", text);
     appendTranscript(sid, role, text, nowIso(), { stream: true });
     if (!sid) return;
     const list = getTranscript(sid);
@@ -973,6 +1125,7 @@ function handleControlEvent(ev) {
     endAgentStream(sid);
     const te = ev.event || ev;
     const tool = te.tool || te.name || "tool";
+    talkNote(sid, "tool", tool);
     const toolId = String(te.id || `${tool}-${Date.now()}`);
     const summary = te.args_summary || te.argsSummary || te.result_summary || te.resultSummary || "";
     const status = te.status || "running";
@@ -1058,8 +1211,10 @@ function handleControlEvent(ev) {
         endAgentStream(sid);
         const p = presenceFor(sid);
         if (P.turnActive(p) || p.replyChars || p.toolCount) {
+          talkNote(sid, "boom");
           flashBoomThenIdle(undefined, sid);
         } else {
+          talkNote(sid, "idle");
           noteTurn("idle", {}, sid);
         }
       } else if (st.includes("run") && !P.turnActive(presenceFor(sid))) {
@@ -1081,12 +1236,20 @@ function handleControlEvent(ev) {
     if (!state.ready) setStatus("error", ev.message || "error");
     if (errSid) endTurnPresence(errSid, "error", ev.message || "error");
   } else if (type === "approval_required" || type === "approvalRequired") {
+    const autoApproved = !!(ev.auto_approved ?? ev.autoApproved);
+    if (autoApproved) {
+      appendTranscript(sid, "term", `auto-approved (yolo) · ${ev.tool || "?"}`);
+      pushEvent(`auto-approved · ${ev.tool || "?"}`, "ok", null, { force: true });
+      return;
+    }
     endAgentStream(sid);
-    appendTranscript(
-      sid,
-      "term",
-      `! approval · ${ev.tool || "?"} — ${ev.summary || ev.request_id || ""}`
-    );
+    appendTranscript(sid, "approval", ev.summary || `${ev.tool || "tool"} requests permission`, nowIso(), {
+      meta: {
+        requestId: ev.request_id || ev.requestId || "",
+        options: ev.options || [],
+        sid,
+      },
+    });
     pushEvent(`approval · ${ev.tool || "?"}`, "err", "wait", { force: true, milestone: true });
     if (sid) {
       noteTurn(
@@ -1098,6 +1261,18 @@ function handleControlEvent(ev) {
         sid
       );
     }
+  } else if (type === "approval_resolved" || type === "approvalResolved") {
+    const requestId = ev.request_id || ev.requestId || "";
+    const cancelled = !!ev.cancelled;
+    resolveApprovalEntry(
+      sid,
+      requestId,
+      cancelled ? "cancelled" : ev.option_id || ev.optionId || "allowed"
+    );
+    pushEvent(`approval ${cancelled ? "cancelled" : "answered"} · ${shortId(sid)}`, "", null, {
+      force: true,
+    });
+    if (sid) noteTurn("run", { note: "Approval resolved" }, sid);
   } else if (type === "raw") {
     const payload = ev.payload || ev;
     if (payload?.channel === "usage" && payload?.totalTokens != null) {
@@ -1282,7 +1457,7 @@ async function refreshStatus() {
   state.ready = !!s.ready;
   setStatus(s.ready ? "ready" : "error", s.message);
   if (s.defaultCwd && !$("cwd").value) {
-    $("cwd").value = s.defaultCwd;
+    setProjectCwd(s.defaultCwd, { remember: false });
     if ($("repo")) $("repo").value = s.defaultCwd;
   }
   if ($("sys-out")) $("sys-out").textContent = JSON.stringify(s, null, 2);
@@ -1411,9 +1586,515 @@ function parseCsv(s) {
     .filter(Boolean);
 }
 
+// ── Agent Talk visualizer (fuse & fireworks) ─────────────────────────────
+// Each live agent is a pixel bomb: fuse burns while it thinks, sparks carry
+// thought fragments, tool calls stamp the casing, and a finished turn pops
+// into a firework whose embers are words from the reply.
+const talk = {
+  agents: new Map(), // sessionId → agent viz state
+  collapsed: localStorage.getItem("bomb.talkCollapsed") === "1",
+  raf: null,
+  lastFrame: 0,
+};
+
+const TALK_COLORS = {
+  grok: "#8be28b",
+  claude: "#d97757",
+  codex: "#74aa9c",
+};
+
+function talkAgent(sessionId) {
+  if (!talk.agents.has(sessionId)) {
+    talk.agents.set(sessionId, {
+      id: sessionId,
+      backend: "grok",
+      phase: "idle", // idle | think | speak | tool | boom
+      fuse: 0, // 0..1 burn progress within current turn
+      sparks: [], // {x,y,vx,vy,life,text?,color}
+      embers: [], // firework word particles
+      toolFlash: null, // {name, life}
+      lastText: "",
+      replyText: "",
+      boomAt: 0,
+    });
+  }
+  return talk.agents.get(sessionId);
+}
+
+function talkFragment(text) {
+  const t = String(text || "").replace(/\s+/g, " ").trim();
+  if (!t) return "";
+  return t.length > 26 ? t.slice(-26) : t;
+}
+
+/// Feed one control-event into the visualizer.
+function talkNote(sessionId, kind, text) {
+  if (!sessionId) return;
+  const a = talkAgent(sessionId);
+  const sess = state.sessions.find((s) => s.id === sessionId);
+  if (sess?.backend) a.backend = String(sess.backend).toLowerCase();
+  const color = TALK_COLORS[a.backend] || TALK_COLORS.grok;
+
+  if (kind === "think" || kind === "speak") {
+    a.phase = kind;
+    a.fuse = Math.min(1, a.fuse + 0.006);
+    a.lastText = talkFragment(text) || a.lastText;
+    if (kind === "speak") a.replyText += ` ${text || ""}`;
+    if (a.sparks.length < 36 && Math.random() < 0.6) {
+      a.sparks.push({
+        x: 0, y: 0,
+        vx: (Math.random() - 0.5) * 26,
+        vy: -22 - Math.random() * 26,
+        life: 1,
+        text: Math.random() < 0.22 ? a.lastText : null,
+        color: kind === "think" ? "#e8b04b" : color,
+      });
+    }
+  } else if (kind === "tool") {
+    a.phase = "tool";
+    a.toolFlash = { name: talkFragment(text).slice(0, 14) || "tool", life: 1 };
+    a.fuse = Math.min(1, a.fuse + 0.02);
+  } else if (kind === "boom") {
+    // Turn finished — firework of reply words.
+    a.phase = "boom";
+    a.boomAt = performance.now();
+    const words = a.replyText.split(/\s+/).filter((w) => w.length > 2).slice(-18);
+    for (const w of words) {
+      const ang = Math.random() * Math.PI * 2;
+      const speed = 30 + Math.random() * 55;
+      a.embers.push({
+        x: 0, y: -6,
+        vx: Math.cos(ang) * speed,
+        vy: Math.sin(ang) * speed - 24,
+        life: 1,
+        text: w.slice(0, 14),
+        color,
+      });
+    }
+    a.replyText = "";
+    a.fuse = 0;
+  } else if (kind === "idle") {
+    if (a.phase !== "boom") a.phase = "idle";
+  }
+  ensureTalkLoop();
+}
+
+function ensureTalkLoop() {
+  if (talk.collapsed || talk.raf) return;
+  talk.lastFrame = performance.now();
+  talk.raf = requestAnimationFrame(talkFrame);
+}
+
+function talkFrame(now) {
+  talk.raf = null;
+  const dt = Math.min(0.05, (now - talk.lastFrame) / 1000);
+  talk.lastFrame = now;
+  const canvas = $("agent-talk-canvas");
+  if (!canvas || talk.collapsed) return;
+  const ctx = canvas.getContext("2d");
+  const wrap = canvas.parentElement;
+  if (canvas.width !== wrap.clientWidth) canvas.width = Math.max(200, wrap.clientWidth);
+  const W = canvas.width;
+  const H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+
+  // Only live agents appear on the bench.
+  const liveIds = new Set(
+    (state.sessions || [])
+      .filter((s) => s.live !== false && !String(s.status || "").includes("saved"))
+      .map((s) => s.id)
+  );
+  for (const id of [...talk.agents.keys()]) {
+    if (!liveIds.has(id)) talk.agents.delete(id);
+  }
+  const agents = [...talk.agents.values()];
+  if (!agents.length) {
+    ctx.fillStyle = "rgba(255,255,255,0.25)";
+    ctx.font = "11px ui-monospace, monospace";
+    ctx.textAlign = "center";
+    ctx.fillText("no live agents — fuses are cold", W / 2, H / 2);
+    return;
+  }
+
+  const slot = W / agents.length;
+  let anyActive = false;
+  agents.forEach((a, i) => {
+    const cx = slot * i + slot / 2;
+    const cy = H - 42;
+    const color = TALK_COLORS[a.backend] || TALK_COLORS.grok;
+    const active = a.phase === "think" || a.phase === "speak" || a.phase === "tool";
+    if (active || a.sparks.length || a.embers.length || a.toolFlash) anyActive = true;
+
+    // Bomb body (pixel-ish) + glow when active.
+    if (active) {
+      ctx.shadowColor = color;
+      ctx.shadowBlur = 14;
+    }
+    ctx.font = "20px system-ui";
+    ctx.textAlign = "center";
+    ctx.globalAlpha = a.phase === "idle" ? 0.55 : 1;
+    ctx.fillText("💣", cx, cy);
+    ctx.shadowBlur = 0;
+    ctx.globalAlpha = 1;
+
+    // Label.
+    ctx.font = "9px ui-monospace, monospace";
+    ctx.fillStyle = color;
+    ctx.fillText(a.backend, cx, H - 26);
+
+    // Fuse: a short curved line whose burn point advances with fuse progress.
+    const fx = cx + 9, fy = cy - 16;
+    ctx.strokeStyle = "rgba(255,255,255,0.28)";
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.moveTo(fx, fy);
+    ctx.quadraticCurveTo(fx + 8, fy - 9, fx + 3, fy - 16);
+    ctx.stroke();
+    if (active) {
+      const t = a.fuse;
+      const bx = fx + 8 * t * (1 - t) * 2 + 3 * t;
+      const by = fy - 9 * t - 7 * t * t;
+      ctx.fillStyle = "#ffd966";
+      ctx.shadowColor = "#ffb84d";
+      ctx.shadowBlur = 8;
+      ctx.beginPath();
+      ctx.arc(bx, by, 2.2 + Math.random() * 1.2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.shadowBlur = 0;
+      // Emit a passive spark sometimes even without new tokens.
+      if (a.sparks.length < 36 && Math.random() < 0.25) {
+        a.sparks.push({
+          x: bx - cx, y: by - cy,
+          vx: (Math.random() - 0.5) * 20,
+          vy: -14 - Math.random() * 18,
+          life: 0.8,
+          text: null,
+          color: "#ffd966",
+        });
+      }
+    }
+
+    // Sparks (thought/speech fragments).
+    for (const s of a.sparks) {
+      s.x += s.vx * dt;
+      s.y += s.vy * dt;
+      s.vy += 26 * dt;
+      s.life -= dt * 0.9;
+      if (s.life <= 0) continue;
+      ctx.globalAlpha = Math.max(0, s.life);
+      if (s.text) {
+        ctx.font = "9px ui-monospace, monospace";
+        ctx.fillStyle = s.color;
+        ctx.textAlign = "center";
+        ctx.fillText(`“${s.text}”`, cx + s.x, cy + s.y - 14);
+      } else {
+        ctx.fillStyle = s.color;
+        ctx.fillRect(cx + s.x, cy + s.y - 14, 2, 2);
+      }
+      ctx.globalAlpha = 1;
+    }
+    a.sparks = a.sparks.filter((s) => s.life > 0);
+
+    // Tool stamp flash.
+    if (a.toolFlash) {
+      a.toolFlash.life -= dt * 1.4;
+      if (a.toolFlash.life > 0) {
+        ctx.globalAlpha = Math.min(1, a.toolFlash.life + 0.2);
+        ctx.font = "10px ui-monospace, monospace";
+        ctx.fillStyle = "#7db7ff";
+        ctx.textAlign = "center";
+        ctx.fillText(`🔨 ${a.toolFlash.name}`, cx, cy - 30);
+        ctx.globalAlpha = 1;
+      } else {
+        a.toolFlash = null;
+      }
+    }
+
+    // Firework embers (reply words).
+    for (const e of a.embers) {
+      e.x += e.vx * dt;
+      e.y += e.vy * dt;
+      e.vy += 34 * dt;
+      e.life -= dt * 0.55;
+      if (e.life <= 0) continue;
+      ctx.globalAlpha = Math.max(0, e.life);
+      ctx.font = "9px ui-monospace, monospace";
+      ctx.fillStyle = e.color;
+      ctx.textAlign = "center";
+      ctx.fillText(e.text, cx + e.x, cy + e.y - 10);
+      ctx.globalAlpha = 1;
+    }
+    a.embers = a.embers.filter((e) => e.life > 0);
+    if (a.phase === "boom" && !a.embers.length) a.phase = "idle";
+  });
+
+  // Keep animating while anything moves or burns; else park until next event.
+  if (anyActive) {
+    talk.raf = requestAnimationFrame(talkFrame);
+  }
+}
+
+function wireAgentTalk() {
+  const toggle = $("agent-talk-toggle");
+  const body = $("agent-talk-body");
+  if (!toggle || !body) return;
+  const apply = () => {
+    body.style.display = talk.collapsed ? "none" : "";
+    $("agent-talk-caret").textContent = talk.collapsed ? "▸" : "▾";
+    toggle.setAttribute("aria-expanded", String(!talk.collapsed));
+    if (!talk.collapsed) ensureTalkLoop();
+  };
+  toggle.onclick = () => {
+    talk.collapsed = !talk.collapsed;
+    localStorage.setItem("bomb.talkCollapsed", talk.collapsed ? "1" : "0");
+    apply();
+  };
+  apply();
+}
+
+// ── Project chip (cwd) ────────────────────────────────────────────────────
+const RECENT_PROJECTS_KEY = "bomb.recentProjects";
+
+function recentProjects() {
+  try {
+    const list = JSON.parse(localStorage.getItem(RECENT_PROJECTS_KEY) || "[]");
+    return Array.isArray(list) ? list : [];
+  } catch {
+    return [];
+  }
+}
+
+function setProjectCwd(path, { remember = true } = {}) {
+  const p = String(path || "").trim().replace(/\/+$/, "");
+  $("cwd").value = p;
+  $("project-chip-name").textContent = p || "choose project";
+  $("project-chip").title = p || "Choose project folder";
+  if (p && remember) {
+    const list = [p, ...recentProjects().filter((x) => x !== p)].slice(0, 8);
+    localStorage.setItem(RECENT_PROJECTS_KEY, JSON.stringify(list));
+  }
+}
+
+function renderProjectRecents() {
+  const root = $("project-recents");
+  // Merge saved recents with cwds seen in thread history.
+  const fromThreads = (state.sessions || []).map((s) => s.cwd).filter(Boolean);
+  const seen = new Set();
+  const items = [...recentProjects(), ...fromThreads].filter((p) => {
+    if (!p || seen.has(p)) return false;
+    seen.add(p);
+    return true;
+  });
+  if (!items.length) {
+    root.innerHTML = `<div class="empty-hint">No recent projects</div>`;
+    return;
+  }
+  root.innerHTML = items
+    .slice(0, 8)
+    .map((p) => {
+      const name = p.split("/").filter(Boolean).pop() || p;
+      return `<button class="project-recent" type="button" data-path="${escapeHtml(p)}" title="${escapeHtml(p)}">
+        <span class="project-recent-name">${escapeHtml(name)}</span>
+        <span class="project-recent-path muted">${escapeHtml(p)}</span>
+      </button>`;
+    })
+    .join("");
+  root.querySelectorAll(".project-recent").forEach((el) => {
+    el.onclick = () => {
+      setProjectCwd(el.dataset.path);
+      toggleProjectMenu(false);
+    };
+  });
+}
+
+function toggleProjectMenu(show) {
+  const menu = $("project-menu");
+  const next = show ?? menu.style.display === "none";
+  menu.style.display = next ? "" : "none";
+  if (next) {
+    renderProjectRecents();
+    $("project-path-input").value = $("cwd").value || "";
+  }
+}
+
+function wireProjectChip() {
+  $("project-chip").onclick = (e) => {
+    e.stopPropagation();
+    toggleProjectMenu();
+  };
+  document.addEventListener("click", (e) => {
+    const menu = $("project-menu");
+    if (menu.style.display !== "none" && !menu.contains(e.target) && e.target !== $("project-chip")) {
+      toggleProjectMenu(false);
+    }
+  });
+  $("btn-project-path-set").onclick = () => {
+    const p = $("project-path-input").value.trim();
+    if (p) {
+      setProjectCwd(p);
+      toggleProjectMenu(false);
+    }
+  };
+  $("project-path-input").addEventListener("keydown", (e) => {
+    if (e.key === "Enter") $("btn-project-path-set").click();
+  });
+  $("btn-browse-folder").onclick = async () => {
+    try {
+      const picked = await window.__TAURI__.dialog.open({
+        directory: true,
+        multiple: false,
+        title: "Choose project folder",
+        defaultPath: $("cwd").value || undefined,
+      });
+      if (picked) {
+        setProjectCwd(picked);
+        toggleProjectMenu(false);
+      }
+    } catch (e) {
+      toastError(e);
+    }
+  };
+}
+
+// ── Agent backend / model selection ──────────────────────────────────────
+const CUSTOM_MODEL_VALUE = "__custom__";
+
+// Plan / yolo are mutually exclusive pill toggles; neither = default mode.
+function modeOn(id) {
+  return !!$(id)?.classList.contains("active");
+}
+
+function setMode(id, on) {
+  const el = $(id);
+  if (!el) return;
+  el.classList.toggle("active", on);
+  el.setAttribute("aria-pressed", String(on));
+}
+
+function wireModeButtons() {
+  $("plan-mode")?.addEventListener("click", () => {
+    const next = !modeOn("plan-mode");
+    setMode("plan-mode", next);
+    if (next) setMode("always-approve", false);
+  });
+  $("always-approve")?.addEventListener("click", () => {
+    const next = !modeOn("always-approve");
+    setMode("always-approve", next);
+    if (next) setMode("plan-mode", false);
+  });
+}
+
+function currentBackend() {
+  return $("agent-backend")?.value || "grok";
+}
+
+function currentModel() {
+  const sel = $("agent-model");
+  if (!sel) return null;
+  let model = sel.value;
+  if (model === CUSTOM_MODEL_VALUE) {
+    model = $("agent-model-custom")?.value?.trim?.() || "";
+  }
+  if (!model || model.toLowerCase() === "default") {
+    // Legacy free-text field still honored when the selector is untouched.
+    const legacy = $("model")?.value?.trim?.() || "";
+    return !legacy || legacy.toLowerCase() === "default" ? null : legacy;
+  }
+  return model;
+}
+
+function populateModelSelect(backendInfo) {
+  const sel = $("agent-model");
+  if (!sel || !backendInfo) return;
+  const remembered = localStorage.getItem(`bomb.model.${backendInfo.id}`);
+  const models = backendInfo.models || [];
+  sel.innerHTML =
+    models
+      .map((m) => `<option value="${escapeHtml(m)}">${escapeHtml(m)}</option>`)
+      .join("") + `<option value="${CUSTOM_MODEL_VALUE}">custom…</option>`;
+  const pick =
+    remembered && (models.includes(remembered) || remembered === CUSTOM_MODEL_VALUE)
+      ? remembered
+      : backendInfo.defaultModel || models[0] || CUSTOM_MODEL_VALUE;
+  sel.value = pick;
+  $("agent-model-custom").style.display = sel.value === CUSTOM_MODEL_VALUE ? "" : "none";
+}
+
+/// Mirror the selected thread's backend/model into the header selectors so a
+/// later selector change is an explicit "switch this thread" intent.
+function syncSelectorsToSession(sess) {
+  if (!sess) return;
+  const backendSel = $("agent-backend");
+  const modelSel = $("agent-model");
+  if (!backendSel || !modelSel || !state.backends?.length) return;
+  const backend = String(sess.backend || "grok").toLowerCase();
+  const info = state.backends.find((b) => b.id === backend);
+  if (!info) return;
+  if (backendSel.value !== backend) {
+    backendSel.value = backend;
+    populateModelSelect(info);
+  }
+  const model = sess.model || "";
+  if (model && model !== "mock") {
+    if ([...modelSel.options].some((o) => o.value === model)) {
+      modelSel.value = model;
+      $("agent-model-custom").style.display = "none";
+    } else {
+      modelSel.value = CUSTOM_MODEL_VALUE;
+      $("agent-model-custom").value = model;
+      $("agent-model-custom").style.display = "";
+    }
+  }
+}
+
+async function loadBackends() {
+  const sel = $("agent-backend");
+  if (!sel) return;
+  try {
+    state.backends = await invoke("list_backends");
+  } catch (e) {
+    console.warn("list_backends failed", e);
+    state.backends = [
+      { id: "grok", displayName: "Grok", available: true, models: [], defaultModel: "" },
+    ];
+  }
+  sel.innerHTML = state.backends
+    .map((b) => {
+      const label = b.available ? b.displayName : `${b.displayName} — unavailable`;
+      const title = b.available
+        ? b.via === "npx"
+          ? "runs via npx adapter"
+          : b.via || ""
+        : b.reason || "not found";
+      return `<option value="${escapeHtml(b.id)}" ${b.available ? "" : "disabled"} title="${escapeHtml(title)}">${escapeHtml(label)}</option>`;
+    })
+    .join("");
+  const remembered = localStorage.getItem("bomb.backend");
+  const pick = state.backends.find((b) => b.id === remembered && b.available)
+    ? remembered
+    : (state.backends.find((b) => b.available) || state.backends[0])?.id || "grok";
+  sel.value = pick;
+  populateModelSelect(state.backends.find((b) => b.id === pick));
+
+  sel.onchange = () => {
+    const b = state.backends.find((x) => x.id === sel.value);
+    localStorage.setItem("bomb.backend", sel.value);
+    populateModelSelect(b);
+  };
+  $("agent-model").onchange = () => {
+    $("agent-model-custom").style.display =
+      $("agent-model").value === CUSTOM_MODEL_VALUE ? "" : "none";
+    localStorage.setItem(`bomb.model.${sel.value}`, $("agent-model").value);
+  };
+}
+
 async function startAcp() {
   try {
-    const auth = state.auth || (await refreshAuth().catch(() => null));
+    const backend = currentBackend();
+    // Grok login gate only applies to the grok backend; claude/codex ride
+    // their own CLI logins (or env API keys).
+    const auth =
+      backend === "grok" ? state.auth || (await refreshAuth().catch(() => null)) : null;
     if (auth && !auth.loggedIn) {
       const go = confirm("Not signed in with Grok. Log in now?");
       if (go) {
@@ -1425,17 +2106,17 @@ async function startAcp() {
     }
     const cwd = $("cwd").value.trim();
     if (!cwd) throw new Error("Set project cwd (absolute path)");
-    const rawModel = $("model")?.value?.trim?.() || "";
-    const model = !rawModel || rawModel.toLowerCase() === "default" ? null : rawModel;
+    const model = currentModel();
     const mcpNames = parseCsv($("mcp-attach-session")?.value || "");
     const highRisk = mcpNames.filter((n) =>
       /playwright|browser|grok-build|custom|^x$/i.test(n)
     );
     const opts = {
       mode: "acp",
+      backend,
       model,
-      planMode: $("plan-mode").checked,
-      alwaysApprove: $("always-approve").checked,
+      planMode: modeOn("plan-mode"),
+      alwaysApprove: modeOn("always-approve"),
       mcpServerNames: mcpNames,
       approvedHighRiskMcp: highRisk,
       includeAutoMcp: false,
@@ -1448,8 +2129,18 @@ async function startAcp() {
       prompt: null,
       sandboxProfile: "workspace",
     };
+    localStorage.setItem("bomb.backend", backend);
+    if (backend !== "grok") {
+      const b = (state.backends || []).find((x) => x.id === backend);
+      pushEvent(
+        `${b?.displayName || backend} · uses ${backend} CLI login${b?.via === "npx" ? " · npx adapter (first launch is slow)" : ""}`,
+        "ok",
+        "thinking",
+        { force: true }
+      );
+    }
     const res = await invoke("start_session", { cwd, opts });
-    appendTranscript(res.id, "system", `session started · cwd ${cwd}`);
+    appendTranscript(res.id, "system", `session started · ${backend} · cwd ${cwd}`);
     pushEvent(`ACP session ${shortId(res.id)}`, "ok", "boom", { force: true, milestone: true });
     await refreshSessions();
     // selectSession persists previous presence under the *previous* id
@@ -1461,9 +2152,13 @@ async function startAcp() {
 
 async function sendPrompt() {
   try {
-    if (!state.selectedSession) throw new Error("Select a thread first");
     const prompt = $("prompt").value;
     if (!prompt.trim()) throw new Error("Empty prompt");
+    if (!state.selectedSession) {
+      // No thread selected — start one with the current cwd/agent settings.
+      await startAcp();
+      if (!state.selectedSession) return; // startAcp already surfaced the error
+    }
     const sess = state.sessions.find((s) => s.id === state.selectedSession);
     const needsResume =
       sess && (sess.live === false || String(sess.status || "").toLowerCase().includes("saved"));
@@ -1502,7 +2197,12 @@ async function sendPrompt() {
       "thinking",
       { force: true }
     );
-    await invoke("send_prompt", { id: state.selectedSession, prompt });
+    await invoke("send_prompt", {
+      id: state.selectedSession,
+      prompt,
+      backend: currentBackend(),
+      model: currentModel(),
+    });
     // Mark live after successful send/resume; refresh brain_mode from registry.
     if (sess) {
       sess.live = true;
@@ -1533,7 +2233,6 @@ async function sendPrompt() {
 
 // Wire buttons
 $("btn-new-session").onclick = startAcp;
-$("btn-start-acp").onclick = startAcp;
 $("btn-login").onclick = loginWithGrok;
 $("btn-logout").onclick = logoutGrok;
 
@@ -1644,9 +2343,10 @@ async function createProjectFolder() {
       }
     }
     const res = await invoke("create_project_folder", { name, parent });
-    $("cwd").value = res.path;
+    setProjectCwd(res.path);
     if ($("repo")) $("repo").value = res.path;
     toggleNewFolderPanel(false);
+    toggleProjectMenu(false);
     pushEvent(
       res.created
         ? `Created project folder ${res.name}`
@@ -1819,8 +2519,24 @@ $("btn-dev-server").onclick = startDevServer;
 $("btn-dev-stop").onclick = stopDevServer;
 $("btn-dev-open").onclick = openDevServer;
 $("btn-dev-folder").onclick = revealProject;
-$("btn-send").onclick = sendPrompt;
-$("btn-cancel").onclick = async () => {
+// Send doubles as Stop while a turn is running.
+$("btn-send").onclick = () => {
+  if (turnActive() && state.selectedSession) {
+    cancelCurrentTurn();
+  } else {
+    sendPrompt();
+  }
+};
+
+function updateSendButton() {
+  const btn = $("btn-send");
+  if (!btn) return;
+  const busy = turnActive() && !!state.selectedSession;
+  btn.textContent = busy ? "Stop" : "Send";
+  btn.classList.toggle("danger", busy);
+  btn.classList.toggle("primary", !busy);
+}
+async function cancelCurrentTurn() {
   try {
     if (!state.selectedSession) throw new Error("No session selected");
     noteTurn("wait", { note: "Cancel requested…" });
@@ -1833,7 +2549,7 @@ $("btn-cancel").onclick = async () => {
   } catch (e) {
     toastError(e);
   }
-};
+}
 $("btn-refresh").onclick = () => {
   refreshStatus().catch(toastError);
   refreshSessions();
@@ -2047,6 +2763,26 @@ $("btn-shutdown").onclick = async () => {
   }
 };
 
+// Approval cards: delegated listener — innerHTML rebuilds kill per-button handlers.
+$("transcript")?.addEventListener("click", async (e) => {
+  const btn = e.target.closest?.(".approval-btn");
+  if (!btn || btn.disabled) return;
+  const actions = btn.closest(".approval-actions");
+  const buttons = actions ? [...actions.querySelectorAll("button")] : [btn];
+  buttons.forEach((b) => (b.disabled = true));
+  try {
+    await invoke("respond_approval", {
+      id: btn.dataset.sid,
+      requestId: btn.dataset.requestId,
+      optionId: btn.dataset.optionId || null,
+    });
+    // Card collapses via the approval_resolved event.
+  } catch (err) {
+    pushEvent(`approval failed: ${err?.message || err}`, "err", "error", { force: true });
+    buttons.forEach((b) => (b.disabled = false));
+  }
+});
+
 // Elapsed + stall clock
 setInterval(() => {
   if (turnActive() || state.turn.phase === "done") updateBombChrome();
@@ -2063,6 +2799,7 @@ async function boot() {
   }
   try {
     await refreshStatus();
+    await loadBackends();
     await refreshSessions();
     await refreshDevStatus();
     noteTurn("idle");
@@ -2097,4 +2834,7 @@ async function boot() {
   }
 }
 
+wireModeButtons();
+wireProjectChip();
+wireAgentTalk();
 boot();
