@@ -340,6 +340,36 @@ impl ExplainerService {
         Ok(())
     }
 
+    /// One-shot 2-4 word title for a thread's first prompt (smart naming).
+    /// Uses the same locked-down narrator provider; errors bubble so callers
+    /// can keep the local slug.
+    pub async fn generate_title(&self, prompt: &str) -> Result<String, String> {
+        if !self.enabled.load(Ordering::Relaxed) {
+            return Err("explainer disabled".into());
+        }
+        let backend = self.backend.read().await.clone();
+        let model = self.model.read().await.clone();
+        let ask = format!(
+            "Give a 2-4 word title for this coding task. Lowercase, no punctuation, no quotes, \
+             just the title.\n\nTask: {}",
+            clip(prompt, 500)
+        );
+        let out = self.run_narrator(&backend, &model, &ask).await?;
+        let title: String = out
+            .trim()
+            .lines()
+            .next()
+            .unwrap_or("")
+            .trim_matches(|c: char| c == '"' || c == '\'' || c == '.')
+            .chars()
+            .take(48)
+            .collect();
+        if title.trim().is_empty() {
+            return Err("empty title".into());
+        }
+        Ok(title.trim().to_string())
+    }
+
     /// One locked-down text-only call on the chosen provider. Grok is the
     /// primary tested path; claude/codex use their headless one-shot flags
     /// (best-effort — failures surface as an explainer card + backoff).

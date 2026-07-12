@@ -19,6 +19,9 @@ pub struct SessionMetadata {
     pub acp_session_id: Option<String>,
     pub cwd: String,
     pub worktree: Option<String>,
+    /// Original project folder when cwd is a thread worktree.
+    #[serde(default)]
+    pub project_root: Option<String>,
     pub model: String,
     /// Agent backend this session runs on; old records default to grok.
     #[serde(default)]

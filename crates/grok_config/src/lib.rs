@@ -59,6 +59,8 @@ pub struct GrokConfig {
     pub plan_mode_default: bool,
     pub sandbox_profile: SandboxProfile,
     pub worktrees_root: Option<PathBuf>,
+    /// Give each new thread in a git project its own worktree by default.
+    pub worktree_isolation_default: bool,
     /// Right-panel ELI12 narrator (side LLM calls on the selected thread).
     pub explainer_enabled: bool,
     /// Backend for narrator calls (grok | claude | codex); None → grok.
@@ -86,6 +88,7 @@ impl Default for GrokConfig {
             plan_mode_default: true,
             sandbox_profile: SandboxProfile::Workspace,
             worktrees_root: None,
+            worktree_isolation_default: true,
             explainer_enabled: true,
             explainer_backend: None,
             explainer_model: None,
@@ -241,6 +244,9 @@ impl GrokConfig {
         }
         if overlay.worktrees_root.is_some() {
             self.worktrees_root = overlay.worktrees_root;
+        }
+        if overlay.worktree_isolation_default != defaults.worktree_isolation_default {
+            self.worktree_isolation_default = overlay.worktree_isolation_default;
         }
         if overlay.explainer_enabled != defaults.explainer_enabled {
             self.explainer_enabled = overlay.explainer_enabled;

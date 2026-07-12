@@ -36,6 +36,10 @@ pub struct SpawnOptions {
     pub permission_allow: Vec<String>,
     pub permission_deny: Vec<String>,
     pub trust_repo: bool,
+    /// Give this thread its own git worktree when the project is a repo.
+    pub isolate_worktree: bool,
+    /// The real project folder (thread cwd may be a worktree derived from it).
+    pub project_root: Option<String>,
 }
 
 impl Default for SpawnOptions {
@@ -57,6 +61,8 @@ impl Default for SpawnOptions {
             permission_allow: Vec::new(),
             permission_deny: Vec::new(),
             trust_repo: false,
+            isolate_worktree: true,
+            project_root: None,
         }
     }
 }

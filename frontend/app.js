@@ -847,6 +847,7 @@ function renderTranscript({ keepScroll = false } = {}) {
   const backendName = String(sess?.backend || "grok").toLowerCase();
   $("composer-session").textContent = `${shortId(sid)} · ${sess?.status || "?"}`;
   $("composer-model").textContent = [backendName, sess?.model].filter(Boolean).join(" · ");
+  updateThreadGitRow(sess);
 
   const entries = getTranscript(sid);
   if (!entries.length) {
@@ -949,6 +950,68 @@ function renderTranscript({ keepScroll = false } = {}) {
 }
 
 // ── Threads / agents ────────────────────────────────────────────────────
+function threadProjectKey(s) {
+  return s.projectRoot || s.project_root || s.cwd || "(no project)";
+}
+
+function projectCollapsed(key) {
+  return localStorage.getItem(`bomb.projCollapsed.${key}`) === "1";
+}
+
+function renderThreadRow(s) {
+  const id = s.id;
+  const status = String(s.status || "unknown").toLowerCase();
+  const mode = String(s.mode || "acp").toLowerCase();
+  const model = s.model || "";
+  const isMock = model === "mock";
+  const live = s.live !== false && !status.includes("saved");
+  const selected = id === state.selectedSession ? "selected" : "";
+  const badgeCls = isMock
+    ? "mock"
+    : status.includes("run")
+      ? "running"
+      : status.includes("fail") || status.includes("cancel")
+        ? "failed"
+        : status.includes("saved")
+          ? "saved"
+          : "idle";
+  const bombMood = isMock ? "idle" : moodFromStatus(status);
+  const msgs = s.messageCount ?? s.message_count ?? 0;
+  const liveTag = live
+    ? ""
+    : `<span class="badge saved" title="Restored from disk">saved</span>`;
+  const backend = String(s.backend || "grok").toLowerCase();
+  const backendTag =
+    backend === "grok"
+      ? ""
+      : `<span class="badge backend-${escapeHtml(backend)}" title="Agent backend">${escapeHtml(backend)}</span>`;
+  const brain = String(s.brainMode || s.brain_mode || "").toLowerCase();
+  let brainTag = "";
+  if (live && brain === "full_brain") {
+    brainTag = `<span class="badge brain-full" title="Agent reloaded prior ACP session">full brain</span>`;
+  } else if (live && brain === "history_only") {
+    brainTag = `<span class="badge brain-history" title="New ACP process; transcript injected as context">history-only</span>`;
+  }
+  const worktreeTag = (s.projectRoot || s.project_root)
+    ? `<span class="badge branch" title="Isolated worktree — land to merge back">🌱 ${escapeHtml(s.worktree || "worktree")}</span>`
+    : "";
+  const syncTag = s.needsSync
+    ? `<span class="badge needs-sync" title="Landing conflicted — Sync, let the agent resolve, land again">needs sync</span>`
+    : "";
+  // Smart label when we have one; the raw id lives in the tooltip.
+  const title = s.label
+    ? escapeHtml(s.label)
+    : `${escapeHtml(mode)} · ${escapeHtml(shortId(id))}`;
+  return `<div class="thread-item ${selected}${live ? "" : " restored"}" data-id="${escapeHtml(id)}" title="${escapeHtml(shortId(id))} · ${escapeHtml(s.cwd || "")}">
+  <div class="name">${bombHtml(bombMood, "xs")} <span class="thread-title">${title}</span>
+    <button class="thread-delete" type="button" data-id="${escapeHtml(id)}" title="Delete thread">✕</button></div>
+  <div class="meta"><span class="badge ${badgeCls}">${bombHtml(bombMood, "xs")}${escapeHtml(status)}</span>
+  ${liveTag}${backendTag}${brainTag}${worktreeTag}${syncTag}
+  <span>${escapeHtml(isMock ? "mock" : model || "—")}</span>
+  ${msgs ? `<span class="muted">${msgs} msg</span>` : ""}</div>
+</div>`;
+}
+
 function renderThreads() {
   const root = $("thread-list");
   if (!state.sessions.length) {
@@ -960,50 +1023,25 @@ function renderThreads() {
       String(a.updatedAt || a.updated_at || a.createdAt || a.created_at || "")
     )
   );
-  root.innerHTML = sorted
-    .map((s) => {
-      const id = s.id;
-      const status = String(s.status || "unknown").toLowerCase();
-      const mode = String(s.mode || "acp").toLowerCase();
-      const model = s.model || "";
-      const isMock = model === "mock";
-      const live = s.live !== false && !status.includes("saved");
-      const selected = id === state.selectedSession ? "selected" : "";
-      const badgeCls = isMock
-        ? "mock"
-        : status.includes("run")
-          ? "running"
-          : status.includes("fail") || status.includes("cancel")
-            ? "failed"
-            : status.includes("saved")
-              ? "saved"
-              : "idle";
-      const bombMood = isMock ? "idle" : moodFromStatus(status);
-      const cwd = s.cwd || "";
-      const shortCwd = cwd.length > 28 ? "…" + cwd.slice(-27) : cwd;
-      const msgs = s.messageCount ?? s.message_count ?? 0;
-      const liveTag = live
-        ? ""
-        : `<span class="badge saved" title="Restored from disk">saved</span>`;
-      const backend = String(s.backend || "grok").toLowerCase();
-      const backendTag =
-        backend === "grok"
-          ? ""
-          : `<span class="badge backend-${escapeHtml(backend)}" title="Agent backend">${escapeHtml(backend)}</span>`;
-      const brain = String(s.brainMode || s.brain_mode || "").toLowerCase();
-      let brainTag = "";
-      if (live && brain === "full_brain") {
-        brainTag = `<span class="badge brain-full" title="Agent reloaded prior ACP session">full brain</span>`;
-      } else if (live && brain === "history_only") {
-        brainTag = `<span class="badge brain-history" title="New ACP process; transcript injected as context">history-only</span>`;
-      }
-      return `<div class="thread-item ${selected}${live ? "" : " restored"}" data-id="${escapeHtml(id)}">
-  <div class="name">${bombHtml(bombMood, "xs")} ${escapeHtml(mode)} · ${escapeHtml(shortId(id))}</div>
-  <div class="meta"><span class="badge ${badgeCls}">${bombHtml(bombMood, "xs")}${escapeHtml(status)}</span>
-  ${liveTag}${backendTag}${brainTag}
-  <span>${escapeHtml(isMock ? "mock" : model || "—")}</span>
-  ${msgs ? `<span class="muted">${msgs} msg</span>` : ""}</div>
-  <div class="meta">${escapeHtml(shortCwd)}</div>
+  // Group by project (real folder) — worktree threads collapse under it.
+  const groups = new Map();
+  for (const s of sorted) {
+    const key = threadProjectKey(s);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(s);
+  }
+  root.innerHTML = [...groups.entries()]
+    .map(([key, list]) => {
+      const name = key.split("/").filter(Boolean).pop() || key;
+      const collapsed = projectCollapsed(key);
+      const rows = collapsed ? "" : list.map(renderThreadRow).join("");
+      return `<div class="project-group" data-key="${escapeHtml(key)}">
+  <button class="project-header" type="button" data-key="${escapeHtml(key)}" title="${escapeHtml(key)}">
+    <span class="project-caret">${collapsed ? "▸" : "▾"}</span>
+    <span class="project-name">${escapeHtml(name)}</span>
+    <span class="project-count muted">${list.length}</span>
+  </button>
+  ${rows}
 </div>`;
     })
     .join("");
@@ -1011,7 +1049,116 @@ function renderThreads() {
   root.querySelectorAll(".thread-item").forEach((el) => {
     el.onclick = () => selectSession(el.dataset.id);
   });
+  root.querySelectorAll(".project-header").forEach((el) => {
+    el.onclick = (ev) => {
+      ev.stopPropagation();
+      const key = el.dataset.key;
+      const now = !projectCollapsed(key);
+      localStorage.setItem(`bomb.projCollapsed.${key}`, now ? "1" : "0");
+      renderThreads();
+    };
+  });
+  root.querySelectorAll(".thread-delete").forEach((el) => {
+    el.onclick = (ev) => {
+      ev.stopPropagation();
+      deleteThread(el.dataset.id);
+    };
+  });
   updateBombChrome();
+}
+
+/** Show Land/Sync controls only for threads that own a worktree. */
+function updateThreadGitRow(sess) {
+  const row = $("thread-git-row");
+  if (!row) return;
+  const isolated = !!(sess && (sess.projectRoot || sess.project_root));
+  row.style.display = isolated ? "" : "none";
+  if (isolated) {
+    $("thread-branch").textContent = `🌱 ${sess.worktree || "worktree"}`;
+  }
+}
+
+async function landThread() {
+  const id = state.selectedSession;
+  if (!id) return;
+  const btn = $("btn-land-thread");
+  if (btn) btn.disabled = true;
+  try {
+    const res = await invoke("land_thread", { id });
+    const sess = state.sessions.find((s) => s.id === id);
+    if (res.status === "landed") {
+      if (sess) sess.needsSync = false;
+      pushEvent(`⬆ landed into ${res.targetBranch}`, "ok", "boom", { force: true, milestone: true });
+    } else {
+      if (sess) sess.needsSync = true;
+      pushEvent(
+        `landing conflicted (${(res.files || []).join(", ")}) — hit Sync, let the agent resolve, land again`,
+        "err",
+        "wait",
+        { force: true, milestone: true }
+      );
+    }
+    renderThreads();
+  } catch (e) {
+    toastError(e);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function syncThread() {
+  const id = state.selectedSession;
+  if (!id) return;
+  const btn = $("btn-sync-thread");
+  if (btn) btn.disabled = true;
+  try {
+    const res = await invoke("sync_thread", { id });
+    const sess = state.sessions.find((s) => s.id === id);
+    if (res.status === "synced") {
+      pushEvent(`⟳ synced from ${res.targetBranch}`, "ok", null, { force: true });
+    } else {
+      // Conflicts live in the worktree now — prefill a resolution prompt so
+      // one click + send puts this thread's own agent on conflict duty.
+      const files = (res.files || []).join(", ");
+      const promptBox = $("prompt");
+      if (promptBox && !promptBox.value.trim()) {
+        promptBox.value = `Merge conflicts from ${res.targetBranch} were left in this worktree (${files}). Resolve them, keeping both sides' intent, then commit the result.`;
+      }
+      pushEvent(`sync left conflicts in ${files} — prompt prefilled, send it to let the agent resolve`, "err", "wait", {
+        force: true,
+        milestone: true,
+      });
+    }
+    if (sess && res.status === "synced") sess.needsSync = false;
+    renderThreads();
+  } catch (e) {
+    toastError(e);
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function deleteThread(id) {
+  const sess = state.sessions.find((s) => s.id === id);
+  if (!sess) return;
+  const name = sess.label || shortId(id);
+  if (!confirm(`Delete thread "${name}"? Its transcript is removed permanently.`)) return;
+  let removeWorktree = false;
+  if (sess.projectRoot || sess.project_root) {
+    removeWorktree = confirm(
+      "Also remove its git worktree?\n\nOK = remove worktree (unlanded changes are LOST)\nCancel = keep the worktree on disk"
+    );
+  }
+  try {
+    await invoke("remove_session", { id, removeWorktree });
+    state.transcriptBySession.delete(id);
+    state.explainBySession.delete(id);
+    if (state.selectedSession === id) state.selectedSession = null;
+    await refreshSessions();
+    pushEvent(`deleted thread ${name}`, "ok", null, { force: true });
+  } catch (e) {
+    toastError(e);
+  }
 }
 
 function renderAgents() {
@@ -1394,6 +1541,15 @@ function handleControlEvent(ev) {
     const payload = ev.payload || ev;
     if (payload?.channel === "explain") {
       handleExplainEvent(sid, payload);
+      return;
+    }
+    if (payload?.channel === "thread" && payload?.kind === "label") {
+      // Smart-name upgrade (slug → narrator title) — update the row live.
+      const sess = state.sessions.find((s) => s.id === sid);
+      if (sess && payload.label) {
+        sess.label = String(payload.label);
+        renderThreads();
+      }
       return;
     }
     if (payload?.channel === "usage" && payload?.totalTokens != null) {
@@ -2203,6 +2359,10 @@ function wireModeButtons() {
     if (next) setMode("plan-mode", false);
     applyLive("set_always_approve", next);
   });
+  // Worktree isolation applies at thread START only (no live toggle).
+  $("worktree-mode")?.addEventListener("click", () => {
+    setMode("worktree-mode", !modeOn("worktree-mode"));
+  });
 }
 
 function currentBackend() {
@@ -2351,6 +2511,8 @@ async function startAcp() {
       model,
       planMode: modeOn("plan-mode"),
       alwaysApprove: modeOn("always-approve"),
+      isolateWorktree: modeOn("worktree-mode"),
+      projectRoot: null,
       mcpServerNames: mcpNames,
       approvedHighRiskMcp: highRisk,
       includeAutoMcp: false,
@@ -2769,6 +2931,8 @@ $("btn-dev-server").onclick = startDevServer;
 $("btn-dev-stop").onclick = stopDevServer;
 $("btn-dev-open").onclick = openDevServer;
 $("btn-dev-folder").onclick = revealProject;
+$("btn-land-thread") && ($("btn-land-thread").onclick = landThread);
+$("btn-sync-thread") && ($("btn-sync-thread").onclick = syncThread);
 // Send doubles as Stop while a turn is running.
 $("btn-send").onclick = () => {
   if (turnActive() && state.selectedSession) {
@@ -3034,6 +3198,7 @@ async function loadHavenSettings() {
     $("haven-label").value = cfg.label || "haven";
     $("haven-enabled").checked = !!cfg.enabled;
     $("haven-autoconnect").checked = !!cfg.auto_connect;
+    $("haven-insecure").checked = !!cfg.allow_insecure_http;
     const st = await invoke("haven_status").catch(() => null);
     renderHavenState(st);
     if (st?.connected) refreshHavenJobs().catch(() => {});
@@ -3049,6 +3214,7 @@ function havenConfigFromForm() {
     auth_token: $("haven-token").value.trim(),
     label: $("haven-label").value.trim() || "haven",
     auto_connect: $("haven-autoconnect").checked,
+    allow_insecure_http: $("haven-insecure").checked,
   };
 }
 
@@ -3057,10 +3223,19 @@ $("btn-haven-save").onclick = async () => {
     // Backend keeps the existing secret when it receives a masked token.
     const st = await invoke("haven_set_config", { config: havenConfigFromForm() });
     renderHavenState(st);
+    havenOut(st);
     pushEvent(`Haven saved · ${st.message || "config updated"}`, st.connected ? "ok" : "", null, {
       force: true,
     });
   } catch (e) {
+    // Surface save failures in the card itself, not only the timeline.
+    const el = $("haven-state");
+    if (el) {
+      el.textContent = "save failed";
+      el.className = "badge failed";
+      el.title = String(e);
+    }
+    havenOut(`Save failed: ${e?.message || e}`);
     toastError(e);
   }
 };
@@ -3261,6 +3436,8 @@ function wireExplainer() {
       }
       state.explainerBackend = cfg?.explainer_backend || cfg?.explainerBackend || "grok";
       state.explainerModel = cfg?.explainer_model || cfg?.explainerModel || null;
+      const wtDefault = cfg?.worktree_isolation_default ?? cfg?.worktreeIsolationDefault ?? true;
+      setMode("worktree-mode", !!wtDefault);
       applyToggle();
       renderExplainFeed();
     })

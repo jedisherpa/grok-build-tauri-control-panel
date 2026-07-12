@@ -16,6 +16,10 @@ pub struct HavenConfig {
     pub auth_token: String,
     pub label: String,
     pub auto_connect: bool,
+    /// Explicit opt-in to send the bearer token over plaintext http to a
+    /// public host. The token grants shell execution — anyone on the network
+    /// path can read it. Prefer Tailscale or a TLS proxy.
+    pub allow_insecure_http: bool,
 }
 
 impl Default for HavenConfig {
@@ -26,6 +30,7 @@ impl Default for HavenConfig {
             auth_token: String::new(),
             label: "haven".into(),
             auto_connect: true,
+            allow_insecure_http: false,
         }
     }
 }

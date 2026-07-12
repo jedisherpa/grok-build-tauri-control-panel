@@ -157,6 +157,13 @@
               <span id="composer-session" class="muted">no session</span>
               <span id="composer-phase" class="composer-phase" style="display:none"></span>
               <span id="composer-model" class="muted"></span>
+              <span id="thread-git-row" class="thread-git-row" style="display:none">
+                <span id="thread-branch" class="thread-branch muted"></span>
+                <button id="btn-sync-thread" class="btn ghost" type="button"
+                  title="Merge the project's latest changes into this thread's worktree">⟳ Sync</button>
+                <button id="btn-land-thread" class="btn" type="button"
+                  title="Merge this thread's work back into the project">⬆ Land</button>
+              </span>
             </div>
             <div class="composer-row">
               <textarea
@@ -185,6 +192,8 @@
                   title="Plan mode — agent proposes a plan before acting">plan</button>
                 <button id="always-approve" class="mode-btn yolo" type="button" aria-pressed="false"
                   title="Yolo — auto-approve all tool calls">yolo</button>
+                <button id="worktree-mode" class="mode-btn" type="button" aria-pressed="false"
+                  title="Isolate new threads in their own git worktree (parallel threads can't overwrite each other)">🌱</button>
               </div>
             </div>
           </footer>
@@ -275,6 +284,9 @@
               <div class="toolbar">
                 <label class="toggle"><input id="haven-enabled" type="checkbox" /> <span>enabled</span></label>
                 <label class="toggle"><input id="haven-autoconnect" type="checkbox" checked /> <span>auto-connect</span></label>
+                <label class="toggle" title="⚠ Sends the bearer token unencrypted to a public host — anyone on the path can read it and run commands on your box. Prefer Tailscale or TLS.">
+                  <input id="haven-insecure" type="checkbox" /> <span>allow insecure http</span>
+                </label>
                 <button id="btn-haven-save" class="btn primary">Save</button>
                 <button id="btn-haven-test" class="btn">Connect / Test</button>
               </div>

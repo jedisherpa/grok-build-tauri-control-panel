@@ -16,6 +16,7 @@
 - **Multi-session registry** with concurrent `DashMap` access
 - **Git worktree** isolation for parallel agents
 - **Interactive tool approvals** (allow once / always / deny per request), deny rules enforced ahead of yolo, permission presets (safe / workspace / yolo) + sandbox profiles
+- **Thread-per-worktree isolation** — each new thread in a git project gets its own worktree + `thread/<id>` branch (pure git, works with every backend), grouped by project in the sidebar. **Land** merges a thread back into the project branch; conflicts route through **Sync**, which pulls main into the worktree so the thread's own agent can resolve them. Threads get smart names from their first prompt.
 - **MCP management** — catalog (filesystem, GitHub, Linear, X, Playwright, custom), doctor, credentials store, pre-spawn health checks, session attachment. Servers needing credentials (e.g. `GITHUB_TOKEN`, `LINEAR_API_KEY`, `X_API_BEARER`) are skipped with a visible reason until the secret is set.
 - **Extensions** — skills, plugins CRUD (config + CLI)
 - **Memory** — structured store + MEMORY.md flush/dream

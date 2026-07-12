@@ -303,12 +303,47 @@ pub async fn haven_set_config(
     if config.auth_token.contains('…') || config.auth_token.contains("...") {
         config.auth_token = existing.auth_token;
     }
-    // A bearer token over plaintext http is readable by anyone on the path.
-    if config.base_url.starts_with("http://") && !config.auth_token.is_empty() {
-        return Err("haven base_url must be https when an auth token is set".into());
+    // A bearer token over plaintext http is readable by anyone on the path —
+    // but private/tailnet hosts (Tailscale, LAN, localhost) are fine.
+    if config.base_url.starts_with("http://")
+        && !config.auth_token.is_empty()
+        && !is_private_host(&config.base_url)
+        && !config.allow_insecure_http
+    {
+        return Err(
+            "haven base_url must be https for public hosts (plain http is allowed for \
+             localhost, LAN, and Tailscale addresses — or tick 'allow insecure http' \
+             to accept the risk)"
+                .into(),
+        );
     }
     state.haven.set_config(config).await?;
     Ok(state.haven.connect_and_status().await)
+}
+
+/// True for hosts where plaintext http is acceptable: loopback, RFC1918 LAN,
+/// Tailscale CGNAT range (100.64/10), .local, and MagicDNS .ts.net names.
+fn is_private_host(base_url: &str) -> bool {
+    let host = base_url
+        .trim_start_matches("http://")
+        .split(['/', ':'])
+        .next()
+        .unwrap_or("");
+    if host == "localhost" || host.ends_with(".local") || host.ends_with(".ts.net") {
+        return true;
+    }
+    let octets: Vec<u8> = host.split('.').filter_map(|p| p.parse().ok()).collect();
+    if octets.len() != 4 {
+        return false;
+    }
+    match octets[..] {
+        [127, ..] => true,
+        [10, ..] => true,
+        [192, 168, ..] => true,
+        [172, b, ..] if (16..=31).contains(&b) => true,
+        [100, b, ..] if (64..=127).contains(&b) => true,
+        _ => false,
+    }
 }
 
 #[tauri::command]
@@ -480,7 +515,63 @@ pub async fn start_session(
         opts.mcp_server_names = resolution.attached_names;
         mcp_skipped = resolution.skipped;
     }
-    let id = state.registry.spawn_agent(&cwd, opts).await.map_err(err)?;
+    // Thread-per-worktree isolation: give this thread its own checkout so
+    // parallel threads on the same project can't overwrite each other.
+    let id = Uuid::new_v4();
+    let mut isolation_note: Option<String> = None;
+    let requested_cwd = cwd.clone();
+    let mut spawn_cwd = cwd.clone();
+    if opts.isolate_worktree && opts.mode == grok_control_core::AgentMode::Acp {
+        if grok_worktree::is_git_repo(std::path::Path::new(&cwd)).await {
+            let short = &id.to_string()[..8];
+            match state
+                .worktrees
+                .create(
+                    std::path::Path::new(&cwd),
+                    CreateWorktreeRequest {
+                        name: format!("t-{short}"),
+                        base_ref: None,
+                        prefer_grok_cli: false,
+                    },
+                )
+                .await
+            {
+                Ok(wt) => {
+                    spawn_cwd = wt.path.display().to_string();
+                    opts.worktree = Some(wt.name.clone());
+                    opts.project_root = Some(requested_cwd.clone());
+                    isolation_note = Some(format!(
+                        "🌱 isolated worktree · branch {} · {}",
+                        wt.branch.as_deref().unwrap_or("?"),
+                        wt.path.display()
+                    ));
+                }
+                Err(e) => {
+                    isolation_note = Some(format!(
+                        "⚠ worktree isolation unavailable ({e}) — thread shares the project folder"
+                    ));
+                }
+            }
+        } else {
+            isolation_note =
+                Some("not a git repo — thread works directly in the folder".into());
+        }
+    }
+
+    state
+        .registry
+        .spawn_agent_preallocated(id, &spawn_cwd, opts)
+        .await
+        .map_err(err)?;
+    if let Some(note) = isolation_note {
+        let _ = state
+            .persistence
+            .append_message(id, "system", &note, Utc::now());
+        state.event_bus.emit(grok_events::ControlEvent::Raw {
+            session_id: Some(id),
+            payload: serde_json::json!({ "channel": "term", "stream": "worktree", "line": note }),
+        });
+    }
     // Tell the thread why a server was left out — otherwise it just looks broken.
     for s in &mcp_skipped {
         let msg = format!("⚠ MCP `{}` skipped: {}", s.name, s.reason);
@@ -602,6 +693,55 @@ pub async fn send_prompt(
             .await?;
     }
 
+    // Smart thread naming on the FIRST prompt: instant word-slug, then an
+    // async narrator-provider title upgrade.
+    let needs_label = state
+        .registry
+        .get_snapshot(id)
+        .map(|s| s.metadata.label.is_none())
+        .unwrap_or(false);
+    if needs_label {
+        let slug = prompt_slug(&prompt);
+        if !slug.is_empty() {
+            let _ = state.registry.set_label(id, &slug);
+            emit_thread_label(&state, id, &slug);
+        }
+        let explainer = state.explainer.clone();
+        let registry = state.registry.clone();
+        let bus = state.event_bus.clone();
+        let persistence = state.persistence.clone();
+        let prompt_for_title = prompt.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Ok(title) = explainer.generate_title(&prompt_for_title).await {
+                if !title.is_empty() && registry.set_label(id, &title).is_ok() {
+                    bus.emit(grok_events::ControlEvent::Raw {
+                        session_id: Some(id),
+                        payload: serde_json::json!({
+                            "channel": "thread", "kind": "label", "label": title,
+                        }),
+                    });
+                    // Persist the upgraded label into the session record.
+                    if let Ok(snap) = registry.get_snapshot(id) {
+                        let _ = persistence.upsert_session(&SessionRecord {
+                            id,
+                            cwd: snap.metadata.cwd.clone(),
+                            mode: "acp".into(),
+                            model: snap.metadata.model.clone(),
+                            status: format!("{:?}", snap.metadata.status).to_lowercase(),
+                            worktree: snap.metadata.worktree.clone(),
+                            acp_session_id: snap.metadata.acp_session_id.clone(),
+                            metadata_json: serde_json::to_string(&snap)
+                                .unwrap_or_else(|_| "{}".into()),
+                            created_at: snap.metadata.created_at,
+                            updated_at: Utc::now(),
+                            message_count: 0,
+                        });
+                    }
+                }
+            }
+        });
+    }
+
     let prompt_len = prompt.len();
     state.registry.send_prompt(id, &prompt).await.map_err(err)?;
     // User message — durable immediately (agent side streams via event bus).
@@ -665,6 +805,11 @@ async fn resume_saved_session(
         }
     });
     opts.worktree = rec.worktree.clone();
+    // Preserve the project link so Land/Sync keep working after a restart.
+    // Never re-isolate on resume: the stored cwd already IS the worktree.
+    opts.isolate_worktree = false;
+    opts.project_root = extract_meta_string(&rec.metadata_json, "projectRoot")
+        .or_else(|| extract_meta_string(&rec.metadata_json, "project_root"));
     // Honor the caller's current mode toggles; default to safe (plan on, yolo off).
     opts.always_approve = always_approve.unwrap_or(false);
     opts.plan_mode = if opts.always_approve {
@@ -733,6 +878,32 @@ async fn resume_saved_session(
     Ok(())
 }
 
+/// Cheap instant label: first significant words of the prompt.
+fn prompt_slug(prompt: &str) -> String {
+    const STOP: &[&str] = &[
+        "a", "an", "the", "to", "of", "in", "on", "for", "and", "or", "is", "it", "that", "this",
+        "please", "can", "you", "me", "my", "i", "we",
+    ];
+    let words: Vec<&str> = prompt
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
+        .filter(|w| !w.is_empty() && !STOP.contains(&w.to_lowercase().as_str()))
+        .take(5)
+        .collect();
+    let mut s = words.join(" ");
+    if s.chars().count() > 42 {
+        s = s.chars().take(42).collect::<String>() + "…";
+    }
+    s
+}
+
+fn emit_thread_label(state: &AppState, id: Uuid, label: &str) {
+    state.event_bus.emit(grok_events::ControlEvent::Raw {
+        session_id: Some(id),
+        payload: serde_json::json!({ "channel": "thread", "kind": "label", "label": label }),
+    });
+}
+
 /// Pack recent transcript for history-only rehydration (bounded).
 fn build_transcript_context(state: &AppState, id: Uuid) -> Option<String> {
     let entries = state.persistence.transcript_entries(id).ok()?;
@@ -785,11 +956,33 @@ pub async fn cancel_session(state: State<'_, AppState>, id: String) -> Result<()
 }
 
 #[tauri::command]
-pub async fn remove_session(state: State<'_, AppState>, id: String) -> Result<(), String> {
+pub async fn remove_session(
+    state: State<'_, AppState>,
+    id: String,
+    remove_worktree: Option<bool>,
+) -> Result<(), String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
+    // Capture worktree context before the records disappear.
+    let wt_ctx = if remove_worktree.unwrap_or(false) {
+        thread_worktree_context(&state, id).await.ok()
+    } else {
+        None
+    };
     // Live handle may be gone after reboot — still wipe SQLite memory.
     let _ = state.registry.remove_session(id).await;
     state.persistence.delete_session(id).map_err(err)?;
+    if let Some((worktree, root, _branch, _)) = wt_ctx {
+        // Only remove managed worktrees (never the project root itself).
+        if worktree != root && worktree.starts_with(state.worktrees.worktrees_root()) {
+            if let Err(e) = state
+                .worktrees
+                .remove(&root, &worktree.display().to_string(), true)
+                .await
+            {
+                tracing::warn!(error = %e, "worktree removal failed after thread delete");
+            }
+        }
+    }
     Ok(())
 }
 
@@ -886,6 +1079,184 @@ pub async fn respond_approval(
         .respond_approval(id, &request_id, option_id.as_deref())
         .await
         .map_err(err)
+}
+
+// ── Thread land / sync (worktree merge flow) ─────────────────────────────
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadMergeResult {
+    /// landed | needs_sync | synced | conflicts
+    pub status: String,
+    pub files: Vec<String>,
+    pub branch: String,
+    pub target_branch: String,
+}
+
+/// Worktree path + project root + branch for a thread, or a friendly error.
+async fn thread_worktree_context(
+    state: &AppState,
+    id: Uuid,
+) -> Result<(PathBuf, PathBuf, String, String), String> {
+    // Live metadata first; fall back to the persisted record.
+    let (cwd, project_root, label) = match state.registry.get_snapshot(id) {
+        Ok(snap) => (
+            snap.metadata.cwd.clone(),
+            snap.metadata.project_root.clone(),
+            snap.metadata.label.clone().unwrap_or_default(),
+        ),
+        Err(_) => {
+            let rec = state.persistence.get_session(id).map_err(err)?;
+            let root = serde_json::from_str::<serde_json::Value>(&rec.metadata_json)
+                .ok()
+                .and_then(|v| {
+                    v.pointer("/metadata/projectRoot")
+                        .or_else(|| v.pointer("/metadata/project_root"))
+                        .and_then(|p| p.as_str())
+                        .map(String::from)
+                });
+            (rec.cwd, root, String::new())
+        }
+    };
+    let project_root = project_root
+        .filter(|p| !p.is_empty())
+        .ok_or("this thread has no isolated worktree (it works directly in the project folder)")?;
+    let worktree = PathBuf::from(&cwd);
+    let root = PathBuf::from(&project_root);
+    let branch = state
+        .worktrees
+        .current_branch(&worktree)
+        .await
+        .map_err(err)?;
+    Ok((worktree, root, branch, label))
+}
+
+/// Merge the thread's worktree branch back into the project's current branch.
+#[tauri::command]
+pub async fn land_thread(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<ThreadMergeResult, String> {
+    let id = Uuid::parse_str(&id).map_err(err)?;
+    let (worktree, root, branch, label) = thread_worktree_context(&state, id).await?;
+    let title = if label.is_empty() { branch.clone() } else { label.clone() };
+
+    let _ = state
+        .worktrees
+        .commit_all(&worktree, &format!("thread {title}: work in progress"))
+        .await
+        .map_err(err)?;
+
+    if !state.worktrees.is_clean(&root).await.map_err(err)? {
+        return Err(format!(
+            "the project folder has uncommitted changes — commit or stash them in {} first",
+            root.display()
+        ));
+    }
+    let target_branch = state.worktrees.current_branch(&root).await.map_err(err)?;
+
+    match state
+        .worktrees
+        .merge(&root, &branch, &format!("land thread: {title}"))
+        .await
+        .map_err(err)?
+    {
+        grok_worktree::MergeOutcome::Merged => {
+            let msg = format!("⬆ landed into {target_branch} ✓");
+            let _ = state.persistence.append_message(id, "system", &msg, Utc::now());
+            state.event_bus.emit(grok_events::ControlEvent::Raw {
+                session_id: Some(id),
+                payload: serde_json::json!({ "channel": "term", "stream": "worktree", "line": msg }),
+            });
+            Ok(ThreadMergeResult {
+                status: "landed".into(),
+                files: vec![],
+                branch,
+                target_branch,
+            })
+        }
+        grok_worktree::MergeOutcome::Conflicts { files } => {
+            // Never leave the user's main checkout mid-merge.
+            state.worktrees.merge_abort(&root).await;
+            let msg = format!(
+                "⚠ landing hit conflicts in {} — run Sync so this thread's agent can resolve them, then land again",
+                files.join(", ")
+            );
+            let _ = state.persistence.append_message(id, "system", &msg, Utc::now());
+            state.event_bus.emit(grok_events::ControlEvent::Raw {
+                session_id: Some(id),
+                payload: serde_json::json!({ "channel": "term", "stream": "worktree", "line": msg }),
+            });
+            Ok(ThreadMergeResult {
+                status: "needs_sync".into(),
+                files,
+                branch,
+                target_branch,
+            })
+        }
+    }
+}
+
+/// Merge the project's current branch INTO the thread's worktree. Conflicts
+/// stay in the worktree where the thread's own agent can resolve them.
+#[tauri::command]
+pub async fn sync_thread(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<ThreadMergeResult, String> {
+    let id = Uuid::parse_str(&id).map_err(err)?;
+    let (worktree, root, branch, label) = thread_worktree_context(&state, id).await?;
+    let title = if label.is_empty() { branch.clone() } else { label.clone() };
+    let target_branch = state.worktrees.current_branch(&root).await.map_err(err)?;
+
+    let _ = state
+        .worktrees
+        .commit_all(&worktree, &format!("thread {title}: work in progress"))
+        .await
+        .map_err(err)?;
+
+    match state
+        .worktrees
+        .merge(
+            &worktree,
+            &target_branch,
+            &format!("sync from {target_branch}"),
+        )
+        .await
+        .map_err(err)?
+    {
+        grok_worktree::MergeOutcome::Merged => {
+            let msg = format!("⟳ synced from {target_branch} ✓");
+            let _ = state.persistence.append_message(id, "system", &msg, Utc::now());
+            state.event_bus.emit(grok_events::ControlEvent::Raw {
+                session_id: Some(id),
+                payload: serde_json::json!({ "channel": "term", "stream": "worktree", "line": msg }),
+            });
+            Ok(ThreadMergeResult {
+                status: "synced".into(),
+                files: vec![],
+                branch,
+                target_branch,
+            })
+        }
+        grok_worktree::MergeOutcome::Conflicts { files } => {
+            let msg = format!(
+                "⚠ merge conflicts from {target_branch} left in this worktree: {} — ask this thread's agent to resolve and commit them",
+                files.join(", ")
+            );
+            let _ = state.persistence.append_message(id, "system", &msg, Utc::now());
+            state.event_bus.emit(grok_events::ControlEvent::Raw {
+                session_id: Some(id),
+                payload: serde_json::json!({ "channel": "term", "stream": "worktree", "line": msg }),
+            });
+            Ok(ThreadMergeResult {
+                status: "conflicts".into(),
+                files,
+                branch,
+                target_branch,
+            })
+        }
+    }
 }
 
 // ── Phase 2: Worktrees & Permissions ─────────────────────────────────────
@@ -1387,6 +1758,7 @@ fn build_thread_list(state: &AppState) -> Vec<ThreadDto> {
             worktree: m.worktree,
             mcp_servers: m.mcp_servers,
             label: m.label,
+            project_root: m.project_root,
             brain_mode: Some(m.brain_mode.as_str().into()),
         });
     }
@@ -1403,6 +1775,9 @@ fn build_thread_list(state: &AppState) -> Vec<ThreadDto> {
             };
             let mcp = extract_mcp_from_meta(&rec.metadata_json);
             let backend = extract_backend_from_meta(&rec.metadata_json);
+            let label = extract_meta_string(&rec.metadata_json, "label");
+            let project_root = extract_meta_string(&rec.metadata_json, "projectRoot")
+                .or_else(|| extract_meta_string(&rec.metadata_json, "project_root"));
             out.push(ThreadDto {
                 id: rec.id.to_string(),
                 cwd: rec.cwd,
@@ -1416,7 +1791,8 @@ fn build_thread_list(state: &AppState) -> Vec<ThreadDto> {
                 updated_at: rec.updated_at.to_rfc3339(),
                 worktree: rec.worktree,
                 mcp_servers: mcp,
-                label: None,
+                label,
+                project_root,
                 brain_mode: None,
             });
         }
@@ -1447,6 +1823,17 @@ fn extract_approved_mcp_from_meta(json: &str) -> Vec<String> {
         })
         .and_then(|v| serde_json::from_value(v).ok())
         .unwrap_or_default()
+}
+
+fn extract_meta_string(json: &str, key: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|v| {
+            v.pointer(&format!("/metadata/{key}"))
+                .and_then(|s| s.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+        })
 }
 
 fn extract_mcp_from_meta(json: &str) -> Vec<String> {

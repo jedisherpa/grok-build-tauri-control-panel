@@ -124,9 +124,30 @@ impl SessionRegistry {
     /// `Idle`/`Failed` via status events.
     pub async fn spawn_agent(&self, cwd: &str, opts: SpawnOptions) -> Result<Uuid> {
         let id = Uuid::new_v4();
-        self.spawn_agent_with_id(id, cwd, opts, None, ConnectOpts::default(), true)
-            .await?;
+        self.spawn_agent_preallocated(id, cwd, opts).await?;
         Ok(id)
+    }
+
+    /// Spawn with a caller-chosen id — used when the caller needs the id
+    /// before spawning (e.g. to name the thread's worktree after it).
+    pub async fn spawn_agent_preallocated(
+        &self,
+        id: Uuid,
+        cwd: &str,
+        opts: SpawnOptions,
+    ) -> Result<()> {
+        self.spawn_agent_with_id(id, cwd, opts, None, ConnectOpts::default(), true)
+            .await
+    }
+
+    /// Set the display label (smart thread name).
+    pub fn set_label(&self, id: Uuid, label: &str) -> Result<()> {
+        let mut entry = self
+            .sessions
+            .get_mut(&id)
+            .ok_or(CoreError::SessionNotFound(id))?;
+        entry.metadata.label = Some(label.to_string());
+        Ok(())
     }
 
     /// Re-attach a live ACP process to an existing thread id (after reboot / update).
@@ -227,6 +248,7 @@ impl SessionRegistry {
             acp_session_id: None,
             cwd: cwd.to_string(),
             worktree: opts.worktree.clone(),
+            project_root: opts.project_root.clone(),
             model: model.clone(),
             backend,
             mode: opts.mode,

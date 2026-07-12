@@ -169,6 +169,52 @@ body {
 }
 .thread-item.restored { opacity: 0.92; }
 
+/* Project grouping in the thread list */
+.project-group { margin-bottom: 6px; }
+.project-header {
+  display: flex; align-items: center; gap: 6px; width: 100%;
+  background: transparent; border: none; cursor: pointer;
+  color: var(--muted); font: inherit; font-size: 11px;
+  padding: 4px 6px; text-align: left;
+}
+.project-header:hover { color: var(--text); }
+.project-caret { width: 1em; color: var(--dim); }
+.project-name {
+  font-weight: 600; letter-spacing: 0.02em;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.project-count { margin-left: auto; font-size: 10px; }
+.project-group .thread-item { margin-left: 8px; }
+
+.thread-title {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0;
+}
+.thread-delete {
+  margin-left: auto; flex-shrink: 0;
+  background: transparent; border: none; cursor: pointer;
+  color: var(--dim); font-size: 11px; padding: 0 2px;
+  opacity: 0; transition: opacity 0.12s;
+}
+.thread-item:hover .thread-delete { opacity: 1; }
+.thread-delete:hover { color: var(--err); }
+
+.badge.branch {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 35%, var(--border));
+}
+.badge.needs-sync {
+  color: var(--warn);
+  border-color: color-mix(in srgb, var(--warn) 45%, var(--border));
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+}
+
+/* Land / Sync controls in the composer meta row */
+.thread-git-row {
+  display: inline-flex; align-items: center; gap: 6px; margin-left: auto;
+}
+.thread-branch { font-size: 10px; white-space: nowrap; }
+.thread-git-row .btn { font-size: 10px; padding: 2px 8px; }
+
 .empty-hint { color: var(--dim); font-size: 12px; padding: 8px 6px; }
 
 .col-footer { padding: 10px; border-top: 1px solid var(--border); flex-shrink: 0; display: flex; flex-direction: column; gap: 8px; }

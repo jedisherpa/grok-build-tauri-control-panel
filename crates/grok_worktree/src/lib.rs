@@ -31,6 +31,18 @@ pub enum WorktreeError {
 
 pub type Result<T> = std::result::Result<T, WorktreeError>;
 
+/// Provider-neutral branch prefix for thread worktrees.
+pub const THREAD_BRANCH_PREFIX: &str = "thread/";
+
+/// Outcome of a merge attempt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "status")]
+pub enum MergeOutcome {
+    Merged,
+    /// Conflicted paths (merge left in progress unless the caller aborts).
+    Conflicts { files: Vec<String> },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorktreeInfo {
     pub id: String,
@@ -107,7 +119,7 @@ impl WorktreeManager {
         let path = self
             .worktrees_root
             .join(format!("{}-{}", req.name, &Uuid::new_v4().to_string()[..8]));
-        let branch = format!("grok/{}", req.name);
+        let branch = format!("{THREAD_BRANCH_PREFIX}{}", req.name);
         let base = req.base_ref.as_deref().unwrap_or("HEAD");
 
         // Create branch from base if needed, then worktree
@@ -185,6 +197,59 @@ impl WorktreeManager {
         run_git(repo, &["worktree", "prune", "-v"]).await
     }
 
+    /// Stage and commit everything in `path`. Returns false when there was
+    /// nothing to commit.
+    pub async fn commit_all(&self, path: &Path, message: &str) -> Result<bool> {
+        run_git(path, &["add", "-A"]).await?;
+        if self.is_clean(path).await? {
+            return Ok(false);
+        }
+        run_git(path, &["commit", "-m", message]).await?;
+        Ok(true)
+    }
+
+    /// True when the working tree has no staged or unstaged changes.
+    pub async fn is_clean(&self, path: &Path) -> Result<bool> {
+        let out = run_git(path, &["status", "--porcelain"]).await?;
+        Ok(out.trim().is_empty())
+    }
+
+    pub async fn current_branch(&self, path: &Path) -> Result<String> {
+        Ok(run_git(path, &["rev-parse", "--abbrev-ref", "HEAD"])
+            .await?
+            .trim()
+            .to_string())
+    }
+
+    /// Merge `reference` into the branch checked out at `path`.
+    /// On conflict the merge is left IN PROGRESS (caller decides whether to
+    /// abort — land aborts, sync leaves it for the agent to resolve).
+    pub async fn merge(&self, path: &Path, reference: &str, message: &str) -> Result<MergeOutcome> {
+        match run_git(path, &["merge", "--no-ff", reference, "-m", message]).await {
+            Ok(_) => Ok(MergeOutcome::Merged),
+            Err(WorktreeError::Git(err)) => {
+                let files = run_git(path, &["diff", "--name-only", "--diff-filter=U"])
+                    .await
+                    .unwrap_or_default()
+                    .lines()
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty())
+                    .collect::<Vec<_>>();
+                if files.is_empty() {
+                    // Not a conflict — a real merge failure (bad ref, etc.).
+                    return Err(WorktreeError::Git(err));
+                }
+                Ok(MergeOutcome::Conflicts { files })
+            }
+            Err(e) => Err(e),
+        }
+    }
+
+    /// Abort an in-progress merge (best-effort).
+    pub async fn merge_abort(&self, path: &Path) {
+        let _ = run_git(path, &["merge", "--abort"]).await;
+    }
+
     /// Capture a summary of uncommitted changes for landing review.
     pub async fn status_summary(&self, worktree_path: &Path) -> Result<String> {
         run_git(worktree_path, &["status", "--short"]).await
@@ -212,10 +277,19 @@ fn validate_name(name: &str) -> Result<()> {
 }
 
 async fn ensure_git_repo(path: &Path) -> Result<()> {
-    match run_git(path, &["rev-parse", "--is-inside-work-tree"]).await {
-        Ok(s) if s.trim() == "true" => Ok(()),
-        _ => Err(WorktreeError::NotGitRepo(path.display().to_string())),
+    if is_git_repo(path).await {
+        Ok(())
+    } else {
+        Err(WorktreeError::NotGitRepo(path.display().to_string()))
     }
+}
+
+/// Public check used by the session-start isolation decision.
+pub async fn is_git_repo(path: &Path) -> bool {
+    matches!(
+        run_git(path, &["rev-parse", "--is-inside-work-tree"]).await,
+        Ok(s) if s.trim() == "true"
+    )
 }
 
 async fn run_git(cwd: &Path, args: &[&str]) -> Result<String> {
@@ -329,5 +403,103 @@ locked
     fn name_validation() {
         assert!(validate_name("feat-1").is_ok());
         assert!(validate_name("bad name").is_err());
+    }
+
+    async fn temp_repo() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir_all(&repo).unwrap();
+        for args in [
+            vec!["init", "-b", "main"],
+            vec!["config", "user.email", "t@t.local"],
+            vec!["config", "user.name", "t"],
+        ] {
+            run_git(&repo, &args).await.unwrap();
+        }
+        std::fs::write(repo.join("a.txt"), "one\n").unwrap();
+        run_git(&repo, &["add", "-A"]).await.unwrap();
+        run_git(&repo, &["commit", "-m", "init"]).await.unwrap();
+        (dir, repo)
+    }
+
+    fn test_manager(root: &Path) -> WorktreeManager {
+        WorktreeManager::new(
+            Arc::new(GrokCli::new("/bin/true")),
+            root.join("worktrees"),
+        )
+    }
+
+    #[tokio::test]
+    async fn commit_all_and_is_clean() {
+        let (dir, repo) = temp_repo().await;
+        let mgr = test_manager(dir.path());
+        assert!(mgr.is_clean(&repo).await.unwrap());
+        assert!(!mgr.commit_all(&repo, "noop").await.unwrap());
+        std::fs::write(repo.join("b.txt"), "two\n").unwrap();
+        assert!(!mgr.is_clean(&repo).await.unwrap());
+        assert!(mgr.commit_all(&repo, "add b").await.unwrap());
+        assert!(mgr.is_clean(&repo).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn thread_worktree_land_and_conflict_flow() {
+        let (dir, repo) = temp_repo().await;
+        let mgr = test_manager(dir.path());
+        let wt = mgr
+            .create(
+                &repo,
+                CreateWorktreeRequest {
+                    name: "t-abc".into(),
+                    base_ref: None,
+                    prefer_grok_cli: false,
+                },
+            )
+            .await
+            .unwrap();
+        assert!(wt.branch.as_deref().unwrap().starts_with(THREAD_BRANCH_PREFIX));
+
+        // Thread edits its copy; main is untouched.
+        std::fs::write(wt.path.join("a.txt"), "thread version\n").unwrap();
+        assert!(mgr.commit_all(&wt.path, "thread work").await.unwrap());
+        assert_eq!(std::fs::read_to_string(repo.join("a.txt")).unwrap(), "one\n");
+
+        // Land: clean merge into main.
+        let branch = mgr.current_branch(&wt.path).await.unwrap();
+        match mgr.merge(&repo, &branch, "land").await.unwrap() {
+            MergeOutcome::Merged => {}
+            other => panic!("expected clean merge, got {other:?}"),
+        }
+        assert_eq!(
+            std::fs::read_to_string(repo.join("a.txt")).unwrap(),
+            "thread version\n"
+        );
+
+        // Diverge both sides on the same line → conflict on next land.
+        std::fs::write(repo.join("a.txt"), "main again\n").unwrap();
+        mgr.commit_all(&repo, "main change").await.unwrap();
+        std::fs::write(wt.path.join("a.txt"), "thread again\n").unwrap();
+        mgr.commit_all(&wt.path, "thread change").await.unwrap();
+        match mgr.merge(&repo, &branch, "land 2").await.unwrap() {
+            MergeOutcome::Conflicts { files } => {
+                assert_eq!(files, vec!["a.txt".to_string()]);
+            }
+            other => panic!("expected conflicts, got {other:?}"),
+        }
+        mgr.merge_abort(&repo).await;
+        assert!(mgr.is_clean(&repo).await.unwrap());
+
+        // Sync: merge main INTO the worktree; conflict stays there.
+        match mgr.merge(&wt.path, "main", "sync").await.unwrap() {
+            MergeOutcome::Conflicts { files } => assert_eq!(files.len(), 1),
+            other => panic!("expected sync conflicts, got {other:?}"),
+        }
+        assert!(!mgr.is_clean(&wt.path).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn is_git_repo_detection() {
+        let (dir, repo) = temp_repo().await;
+        assert!(is_git_repo(&repo).await);
+        assert!(!is_git_repo(dir.path()).await);
     }
 }

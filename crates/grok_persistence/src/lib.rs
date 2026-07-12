@@ -84,6 +84,9 @@ pub struct ThreadDto {
     pub worktree: Option<String>,
     pub mcp_servers: Vec<String>,
     pub label: Option<String>,
+    /// Original project folder when cwd is an isolated thread worktree.
+    #[serde(default)]
+    pub project_root: Option<String>,
     /// full_brain | history_only | fresh | null when not live
     pub brain_mode: Option<String>,
 }
