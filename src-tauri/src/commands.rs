@@ -2051,6 +2051,28 @@ pub fn persist_control_event(db: &grok_persistence::Persistence, ev: &ControlEve
             };
             db.append_message(*session_id, "system", body, *at).map(|_| ())
         }
+        // Raw ACP protocol lines: persist (merged into bounded multiline
+        // rows) so the View toggle can reveal history across restarts.
+        // Skip our own side channels (explain/usage/thread label events).
+        Raw {
+            session_id: Some(session_id),
+            payload,
+        } if payload.get("channel").and_then(|v| v.as_str()) == Some("term") => {
+            let Some(line) = payload.get("line").and_then(|v| v.as_str()) else {
+                return Ok(());
+            };
+            if line.trim().is_empty() {
+                return Ok(());
+            }
+            db.append_message_merged(
+                *session_id,
+                "term",
+                &format!("{line}\n"),
+                Utc::now(),
+                10,
+            )
+            .map(|_| ())
+        }
         Error {
             session_id: Some(session_id),
             message,

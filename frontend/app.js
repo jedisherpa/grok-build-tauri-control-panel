@@ -528,14 +528,17 @@ function toastError(e) {
 }
 
 // ── Navigation ──────────────────────────────────────────────────────────
+function activateView(name) {
+  document.querySelectorAll(".nav-item").forEach((b) =>
+    b.classList.toggle("active", b.dataset.view === name)
+  );
+  document.querySelectorAll(".view").forEach((v) => v.classList.remove("active"));
+  const view = $(`view-${name}`);
+  if (view) view.classList.add("active");
+}
+
 document.querySelectorAll(".nav-item").forEach((btn) => {
-  btn.addEventListener("click", () => {
-    document.querySelectorAll(".nav-item").forEach((b) => b.classList.remove("active"));
-    document.querySelectorAll(".view").forEach((v) => v.classList.remove("active"));
-    btn.classList.add("active");
-    const view = $(`view-${btn.dataset.view}`);
-    if (view) view.classList.add("active");
-  });
+  btn.addEventListener("click", () => activateView(btn.dataset.view));
 });
 
 // ── Transcript (center) ─────────────────────────────────────────────────
@@ -1344,6 +1347,8 @@ async function selectSession(id) {
     state.turn = state.presenceBySession.get(id) || (P ? P.emptyPresence() : { phase: "idle" });
     state.presenceBySession.set(id, state.turn);
   }
+  // Clicking a thread always lands you in the chat view, wherever you were.
+  if (id) activateView("chat");
   const sess = state.sessions.find((s) => s.id === id);
   // Selecting a thread activates its PROJECT (not its worktree path — using
   // the raw cwd made + nest new threads inside another thread's worktree).

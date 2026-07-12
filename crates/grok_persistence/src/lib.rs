@@ -526,6 +526,9 @@ fn kind_to_role(kind: &str) -> String {
         "tool" | "tool_call" => "tool".into(),
         "plan" => "plan".into(),
         "error" => "error".into(),
+        // Raw ACP protocol lines — hidden by default in the UI, revealed by
+        // the View toggle.
+        "term" => "term".into(),
         _ => "system".into(),
     }
 }
