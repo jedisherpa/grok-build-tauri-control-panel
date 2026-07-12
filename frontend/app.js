@@ -3614,7 +3614,7 @@ function wireExplainer() {
   wireAccordion("log-toggle", "event-feed", "log-caret", "log", false);
   wireAccordion("agents-toggle", "agent-list", "agents-caret", "agents", true);
   wireAccordion("tools-toggle", "tool-list", "tools-caret", "tools", true);
-  wireAccordion("view-toggle", "view-settings", "view-caret", "view", false);
+  wireAccordion("view-toggle", "view-options", "view-caret", "view", false);
 
   // View settings: raw ACP protocol lines in threads (default hidden).
   const acpToggle = $("toggle-acp-lines");
