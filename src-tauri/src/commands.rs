@@ -1972,6 +1972,14 @@ pub fn persist_control_event(db: &grok_persistence::Persistence, ev: &ControlEve
                 .map(|_| ())
         }
         ToolCall { session_id, event } => {
+            // Plan-presenting tool calls persist their plan as a plan_doc
+            // row — the raw JSON dump would just duplicate it, hugely.
+            let is_plan_tool = event.tool.to_lowercase().contains("plan")
+                || event.args_summary.contains("\"plan\":");
+            if is_plan_tool {
+                let _ = db.update_session_status(*session_id, "running");
+                return Ok(());
+            }
             let payload = serde_json::json!({
                 "id": event.id,
                 "tool": event.tool,

@@ -1522,19 +1522,33 @@ function handleControlEvent(ev) {
     if (state.tools.length > 80) state.tools.length = 80;
     renderTools();
     const terminal = isToolTerminal(status);
-    // Plan-presenting tools already rendered their plan via plan_doc —
-    // don't also dump the raw JSON args into the thread.
-    const isPlanTool = /plan/i.test(tool) && /"plan"\s*:/.test(String(summary));
+    // Plan-presenting tools already rendered their plan via plan_doc — don't
+    // also dump the raw JSON. Match on the payload (tools like Claude's
+    // "Ready to code?" carry a plan without 'plan' in the title).
+    const isPlanTool = /plan/i.test(tool) || /"plan"\s*:\s*"/.test(String(summary));
     if (!isPlanTool) {
-      appendTranscript(
-        sid,
-        "tool",
-        `$ ${tool}  [${status}]\n${String(summary).slice(0, 2000)}${
-          te.result_summary || te.resultSummary
-            ? `\n→ ${String(te.result_summary || te.resultSummary).slice(0, 800)}`
-            : ""
-        }`
-      );
+      const body = `$ ${tool}  [${status}]\n${String(summary).slice(0, 2000)}${
+        te.result_summary || te.resultSummary
+          ? `\n→ ${String(te.result_summary || te.resultSummary).slice(0, 800)}`
+          : ""
+      }`;
+      // One transcript row per tool call: later events (running → completed,
+      // args filled in) update the existing row instead of stacking dupes.
+      const list = getTranscript(sid);
+      let updated = false;
+      for (let i = list.length - 1, hops = 0; i >= 0 && hops < 6; i--, hops++) {
+        const entry = list[i];
+        if (entry.role === "tool" && entry.meta?.toolId === toolId) {
+          entry.body = body;
+          entry.at = nowIso();
+          updated = true;
+          if (sid === state.selectedSession) renderTranscript({ keepScroll: true });
+          break;
+        }
+      }
+      if (!updated) {
+        appendTranscript(sid, "tool", body, nowIso(), { meta: { toolId } });
+      }
     }
     pushEvent(`tool · ${tool} · ${status}`, terminal ? "ok" : "", null, {
       force: true,
