@@ -336,6 +336,21 @@ impl TerminalRegistry {
         Ok(json!({}))
     }
 
+    /// Kill every live terminal child (turn cancel) — best-effort; entries
+    /// stay in the map so the agent's later output/release calls still work.
+    pub async fn kill_all(&self) {
+        let children: Vec<_> = {
+            let map = self.terminals.lock().await;
+            map.values().map(|t| t.child.clone()).collect()
+        };
+        for child in children {
+            let mut guard = child.lock().await;
+            if let Some(c) = guard.as_mut() {
+                let _ = c.kill().await;
+            }
+        }
+    }
+
     async fn release(&self, params: &Option<Value>) -> Result<Value> {
         let id = terminal_id(params)?;
         let term = {

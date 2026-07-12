@@ -1049,15 +1049,17 @@ impl AcpClient {
         let has_transport = self.transport.read().await.is_some();
         if has_transport {
             if let Some(sid) = self.session_id.read().await.clone() {
+                // ACP cancellation is a NOTIFICATION — agents don't reply to
+                // it. Sending it as a request made Stop block for the full
+                // request timeout waiting on a response that never comes.
                 let params = json!({ "sessionId": sid });
-                match self
-                    .request_timeout("session/cancel", Some(params))
-                    .await
-                {
-                    Ok(_) | Err(AcpError::Rpc { .. }) => {}
-                    Err(e) => return Err(e),
+                if let Ok(transport) = self.transport().await {
+                    let _ = transport.notify("session/cancel", Some(params)).await;
                 }
             }
+            // The agent should wind down its tool calls, but the commands run
+            // in OUR terminal host — kill them so Stop actually stops work.
+            self.terminals.kill_all().await;
         }
         if let Some(bus) = &self.event_bus {
             bus.emit_status(self.control_session_id, SessionStatus::Cancelled)

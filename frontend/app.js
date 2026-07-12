@@ -1047,6 +1047,21 @@ function renderAgents() {
   updateBombChrome();
 }
 
+/** Cancelled/failed turns never deliver terminal tool events — sweep the
+ *  session's in-flight tool entries so the panel doesn't say "running" forever. */
+function sweepToolsForSession(sid, finalStatus = "cancelled") {
+  if (!sid) return;
+  let changed = false;
+  for (const t of state.tools) {
+    if (t.sessionId === sid && !isToolTerminal(t.status)) {
+      t.status = finalStatus;
+      changed = true;
+    }
+  }
+  openToolsFor(sid).clear();
+  if (changed) renderTools();
+}
+
 function renderTools() {
   const root = $("tool-list");
   if (!state.tools.length) {
@@ -1299,9 +1314,11 @@ function handleControlEvent(ev) {
         noteTurn("wait", { note: "Waiting for approval" }, sid);
       } else if (st.includes("fail") || st.includes("error")) {
         endAgentStream(sid);
+        sweepToolsForSession(sid, "failed");
         endTurnPresence(sid, "error", String(ev.status));
       } else if (st.includes("cancel")) {
         endAgentStream(sid);
+        sweepToolsForSession(sid, "cancelled");
         endTurnPresence(sid, "error", "Cancelled");
       } else if (st.includes("idle") || st.includes("complete")) {
         endAgentStream(sid);
@@ -1320,6 +1337,7 @@ function handleControlEvent(ev) {
     refreshSessions();
   } else if (type === "session_cancelled" || type === "sessionCancelled") {
     endAgentStream(sid);
+    sweepToolsForSession(sid, "cancelled");
     appendTranscript(sid, "term", "session cancelled");
     pushEvent(`cancelled · ${shortId(sid)}`, "err", "error", { force: true, milestone: true });
     if (sid) endTurnPresence(sid, "error", "Cancelled");
