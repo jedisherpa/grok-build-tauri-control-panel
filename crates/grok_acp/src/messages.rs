@@ -48,15 +48,54 @@ pub struct JsonRpcError {
     pub data: Option<Value>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Wire message discrimination.
+///
+/// IMPORTANT: Do NOT use `#[serde(untagged)]` with Response-first ordering.
+/// `JsonRpcResponse` only requires `jsonrpc` (id/result/error optional), so serde
+/// happily parses `session/update` notifications and agent→client requests as
+/// empty Responses — speech never reaches the UI and terminal/fs calls hang.
+#[derive(Debug, Clone, Serialize)]
 #[serde(untagged)]
 pub enum JsonRpcMessage {
-    /// Must try response first (has result/error).
     Response(JsonRpcResponse),
-    /// Request has method + id.
     Request(JsonRpcRequest),
-    /// Notification has method, no id.
     Notification(JsonRpcNotification),
+}
+
+impl<'de> Deserialize<'de> for JsonRpcMessage {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let v = Value::deserialize(deserializer)?;
+        let obj = v.as_object().ok_or_else(|| {
+            serde::de::Error::custom("JSON-RPC message must be an object")
+        })?;
+
+        let has_method = obj.contains_key("method");
+        let has_id = obj.contains_key("id");
+        let has_result = obj.contains_key("result");
+        let has_error = obj.contains_key("error");
+
+        if has_method && has_id {
+            // Agent → client request (or client→agent request echoed).
+            let req: JsonRpcRequest = serde_json::from_value(v).map_err(serde::de::Error::custom)?;
+            return Ok(JsonRpcMessage::Request(req));
+        }
+        if has_method && !has_id {
+            let n: JsonRpcNotification =
+                serde_json::from_value(v).map_err(serde::de::Error::custom)?;
+            return Ok(JsonRpcMessage::Notification(n));
+        }
+        if has_result || has_error || has_id {
+            let r: JsonRpcResponse = serde_json::from_value(v).map_err(serde::de::Error::custom)?;
+            return Ok(JsonRpcMessage::Response(r));
+        }
+
+        Err(serde::de::Error::custom(
+            "unrecognized JSON-RPC message shape",
+        ))
+    }
 }
 
 /// Agent → client JSON-RPC request that needs a response.
@@ -157,4 +196,66 @@ pub struct SessionPromptParams {
     #[serde(rename = "sessionId")]
     pub session_id: String,
     pub prompt: Vec<PromptContent>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn parses_session_update_as_notification_not_response() {
+        let line = r#"{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"hello"}}}}"#;
+        let msg: JsonRpcMessage = serde_json::from_str(line).expect("parse");
+        match msg {
+            JsonRpcMessage::Notification(n) => {
+                assert_eq!(n.method, "session/update");
+                let text = n
+                    .params
+                    .as_ref()
+                    .and_then(|p| p.pointer("/update/content/text"))
+                    .and_then(|v| v.as_str());
+                assert_eq!(text, Some("hello"));
+            }
+            other => panic!("expected Notification, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_agent_request_as_request_not_response() {
+        let line = r#"{"jsonrpc":"2.0","id":7,"method":"terminal/create","params":{"command":"ls","sessionId":"s1"}}"#;
+        let msg: JsonRpcMessage = serde_json::from_str(line).expect("parse");
+        match msg {
+            JsonRpcMessage::Request(r) => {
+                assert_eq!(r.method, "terminal/create");
+                assert_eq!(r.id, json!(7));
+            }
+            other => panic!("expected Request, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_response_with_result() {
+        let line = r#"{"jsonrpc":"2.0","id":"abc","result":{"sessionId":"s1"}}"#;
+        let msg: JsonRpcMessage = serde_json::from_str(line).expect("parse");
+        match msg {
+            JsonRpcMessage::Response(r) => {
+                assert!(r.result.is_some());
+                assert_eq!(r.id.as_ref().and_then(|v| v.as_str()), Some("abc"));
+            }
+            other => panic!("expected Response, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parses_error_response() {
+        let line = r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"nope"}}"#;
+        let msg: JsonRpcMessage = serde_json::from_str(line).expect("parse");
+        match msg {
+            JsonRpcMessage::Response(r) => {
+                assert_eq!(r.error.as_ref().map(|e| e.code), Some(-32601));
+            }
+            other => panic!("expected Response, got {other:?}"),
+        }
+    }
 }

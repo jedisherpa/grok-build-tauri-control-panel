@@ -15,7 +15,9 @@
 
 /* ── Sprite base ─────────────────────────────────────────────────────────── */
 .px-bomb {
-  --bomb-size: 16px;
+  --bomb-size: 22px;
+  --wick-x: 14%;
+  --wick-y: 2%;
   position: relative;
   display: inline-flex;
   align-items: center;
@@ -28,6 +30,8 @@
   image-rendering: crisp-edges;
   user-select: none;
   pointer-events: none;
+  /* room for wick sparks above the icon */
+  overflow: visible;
 }
 .px-bomb img,
 .px-bomb .bomb-face {
@@ -40,13 +44,20 @@
   filter: drop-shadow(0 0 0 transparent);
   transform-origin: 50% 70%;
 }
-.px-bomb.xs { --bomb-size: 12px; }
-.px-bomb.sm { --bomb-size: 16px; }
-.px-bomb.md { --bomb-size: 22px; }
-.px-bomb.lg { --bomb-size: 36px; }
-.px-bomb.xl { --bomb-size: 56px; }
+/* Bigger scale across the app */
+.px-bomb.xs { --bomb-size: 16px; }
+.px-bomb.sm { --bomb-size: 22px; }
+.px-bomb.md { --bomb-size: 32px; }
+.px-bomb.lg { --bomb-size: 48px; }
+.px-bomb.xl { --bomb-size: 72px; }
 
-/* Fuse spark (CSS pixel particle) */
+/* Turn dock bomb — hero instrument */
+.px-bomb.tier-dock,
+#turn-bomb {
+  --bomb-size: 52px;
+}
+
+/* Wick / fuse sparks (::before = flame core, ::after = rising ember) */
 .px-bomb::before,
 .px-bomb::after {
   content: "";
@@ -54,121 +65,169 @@
   opacity: 0;
   pointer-events: none;
   image-rendering: pixelated;
+  z-index: 2;
+}
+
+/* Intensity tiers:
+   - dock: full body + wick
+   - ambient: soft breathe + faint wick when armed
+   - satellite: larger icon, static body; wick only on armed moods
+*/
+.px-bomb.tier-satellite img {
+  animation: none !important;
+}
+/* satellites still get wick when mood is armed (see .wick-on rules below) */
+
+.px-bomb.tier-ambient img {
+  animation: bomb-breathe 3.6s ease-in-out infinite;
+  opacity: 0.92;
+}
+
+/* Enter transition on phase change */
+.px-bomb.is-entering img {
+  animation: bomb-mood-enter 0.35s ease-out both !important;
+}
+
+/* ── Shared wick geometry (top-right fuse of the logo) ───────────────────── */
+.px-bomb.wick-on::before,
+.px-bomb.mood-thinking::before,
+.px-bomb.mood-running::before,
+.px-bomb.mood-tooling::before,
+.px-bomb.mood-stream::before,
+.px-bomb.mood-wait::before,
+.px-bomb.mood-ready::before {
+  /* flame core at fuse tip */
+  width: max(4px, calc(var(--bomb-size) * 0.14));
+  height: max(4px, calc(var(--bomb-size) * 0.14));
+  top: calc(var(--wick-y) - 8%);
+  right: var(--wick-x);
+  border-radius: 1px;
+  opacity: 1;
+}
+.px-bomb.wick-on::after,
+.px-bomb.mood-thinking::after,
+.px-bomb.mood-running::after,
+.px-bomb.mood-tooling::after,
+.px-bomb.mood-stream::after,
+.px-bomb.mood-wait::after {
+  /* rising spark */
+  width: max(2px, calc(var(--bomb-size) * 0.08));
+  height: max(2px, calc(var(--bomb-size) * 0.08));
+  top: calc(var(--wick-y) - 18%);
+  right: calc(var(--wick-x) - 4%);
+  opacity: 0.95;
 }
 
 /* ── Mood: idle ──────────────────────────────────────────────────────────── */
 .px-bomb.mood-idle img {
   animation: bomb-breathe 3.2s ease-in-out infinite;
-  opacity: 0.88;
+  opacity: 0.9;
 }
+/* no wick when cold */
 
 /* ── Mood: ready (soft fuse glow) ────────────────────────────────────────── */
 .px-bomb.mood-ready img {
   animation: bomb-breathe 2.4s ease-in-out infinite;
-  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--ok) 45%, transparent));
+  filter: drop-shadow(0 0 5px color-mix(in srgb, var(--ok) 45%, transparent));
 }
 .px-bomb.mood-ready::before {
-  width: 3px; height: 3px;
-  top: 8%; right: 18%;
   background: var(--bomb-fuse);
-  opacity: 0.7;
   box-shadow:
     1px 0 0 var(--bomb-fuse-hot),
-    0 -1px 0 var(--bomb-fuse);
-  animation: fuse-twinkle 1.6s steps(2) infinite;
+    0 -1px 0 var(--bomb-fuse),
+    0 0 6px var(--bomb-fuse);
+  animation: fuse-twinkle 1.4s steps(2) infinite;
 }
 
-/* ── Mood: thinking (lit fuse + bounce — Claude/Codex-style wait) ─────────── */
+/* ── Mood: thinking — lit wick burning down the fuse ─────────────────────── */
 .px-bomb.mood-thinking img {
-  animation: bomb-think-bounce 0.85s ease-in-out infinite;
-  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--bomb-fuse) 55%, transparent));
+  animation: bomb-think-bounce 1.25s ease-in-out infinite;
+  filter: drop-shadow(0 0 8px color-mix(in srgb, var(--bomb-fuse) 55%, transparent));
 }
 .px-bomb.mood-thinking::before {
-  width: 4px; height: 4px;
-  top: 2%; right: 12%;
   background: var(--bomb-fuse-hot);
-  opacity: 1;
   box-shadow:
     0 0 0 1px var(--bomb-fuse),
     2px -1px 0 var(--bomb-fuse),
     -1px -2px 0 var(--bomb-fuse-hot),
-    3px -3px 0 color-mix(in srgb, var(--bomb-fuse) 50%, transparent);
-  animation: fuse-spark 0.35s steps(3) infinite;
+    3px -3px 0 color-mix(in srgb, var(--bomb-fuse) 55%, transparent),
+    0 0 10px var(--bomb-fuse-hot);
+  animation: fuse-spark 0.45s steps(3) infinite;
 }
 .px-bomb.mood-thinking::after {
-  width: 2px; height: 2px;
-  top: -2px; right: 4px;
   background: #fff7ed;
-  opacity: 0.9;
-  animation: spark-rise 0.7s linear infinite;
+  box-shadow: 0 0 4px var(--bomb-fuse-hot);
+  animation: spark-rise 0.75s linear infinite;
 }
 
-/* ── Mood: running / working ─────────────────────────────────────────────── */
+/* ── Mood: running / stall — fuse still lit, calmer ──────────────────────── */
 .px-bomb.mood-running img {
-  animation: bomb-shake 0.28s linear infinite;
-  filter: drop-shadow(0 0 8px color-mix(in srgb, var(--bomb-fuse) 70%, transparent));
+  animation: bomb-breathe 1.5s ease-in-out infinite;
+  filter: drop-shadow(0 0 7px color-mix(in srgb, var(--bomb-fuse) 50%, transparent));
 }
 .px-bomb.mood-running::before {
-  width: 5px; height: 5px;
-  top: 0; right: 8%;
-  background: var(--bomb-fuse-hot);
-  opacity: 1;
+  background: var(--bomb-fuse);
   box-shadow:
+    0 0 0 1px var(--bomb-fuse-hot),
     2px -2px 0 var(--bomb-fuse),
-    -2px -1px 0 #fff,
-    4px -4px 0 color-mix(in srgb, var(--bomb-fuse) 60%, transparent);
-  animation: fuse-spark 0.22s steps(2) infinite;
+    0 0 8px var(--bomb-fuse);
+  animation: fuse-spark 0.7s steps(2) infinite;
 }
 .px-bomb.mood-running::after {
-  width: 2px; height: 2px;
-  top: -4px; right: 0;
-  background: var(--bomb-fuse);
-  animation: spark-rise 0.45s linear infinite;
+  background: var(--bomb-fuse-hot);
+  animation: spark-rise 0.9s linear infinite;
 }
 
-/* ── Mood: tooling (tool call in flight) ─────────────────────────────────── */
+/* ── Mood: tooling — wick + work chips ───────────────────────────────────── */
 .px-bomb.mood-tooling img {
-  animation: bomb-tool-spin 1.1s steps(4) infinite;
-  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--tool) 50%, transparent));
+  animation: bomb-tool-nod 1.3s ease-in-out infinite;
+  filter: drop-shadow(0 0 7px color-mix(in srgb, var(--tool) 50%, transparent));
 }
 .px-bomb.mood-tooling::before {
-  width: 3px; height: 3px;
-  top: 10%; left: 5%;
-  background: var(--tool);
-  opacity: 1;
-  animation: tool-chip 0.5s steps(2) infinite;
+  background: var(--bomb-fuse-hot);
+  box-shadow:
+    0 0 0 1px var(--tool),
+    2px -1px 0 var(--bomb-fuse),
+    0 0 8px var(--bomb-fuse);
+  animation: fuse-spark 0.55s steps(3) infinite;
 }
 .px-bomb.mood-tooling::after {
-  width: 3px; height: 3px;
-  bottom: 15%; right: 0;
-  background: var(--bomb-fuse);
-  opacity: 1;
-  animation: tool-chip 0.5s steps(2) infinite reverse;
+  background: #fff7ed;
+  box-shadow: -6px 10px 0 color-mix(in srgb, var(--tool) 80%, transparent);
+  animation: spark-rise 0.85s linear infinite;
 }
 
-/* ── Mood: stream (agent tokens flowing) ─────────────────────────────────── */
+/* ── Mood: stream — productive burn ──────────────────────────────────────── */
 .px-bomb.mood-stream img {
-  animation: bomb-breathe 1.2s ease-in-out infinite;
-  filter: drop-shadow(0 0 5px color-mix(in srgb, var(--agent) 55%, transparent));
+  animation: bomb-stream-glow 1.6s ease-in-out infinite;
+  filter: drop-shadow(0 0 8px color-mix(in srgb, var(--agent) 55%, transparent));
 }
 .px-bomb.mood-stream::before {
-  width: 2px; height: 2px;
-  top: 20%; right: -2px;
-  background: var(--agent);
-  opacity: 0.9;
-  animation: stream-dot 0.9s linear infinite;
+  background: var(--bomb-fuse-hot);
+  box-shadow:
+    0 0 0 1px var(--agent),
+    2px -2px 0 var(--bomb-fuse),
+    0 0 10px var(--agent);
+  animation: fuse-spark 0.5s steps(3) infinite;
+}
+.px-bomb.mood-stream::after {
+  background: #e0f2fe;
+  animation: spark-rise 0.7s linear infinite;
 }
 
 /* ── Mood: boom / success ────────────────────────────────────────────────── */
 .px-bomb.mood-boom img {
   animation: bomb-boom-pop 0.55s cubic-bezier(0.2, 1.4, 0.4, 1) both;
-  filter: drop-shadow(0 0 10px color-mix(in srgb, var(--bomb-ok) 70%, transparent));
+  filter: drop-shadow(0 0 12px color-mix(in srgb, var(--bomb-ok) 70%, transparent));
 }
 .px-bomb.mood-boom::before,
 .px-bomb.mood-boom::after {
   opacity: 1;
-  width: 3px; height: 3px;
-  top: 40%; left: 50%;
+  width: max(4px, calc(var(--bomb-size) * 0.12));
+  height: max(4px, calc(var(--bomb-size) * 0.12));
+  top: 40%;
+  left: 50%;
+  right: auto;
   background: var(--bomb-ok);
   animation: boom-bits 0.55s ease-out both;
 }
@@ -177,83 +236,118 @@
   animation-delay: 0.04s;
 }
 
-/* ── Mood: error / fail ──────────────────────────────────────────────────── */
+/* ── Mood: error / fail — smoke from snuffed wick ────────────────────────── */
 .px-bomb.mood-error img {
   animation: bomb-error-wobble 0.45s ease-in-out 2;
   filter: drop-shadow(0 0 6px color-mix(in srgb, var(--bomb-err) 55%, transparent))
     grayscale(0.25);
 }
 .px-bomb.mood-error::before {
-  width: 6px; height: 4px;
-  top: 0; right: 10%;
+  width: max(6px, calc(var(--bomb-size) * 0.16));
+  height: max(4px, calc(var(--bomb-size) * 0.1));
+  top: 0;
+  right: 10%;
   background: var(--bomb-smoke);
-  opacity: 0.75;
+  opacity: 0.8;
   border-radius: 1px;
   animation: smoke-puff 1.4s ease-out infinite;
+  box-shadow: none;
+}
+.px-bomb.mood-error::after {
+  opacity: 0;
 }
 
-/* ── Mood: wait / approval ───────────────────────────────────────────────── */
+/* ── Mood: wait / approval — amber fuse holding ──────────────────────────── */
 .px-bomb.mood-wait img {
-  animation: bomb-wait-pulse 1.1s ease-in-out infinite;
-  filter: drop-shadow(0 0 7px color-mix(in srgb, var(--bomb-wait) 60%, transparent));
+  animation: bomb-breathe 2.2s ease-in-out infinite;
+  filter: drop-shadow(0 0 8px color-mix(in srgb, var(--bomb-wait) 60%, transparent));
+  opacity: 0.98;
 }
 .px-bomb.mood-wait::before {
-  width: 4px; height: 4px;
-  top: 4%; right: 14%;
   background: var(--bomb-wait);
+  box-shadow:
+    0 0 0 1px var(--bomb-fuse-hot),
+    1px -2px 0 var(--bomb-wait),
+    0 0 10px var(--bomb-wait);
+  animation: fuse-twinkle 0.7s steps(2) infinite;
+}
+.px-bomb.mood-wait::after {
+  background: #fffbeb;
+  animation: spark-rise 1.1s linear infinite;
+}
+
+/* Satellites: body static, wick still burns when armed */
+.px-bomb.tier-satellite.mood-thinking::before,
+.px-bomb.tier-satellite.mood-thinking::after,
+.px-bomb.tier-satellite.mood-stream::before,
+.px-bomb.tier-satellite.mood-stream::after,
+.px-bomb.tier-satellite.mood-tooling::before,
+.px-bomb.tier-satellite.mood-tooling::after,
+.px-bomb.tier-satellite.mood-wait::before,
+.px-bomb.tier-satellite.mood-wait::after,
+.px-bomb.tier-satellite.mood-ready::before,
+.px-bomb.tier-satellite.mood-running::before,
+.px-bomb.tier-satellite.mood-running::after {
+  /* keep wick animations even when body is frozen */
   opacity: 1;
-  animation: fuse-twinkle 0.8s steps(2) infinite;
+}
+.px-bomb.tier-ambient.mood-thinking::before,
+.px-bomb.tier-ambient.mood-stream::before,
+.px-bomb.tier-ambient.mood-tooling::before,
+.px-bomb.tier-ambient.mood-wait::before,
+.px-bomb.tier-ambient.mood-ready::before {
+  opacity: 0.85;
 }
 
 /* ── Keyframes ───────────────────────────────────────────────────────────── */
 @keyframes bomb-breathe {
   0%, 100% { transform: scale(1) translateY(0); }
-  50% { transform: scale(1.06) translateY(-1px); }
+  50% { transform: scale(1.04) translateY(-1px); }
 }
 @keyframes bomb-think-bounce {
-  0%, 100% { transform: translateY(0) rotate(-2deg); }
-  50% { transform: translateY(-3px) rotate(2deg); }
+  0%, 100% { transform: translateY(0) rotate(-1deg); }
+  50% { transform: translateY(-2px) rotate(1deg); }
 }
-@keyframes bomb-shake {
-  0% { transform: translate(0, 0) rotate(0); }
-  25% { transform: translate(1px, -1px) rotate(-3deg); }
-  50% { transform: translate(-1px, 1px) rotate(2deg); }
-  75% { transform: translate(1px, 0) rotate(-1deg); }
-  100% { transform: translate(0, 0) rotate(0); }
+@keyframes bomb-tool-nod {
+  0%, 100% { transform: rotate(0); }
+  40% { transform: rotate(-3deg); }
+  70% { transform: rotate(3deg); }
 }
-@keyframes bomb-tool-spin {
-  0% { transform: rotate(0) scale(1); }
-  25% { transform: rotate(-6deg) scale(1.04); }
-  50% { transform: rotate(0) scale(1); }
-  75% { transform: rotate(6deg) scale(1.04); }
-  100% { transform: rotate(0) scale(1); }
+@keyframes bomb-stream-glow {
+  0%, 100% { transform: scale(1); opacity: 0.92; }
+  50% { transform: scale(1.03); opacity: 1; }
+}
+@keyframes bomb-mood-enter {
+  0% { transform: scale(0.88); opacity: 0.5; }
+  100% { transform: scale(1); opacity: 1; }
 }
 @keyframes bomb-boom-pop {
-  0% { transform: scale(0.7); opacity: 0.4; }
-  45% { transform: scale(1.25); opacity: 1; }
+  0% { transform: scale(0.75); opacity: 0.5; }
+  40% { transform: scale(1.2); opacity: 1; }
   100% { transform: scale(1); opacity: 1; }
 }
 @keyframes bomb-error-wobble {
   0%, 100% { transform: translateX(0) rotate(0); }
-  25% { transform: translateX(-2px) rotate(-6deg); }
-  75% { transform: translateX(2px) rotate(6deg); }
+  25% { transform: translateX(-2px) rotate(-5deg); }
+  75% { transform: translateX(2px) rotate(5deg); }
 }
 @keyframes bomb-wait-pulse {
-  0%, 100% { transform: scale(1); opacity: 0.85; }
-  50% { transform: scale(1.1); opacity: 1; }
+  0%, 100% { opacity: 0.9; }
+  50% { opacity: 1; }
 }
 @keyframes fuse-spark {
   0% { transform: scale(1) translate(0, 0); opacity: 1; }
-  50% { transform: scale(1.3) translate(1px, -1px); opacity: 0.85; }
-  100% { transform: scale(0.9) translate(0, -2px); opacity: 0.5; }
+  33% { transform: scale(1.35) translate(1px, -2px); opacity: 1; }
+  66% { transform: scale(0.95) translate(-1px, -1px); opacity: 0.75; }
+  100% { transform: scale(1.15) translate(0, -3px); opacity: 0.55; }
 }
 @keyframes fuse-twinkle {
-  0%, 100% { opacity: 0.35; }
-  50% { opacity: 1; }
+  0%, 100% { opacity: 0.4; transform: scale(0.9); }
+  50% { opacity: 1; transform: scale(1.2); }
 }
 @keyframes spark-rise {
-  0% { transform: translate(0, 0); opacity: 1; }
-  100% { transform: translate(3px, -8px); opacity: 0; }
+  0% { transform: translate(0, 0) scale(1); opacity: 1; }
+  100% { transform: translate(4px, -12px) scale(0.6); opacity: 0; }
 }
 @keyframes stream-dot {
   0% { transform: translateX(0); opacity: 0; }
@@ -280,11 +374,12 @@
   gap: 8px;
   flex-shrink: 0;
   margin: 0 12px 8px;
-  padding: 10px 12px 8px;
+  padding: 12px 14px 10px;
   border-radius: 12px;
   border: 1px solid var(--border);
   background: var(--bg-soft);
   box-shadow: inset 0 0 0 1px color-mix(in srgb, #000 30%, transparent);
+  overflow: visible;
 }
 .turn-dock.visible { display: flex; }
 .turn-dock.phase-think,
@@ -307,12 +402,13 @@
   border-color: color-mix(in srgb, var(--bomb-ok) 40%, var(--border));
 }
 .turn-dock.stalled {
-  animation: strip-glow 1.6s ease-in-out infinite;
+  animation: strip-glow 2.2s ease-in-out infinite;
+  border-color: color-mix(in srgb, var(--bomb-wait) 40%, var(--border));
 }
 .turn-dock-main {
   display: flex;
-  align-items: flex-start;
-  gap: 10px;
+  align-items: center;
+  gap: 12px;
 }
 .turn-dock-copy {
   flex: 1;
@@ -344,6 +440,13 @@
   opacity: 0.55;
   font-family: var(--font);
   margin-left: auto;
+  max-width: 40%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.turn-dock:not(.has-flavor) .turn-flavor {
+  display: none;
 }
 .turn-detail {
   font-family: var(--font);
@@ -412,21 +515,44 @@
   height: 100%;
   width: 40%;
   background: linear-gradient(90deg, var(--bomb-fuse), var(--bomb-fuse-hot), #fff7ed);
-  animation: fuse-meter-run 1.4s linear infinite;
   box-shadow: 0 0 8px var(--bomb-fuse);
+  transition: width 0.25s ease-out;
 }
-.turn-dock.phase-done .turn-dock-meter > i,
-.turn-dock.phase-error .turn-dock-meter > i,
-.turn-dock.phase-idle .turn-dock-meter > i {
+/* Indeterminate only when waiting for first signal */
+.turn-dock-meter[data-mode="indeterminate"] > i {
+  width: 36%;
+  animation: fuse-meter-run 1.6s linear infinite;
+}
+.turn-dock-meter[data-mode="progress"] > i,
+.turn-dock-meter[data-mode="tools"] > i {
   animation: none;
-  width: 100%;
+  background: linear-gradient(90deg, var(--agent), var(--bomb-fuse-hot));
+  box-shadow: 0 0 6px color-mix(in srgb, var(--agent) 40%, transparent);
 }
+.turn-dock-meter[data-mode="stall"] > i {
+  width: 100%;
+  animation: none;
+  background: color-mix(in srgb, var(--bomb-wait) 70%, #444);
+  box-shadow: none;
+  opacity: 0.7;
+}
+.turn-dock-meter[data-mode="complete"] > i,
 .turn-dock.phase-done .turn-dock-meter > i {
+  animation: none;
+  width: 100% !important;
   background: var(--ok);
   box-shadow: none;
 }
+.turn-dock-meter[data-mode="error"] > i,
 .turn-dock.phase-error .turn-dock-meter > i {
+  animation: none;
+  width: 100% !important;
   background: var(--err);
+  box-shadow: none;
+}
+.turn-dock-meter[data-mode="idle"] > i {
+  animation: none;
+  width: 0;
   box-shadow: none;
 }
 
@@ -526,7 +652,7 @@
   align-items: center;
   gap: 4px;
 }
-.badge .px-bomb { --bomb-size: 10px; }
+.badge .px-bomb { --bomb-size: 15px; }
 
 /* ── Event feed bomb glyphs ──────────────────────────────────────────────── */
 .event-line {
@@ -536,6 +662,7 @@
 }
 .event-line .px-bomb {
   margin-top: 1px;
+  --bomb-size: 16px;
 }
 .event-line .event-body {
   flex: 1;
@@ -548,7 +675,7 @@
   align-items: center;
   gap: 6px;
 }
-.t-role .px-bomb { --bomb-size: 12px; }
+.t-role .px-bomb { --bomb-size: 16px; }
 
 /* ── Agent / tool cards ──────────────────────────────────────────────────── */
 .agent-card .name,
@@ -611,13 +738,22 @@
 .col-right .col-header .title {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 10px;
+}
+#activity-bomb {
+  --bomb-size: 28px;
+}
+#turn-bomb {
+  margin-top: 0;
+  margin-right: 2px;
+  /* 52px set via .tier-dock; keep wick sparks visible */
+  overflow: visible;
 }
 
-/* ── Brand logo fuse when any session running ────────────────────────────── */
+/* ── Brand logo — ambient only when live ─────────────────────────────────── */
 .brand.live .logo {
-  animation: bomb-think-bounce 0.9s ease-in-out infinite;
-  filter: drop-shadow(0 0 6px color-mix(in srgb, var(--bomb-fuse) 50%, transparent));
+  animation: bomb-breathe 3.2s ease-in-out infinite;
+  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--bomb-fuse) 35%, transparent));
 }
 
 /* ── Reduced motion ──────────────────────────────────────────────────────── */
@@ -625,14 +761,22 @@
   .px-bomb img,
   .px-bomb::before,
   .px-bomb::after,
+  .px-bomb.is-entering img,
   .thinking-strip,
   .thinking-strip .fuse-meter > i,
   .composer.busy::before,
-  .brand.live .logo {
+  .brand.live .logo,
+  .turn-dock.stalled,
+  .turn-dock-meter > i,
+  .turn-stages .stage.active {
     animation: none !important;
   }
   .px-bomb.mood-thinking img,
-  .px-bomb.mood-running img {
+  .px-bomb.mood-running img,
+  .px-bomb.mood-stream img {
     filter: drop-shadow(0 0 4px var(--bomb-fuse));
+  }
+  .turn-dock-meter[data-mode="indeterminate"] > i {
+    width: 50%;
   }
 }

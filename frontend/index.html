@@ -69,7 +69,7 @@
           </div>
           <div id="status-pill" class="status-pill status-unknown">
             <span class="dot" aria-hidden="true"></span>
-            <span id="status-bomb" class="px-bomb sm mood-idle" aria-hidden="true">
+            <span id="status-bomb" class="px-bomb md mood-idle" aria-hidden="true">
               <img src="assets/logo.png" alt="" />
             </span>
             <span id="status-text">Starting…</span>
@@ -125,16 +125,16 @@
             </div>
           </div>
           <!-- Primary turn status: one dock, facts first, bomb flavor second -->
-          <div id="turn-dock" class="turn-dock" aria-live="polite" aria-hidden="true">
+          <div id="turn-dock" class="turn-dock" aria-hidden="true">
             <div class="turn-dock-main">
-              <span id="turn-bomb" class="px-bomb md mood-idle" aria-hidden="true">
+              <span id="turn-bomb" class="px-bomb lg mood-idle tier-dock" aria-hidden="true">
                 <img src="assets/logo.png" alt="" />
               </span>
               <div class="turn-dock-copy">
                 <div class="turn-dock-title-row">
-                  <span id="turn-phase-label" class="turn-phase-label">Idle</span>
+                  <span id="turn-phase-label" class="turn-phase-label" aria-live="polite">Idle</span>
                   <span id="turn-elapsed" class="turn-elapsed muted"></span>
-                  <span id="turn-flavor" class="turn-flavor muted"></span>
+                  <span id="turn-flavor" class="turn-flavor muted" aria-hidden="true"></span>
                 </div>
                 <div id="turn-detail" class="turn-detail muted">No active turn</div>
                 <div id="turn-preview" class="turn-preview" style="display:none"></div>
@@ -147,7 +147,7 @@
               <li data-stage="reply" class="stage">Reply</li>
               <li data-stage="done" class="stage">Done</li>
             </ol>
-            <div class="turn-dock-meter" title="activity"><i id="turn-meter-bar"></i></div>
+            <div class="turn-dock-meter" data-mode="idle" title="activity"><i id="turn-meter-bar"></i></div>
           </div>
           <footer class="composer" id="composer">
             <div class="composer-meta">
@@ -246,7 +246,7 @@
       <aside class="col col-right">
         <header class="col-header">
           <div class="title">
-            <span id="activity-bomb" class="px-bomb sm mood-idle" aria-hidden="true">
+            <span id="activity-bomb" class="px-bomb md mood-idle" aria-hidden="true">
               <img src="assets/logo.png" alt="" />
             </span>
             Activity
@@ -300,6 +300,7 @@
         </div>
       </aside>
     </div>
+    <script src="presence.js"></script>
     <script src="app.js"></script>
   </body>
 </html>

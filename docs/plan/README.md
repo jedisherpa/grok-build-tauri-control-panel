@@ -45,5 +45,9 @@
 
 **Next Steps for User:** Unzip, read README and PDFs in order. Use code_sketches/ as starting point for actual Cargo project. Deploy agents via custom script or xAI tools.
 
+## UX / polish plans (post-foundation)
+
+- [status_and_bomb_animation_ux_plan.md](./status_and_bomb_animation_ux_plan.md) — Research + phased plan for turn status surfaces and pixel-bomb animations (integration, stall honesty, motion hierarchy).
+
 **Generated with Grok's Full Capacities** - This plan itself was orchestrated internally with parallel reasoning waves for planning, coding, auditing, revising.
 

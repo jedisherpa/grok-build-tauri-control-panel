@@ -5,6 +5,7 @@
 mod client;
 mod error;
 mod messages;
+mod terminals;
 mod transport;
 
 pub use client::{

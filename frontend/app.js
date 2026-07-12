@@ -1,87 +1,121 @@
 // Bomb Code — three-column Grok Build control panel.
 // Pixel-bomb visual language: moods for thinking / tools / boom / wait.
+// Turn status: BombPresence (presence.js) — single source of truth.
 
 const $ = (id) => document.getElementById(id);
 
 const LOGO = "assets/logo.png";
-
-const STALL_MS = 25000; // no tokens/tools for this long → "waiting on agent"
+const P = window.BombPresence;
+if (!P || typeof P.emptyPresence !== "function") {
+  console.error("BombPresence missing — presence.js failed to load before app.js");
+  document.addEventListener("DOMContentLoaded", () => {
+    const st = document.getElementById("status-text");
+    if (st) st.textContent = "Presence module failed to load";
+    const pill = document.getElementById("status-pill");
+    if (pill) pill.className = "status-pill status-error";
+  });
+}
 
 const state = {
   selectedSession: null,
   sessions: [],
-  tools: [], // recent tool calls
+  tools: [],
   ready: false,
   auth: null,
   loggingIn: false,
   devServer: null,
-  transcriptBySession: new Map(), // id -> [{role, body, at}]
-  transcriptLoaded: new Set(), // ids hydrated from SQLite
-  /** Factual turn state — drives the dock (not fluff). */
-  turn: emptyTurn(),
+  transcriptBySession: new Map(),
+  transcriptLoaded: new Set(),
+  /** @type {ReturnType<typeof P.emptyPresence>} */
+  turn: P ? P.emptyPresence() : { phase: "idle" },
+  /** Per-session presence map (all sessions, not only selected). */
+  presenceBySession: new Map(),
+  /** sessionId -> Set of in-flight tool ids */
+  openToolsBySession: new Map(),
   phraseTimer: null,
   phraseIndex: 0,
-  lastEventKey: "", // de-dupe noisy timeline
+  lastEventKey: "",
+  boomTimer: null,
+  boomSessionId: null,
+  hostStatusKind: "unknown",
+  hostStatusText: "…",
 };
 
-function emptyTurn() {
-  return {
-    phase: "idle", // idle | send | think | tools | reply | wait | done | error
-    startedAt: null,
-    lastSignalAt: null,
-    promptChars: 0,
-    streamChars: 0,
-    thoughtChars: 0,
-    toolCount: 0,
-    lastTool: null,
-    lastToolStatus: null,
-    preview: "", // latest agent text snippet
-    thoughtPreview: "",
-    note: "",
-  };
+function openToolsFor(sid) {
+  const key = sid || state.selectedSession || "_";
+  if (!state.openToolsBySession.has(key)) {
+    state.openToolsBySession.set(key, new Set());
+  }
+  return state.openToolsBySession.get(key);
 }
 
-// Flavor only — never the primary status line.
-const BOMB_FLAVOR = {
-  send: ["fuse lit", "payload armed"],
-  think: ["defusing the problem", "packing powder", "thinking in pixels"],
-  tools: ["planting a charge", "cutting a wire", "rigging tools"],
-  reply: ["words like sparks", "streaming the boom"],
-  wait: ["holding the pin", "your move"],
-  done: ["clean detonation", "charge spent"],
-  error: ["dud fuse", "misfire"],
-  idle: ["standby"],
-};
+/** Get mutable presence for a session; selected session aliases state.turn. */
+function presenceFor(sid) {
+  if (!P) return state.turn;
+  if (!sid || sid === state.selectedSession) return state.turn;
+  if (!state.presenceBySession.has(sid)) {
+    state.presenceBySession.set(sid, P.emptyPresence());
+  }
+  return state.presenceBySession.get(sid);
+}
 
-const PHASE_LABEL = {
-  idle: "Idle",
-  send: "Sent",
-  think: "Thinking",
-  tools: "Using tools",
-  reply: "Writing reply",
-  wait: "Needs you",
-  done: "Done",
-  error: "Failed",
-};
+function commitPresence(sid, p, { paint = true } = {}) {
+  if (!sid || sid === state.selectedSession) {
+    state.turn = p;
+    if (state.selectedSession) {
+      state.presenceBySession.set(state.selectedSession, p);
+    }
+    if (paint) updateBombChrome();
+  } else {
+    state.presenceBySession.set(sid, p);
+  }
+}
 
-const PHASE_MOOD = {
-  idle: "idle",
-  send: "thinking",
-  think: "thinking",
-  tools: "tooling",
-  reply: "stream",
-  wait: "wait",
-  done: "boom",
-  error: "error",
-};
+function isToolTerminal(status) {
+  const st = String(status || "").toLowerCase();
+  return (
+    st.includes("complete") ||
+    st.includes("done") ||
+    st.includes("success") ||
+    st.includes("fail") ||
+    st.includes("error") ||
+    st.includes("denied") ||
+    st.includes("reject") ||
+    st.includes("cancel")
+  );
+}
+
+function endTurnPresence(sid, phase, note) {
+  let p = presenceFor(sid);
+  p = P.applySignal(p, phase, {
+    note: note || "",
+    toolsActive: 0,
+    lastToolStatus: phase === "error" ? "failed" : "completed",
+  });
+  openToolsFor(sid).clear();
+  if (state.boomTimer && phase !== "done") {
+    clearTimeout(state.boomTimer);
+    state.boomTimer = null;
+    state.boomSessionId = null;
+  }
+  commitPresence(sid, p);
+}
+
+function emptyTurn() {
+  return P.emptyPresence();
+}
 
 function bombHtml(mood = "idle", size = "sm", extraClass = "") {
-  return `<span class="px-bomb ${size} mood-${mood} ${extraClass}" aria-hidden="true"><img src="${LOGO}" alt="" /></span>`;
+  const wick =
+    ["thinking", "stream", "tooling", "wait", "ready", "running"].includes(mood)
+      ? " wick-on"
+      : "";
+  return `<span class="px-bomb ${size} mood-${mood} tier-satellite${wick} ${extraClass}" aria-hidden="true"><img src="${LOGO}" alt="" /></span>`;
 }
 
 function moodFromStatus(status) {
   const s = String(status || "").toLowerCase();
-  if (s.includes("run") || s.includes("generat") || s.includes("busy")) return "running";
+  if (s.includes("run") || s.includes("generat") || s.includes("busy")) return "ready";
   if (s.includes("wait") || s.includes("approv")) return "wait";
   if (s.includes("fail") || s.includes("error")) return "error";
   if (s.includes("cancel")) return "error";
@@ -95,7 +129,7 @@ function moodFromEventCls(cls) {
   return "idle";
 }
 
-function setBombMood(el, mood) {
+function setBombMood(el, mood, opts = {}) {
   if (!el) return;
   const moods = [
     "idle",
@@ -108,8 +142,18 @@ function setBombMood(el, mood) {
     "error",
     "wait",
   ];
+  const prev = moods.find((m) => el.classList.contains(`mood-${m}`));
   el.classList.remove(...moods.map((m) => `mood-${m}`));
   el.classList.add(`mood-${mood}`);
+  if (opts.entering && prev !== mood) {
+    el.classList.remove("is-entering");
+    // reflow so re-adding restarts animation
+    void el.offsetWidth;
+    el.classList.add("is-entering");
+    const clear = () => el.classList.remove("is-entering");
+    el.addEventListener("animationend", clear, { once: true });
+    setTimeout(clear, 400);
+  }
 }
 
 function anySessionBusy() {
@@ -120,7 +164,7 @@ function anySessionBusy() {
 }
 
 function turnActive() {
-  return ["send", "think", "tools", "reply", "wait"].includes(state.turn.phase);
+  return P.turnActive(state.turn);
 }
 
 function selectedBusy() {
@@ -133,26 +177,15 @@ function selectedBusy() {
 }
 
 function formatElapsed(ms) {
-  if (ms == null || ms < 0) return "";
-  const sec = Math.floor(ms / 1000);
-  if (sec < 60) return `${sec}s`;
-  const m = Math.floor(sec / 60);
-  const s = sec % 60;
-  if (m < 60) return `${m}m ${s}s`;
-  const h = Math.floor(m / 60);
-  return `${h}h ${m % 60}m`;
+  return P.formatElapsed(ms);
 }
 
 function formatCount(n) {
-  if (!n) return "0";
-  if (n < 1000) return String(n);
-  return `${(n / 1000).toFixed(n < 10000 ? 1 : 0)}k`;
+  return P.formatCount(n);
 }
 
 function clipPreview(text, n = 96) {
-  const t = String(text || "").replace(/\s+/g, " ").trim();
-  if (!t) return "";
-  return t.length <= n ? t : `…${t.slice(-n)}`;
+  return P.clipPreview(text, n);
 }
 
 function isNoiseAgentText(text) {
@@ -165,32 +198,20 @@ function isNoiseAgentText(text) {
   );
 }
 
-/** Start or advance the turn with a concrete signal. */
-function noteTurn(phase, patch = {}) {
-  const t = state.turn;
-  const now = Date.now();
-  if (!t.startedAt && phase !== "idle" && phase !== "done") {
-    t.startedAt = now;
+/** Start or advance the turn with a concrete signal (selected session by default). */
+function noteTurn(phase, patch = {}, sid = null) {
+  if (!P) return;
+  const target = sid || state.selectedSession;
+  let p = presenceFor(target);
+  p = P.applySignal(p, phase, patch, Date.now());
+  if (phase === "error" || phase === "idle") {
+    p.toolsActive = 0;
+    openToolsFor(target).clear();
   }
-  // Don't go backwards: reply > tools > think > send (except wait/error/done)
-  const rank = { idle: 0, send: 1, think: 2, tools: 3, reply: 4, wait: 5, done: 6, error: 6 };
-  const cur = rank[t.phase] ?? 0;
-  const next = rank[phase] ?? 0;
-  if (phase === "wait" || phase === "error" || phase === "done" || phase === "idle") {
-    t.phase = phase;
-  } else if (next >= cur || t.phase === "wait") {
-    t.phase = phase;
-  }
-  t.lastSignalAt = now;
-  Object.assign(t, patch);
-  if (phase === "idle") {
-    state.turn = emptyTurn();
-  }
-  updateBombChrome();
+  commitPresence(target, p);
 }
 
 function setTurnPhase(phase, detail = "") {
-  // Back-compat wrapper used by older call sites
   const map = {
     thinking: "think",
     running: "think",
@@ -205,200 +226,185 @@ function setTurnPhase(phase, detail = "") {
   noteTurn(p, detail ? { lastTool: detail, note: detail } : {});
 }
 
-function flashBoomThenIdle(ms = 1200) {
-  noteTurn("done", { note: "Turn finished" });
-  setTimeout(() => {
-    if (state.turn.phase === "done") noteTurn("idle");
-  }, ms);
-}
-
-function pickFlavor(phase) {
-  const list = BOMB_FLAVOR[phase] || BOMB_FLAVOR.idle;
-  return list[state.phraseIndex % list.length];
-}
-
-function stageState(stage, phase) {
-  const order = ["send", "think", "tools", "reply", "done"];
-  const pi = order.indexOf(phase === "wait" ? "tools" : phase === "error" ? "done" : phase);
-  const si = order.indexOf(stage);
-  if (si < 0) return "";
-  if (phase === "error" && stage === "done") return "error";
-  if (si < pi) return "done";
-  if (si === pi) return phase === "done" ? "done" : "active";
-  return "";
-}
-
-function buildTurnDetail() {
-  const t = state.turn;
-  const bits = [];
-  if (t.promptChars) bits.push(`prompt ${formatCount(t.promptChars)} chars`);
-  if (t.phase === "think" && !t.streamChars && !t.toolCount) {
-    bits.push("waiting for first token or tool");
-  }
-  if (t.thoughtChars) bits.push(`${formatCount(t.thoughtChars)} thought chars`);
-  if (t.streamChars) bits.push(`${formatCount(t.streamChars)} reply chars`);
-  if (t.toolCount) {
-    bits.push(
-      `${t.toolCount} tool${t.toolCount === 1 ? "" : "s"}${
-        t.lastTool ? ` · last ${t.lastTool}` : ""
-      }${t.lastToolStatus ? ` (${t.lastToolStatus})` : ""}`
-    );
-  }
-  if (t.phase === "wait") bits.push(t.note || "approval required");
-  if (t.phase === "error") bits.push(t.note || "see timeline");
-  if (t.phase === "done") bits.push(t.note || "ready for next message");
-
-  // Stall hint
-  if (turnActive() && t.lastSignalAt) {
-    const quiet = Date.now() - t.lastSignalAt;
-    if (quiet >= STALL_MS) {
-      bits.push(`no new signal for ${formatElapsed(quiet)}`);
+function flashBoomThenIdle(ms, sid = null) {
+  const hold = ms != null ? ms : P.BOOM_HOLD_MS;
+  const target = sid || state.selectedSession;
+  if (state.boomTimer) clearTimeout(state.boomTimer);
+  openToolsFor(target).clear();
+  noteTurn("done", { note: "Turn finished", toolsActive: 0 }, target);
+  state.boomSessionId = target;
+  state.boomTimer = setTimeout(() => {
+    state.boomTimer = null;
+    const boomSid = state.boomSessionId;
+    state.boomSessionId = null;
+    if (!boomSid) return;
+    if (boomSid !== state.selectedSession) {
+      const p = state.presenceBySession.get(boomSid);
+      if (p && p.phase === "done") {
+        state.presenceBySession.set(boomSid, P.emptyPresence());
+      }
+      return;
     }
-  }
-  return bits.join(" · ") || "Working…";
+    if (state.turn.phase === "done") noteTurn("idle");
+  }, hold);
 }
 
 function updateBombChrome() {
-  const t = state.turn;
-  const busy = turnActive() || selectedBusy();
-  const anyBusy = anySessionBusy() || busy;
-  const phase = turnActive()
-    ? t.phase
-    : t.phase === "done" || t.phase === "error"
-      ? t.phase
-      : "idle";
-  const mood = PHASE_MOOD[phase] || "idle";
-  const stalled =
-    turnActive() && t.lastSignalAt && Date.now() - t.lastSignalAt >= STALL_MS;
-  const elapsed = t.startedAt ? formatElapsed(Date.now() - t.startedAt) : "";
+  const view = P.formatPresence(state.turn, {
+    now: Date.now(),
+    phraseIndex: state.phraseIndex,
+  });
+  const transition = P.consumeTransition(state.turn);
+  const anyBusy = anySessionBusy() || view.active;
 
-  // Brand: compact factual subline
+  // Brand: product name; optional live elapsed only (no phase essay)
   const brand = $("brand-header");
   if (brand) brand.classList.toggle("live", anyBusy);
   const brandSub = $("brand-sub");
   if (brandSub) {
-    if (turnActive()) {
-      brandSub.textContent = `${PHASE_LABEL[phase] || phase}${elapsed ? ` · ${elapsed}` : ""}`;
-    } else {
-      brandSub.textContent = "Grok Build panel";
-    }
+    brandSub.textContent =
+      view.active && view.elapsed ? `Live · ${view.elapsed}` : "Grok Build panel";
   }
 
-  // Primary turn dock (center, above composer)
+  // Primary turn dock
   const dock = $("turn-dock");
   if (dock) {
-    const show = turnActive() || phase === "done" || phase === "error";
-    dock.classList.toggle("visible", show);
-    dock.classList.toggle("stalled", !!stalled);
-    dock.classList.toggle(`phase-${phase}`, true);
-    // clear other phase-* classes
+    dock.classList.toggle("visible", view.show);
+    dock.classList.toggle("stalled", !!view.stalled);
+    dock.classList.toggle("has-flavor", !!view.flavor);
     ["idle", "send", "think", "tools", "reply", "wait", "done", "error"].forEach((p) => {
-      if (p !== phase) dock.classList.remove(`phase-${p}`);
+      dock.classList.toggle(`phase-${p}`, p === view.phase);
     });
-    dock.setAttribute("aria-hidden", show ? "false" : "true");
+    dock.setAttribute("aria-hidden", view.show ? "false" : "true");
 
-    setBombMood($("turn-bomb"), stalled && phase !== "wait" ? "running" : mood);
+    const bomb = $("turn-bomb");
+    setBombMood(bomb, view.mood, { entering: !!transition });
+    if (bomb) {
+      bomb.classList.add("tier-dock", "lg");
+      bomb.classList.remove("tier-satellite", "md", "sm", "xs");
+      // Wick is driven by mood CSS (thinking/stream/tooling/wait/ready)
+      bomb.classList.toggle(
+        "wick-on",
+        ["thinking", "stream", "tooling", "wait", "ready", "running"].includes(view.mood)
+      );
+    }
 
     const label = $("turn-phase-label");
-    if (label) {
-      label.textContent = stalled && phase !== "wait" ? "Still working" : PHASE_LABEL[phase] || phase;
-    }
+    if (label) label.textContent = view.title;
+
     const elEl = $("turn-elapsed");
-    if (elEl) elEl.textContent = elapsed || "";
+    if (elEl) elEl.textContent = view.elapsed || "";
 
     const flavor = $("turn-flavor");
-    if (flavor) {
-      flavor.textContent = show && phase !== "idle" ? pickFlavor(phase) : "";
-    }
+    if (flavor) flavor.textContent = view.flavor || "";
 
     const detail = $("turn-detail");
-    if (detail) detail.textContent = show ? buildTurnDetail() : "No active turn";
+    if (detail) detail.textContent = view.subtitle;
 
     const preview = $("turn-preview");
     if (preview) {
-      const snip =
-        phase === "think" && t.thoughtPreview
-          ? t.thoughtPreview
-          : t.preview || t.thoughtPreview;
-      if (show && snip) {
+      if (view.show && view.preview) {
         preview.style.display = "block";
-        preview.textContent = snip;
+        preview.textContent = view.preview;
       } else {
         preview.style.display = "none";
         preview.textContent = "";
       }
     }
 
-    // Stages
     document.querySelectorAll("#turn-stages .stage").forEach((el) => {
       const st = el.getAttribute("data-stage");
       el.classList.remove("active", "done", "error");
-      const cls = stageState(st, phase === "error" ? "error" : phase);
+      const cls = P.stageClass(st, state.turn);
       if (cls) el.classList.add(cls);
     });
+
+    const meter = document.querySelector(".turn-dock-meter");
+    const bar = $("turn-meter-bar");
+    if (meter) meter.setAttribute("data-mode", view.meterMode);
+    if (bar) {
+      if (view.meterMode === "progress" || view.meterMode === "tools") {
+        bar.style.width = `${Math.round(view.meterProgress * 100)}%`;
+        bar.style.transform = "none";
+      } else {
+        bar.style.width = "";
+        bar.style.transform = "";
+      }
+    }
   }
 
-  // Composer: one compact phase chip (not a second monologue)
+  // Composer chip — static satellite bomb
   const composer = $("composer");
-  if (composer) composer.classList.toggle("busy", turnActive());
+  if (composer) composer.classList.toggle("busy", view.active);
   const phaseChip = $("composer-phase");
   if (phaseChip) {
-    if (turnActive()) {
+    if (view.active) {
       phaseChip.style.display = "inline-flex";
-      phaseChip.innerHTML = `${bombHtml(mood, "xs")}<span>${escapeHtml(
-        PHASE_LABEL[phase] || phase
-      )}${elapsed ? ` · ${elapsed}` : ""}</span>`;
+      phaseChip.innerHTML = `${bombHtml(view.mood, "sm")}<span>${escapeHtml(view.title)}${
+        view.elapsed ? ` · ${view.elapsed}` : ""
+      }</span>`;
     } else {
       phaseChip.style.display = "none";
       phaseChip.innerHTML = "";
     }
   }
 
-  // Right "Now" panel — mirror of dock facts
+  // Activity "Now" — compact mirror, satellite tier
   const nowPanel = $("now-panel");
   const nowElapsed = $("now-elapsed");
-  if (nowElapsed) nowElapsed.textContent = turnActive() ? elapsed : "";
+  if (nowElapsed) nowElapsed.textContent = view.active ? view.elapsed : "";
   if (nowPanel) {
-    if (!turnActive() && phase !== "done" && phase !== "error") {
+    if (!view.show) {
       nowPanel.innerHTML = `<div class="empty-hint">No live turn</div>`;
     } else {
       nowPanel.innerHTML = `
         <div class="now-row">
-          ${bombHtml(mood, "sm")}
+          ${bombHtml(view.mood, "sm")}
           <div class="now-copy">
-            <div class="now-phase">${escapeHtml(PHASE_LABEL[phase] || phase)}</div>
-            <div class="now-detail muted">${escapeHtml(buildTurnDetail())}</div>
+            <div class="now-phase">${escapeHtml(view.title)}</div>
+            <div class="now-detail muted">${escapeHtml(view.subtitle)}</div>
           </div>
         </div>
         ${
-          t.preview || t.thoughtPreview
-            ? `<div class="now-preview">${escapeHtml(t.preview || t.thoughtPreview)}</div>`
+          view.preview
+            ? `<div class="now-preview">${escapeHtml(view.preview)}</div>`
             : ""
         }
         ${
-          t.lastTool
-            ? `<div class="now-tool">${bombHtml("tooling", "xs")}<span>${escapeHtml(
-                t.lastTool
-              )}${t.lastToolStatus ? ` · ${escapeHtml(t.lastToolStatus)}` : ""}</span></div>`
+          view.lastTool
+            ? `<div class="now-tool"><span class="now-tool-label">${escapeHtml(
+                view.lastTool
+              )}${view.lastToolStatus ? ` · ${escapeHtml(view.lastToolStatus)}` : ""}</span></div>`
             : ""
         }`;
     }
   }
 
-  // Activity header bomb
-  setBombMood(
-    $("activity-bomb"),
-    anyBusy ? (phase === "tools" ? "tooling" : phase === "reply" ? "stream" : "running") : "idle"
-  );
+  // Activity header — ambient body; wick when any session busy
+  const actBomb = $("activity-bomb");
+  if (actBomb) {
+    actBomb.classList.add("tier-ambient", "md");
+    const actMood = anyBusy
+      ? view.phase === "tools"
+        ? "tooling"
+        : view.phase === "reply"
+          ? "stream"
+          : view.active
+            ? "thinking"
+            : "ready"
+      : "idle";
+    setBombMood(actBomb, actMood);
+    actBomb.classList.toggle("wick-on", actMood !== "idle");
+  }
 
-  // Status pill: host health only when idle; turn summary when busy
-  if (turnActive() && state.ready) {
+  // Status pill: HOST HEALTH ONLY (plan §5.3) — do not overwrite with turn monologue
+  if (state.ready && state.hostStatusKind === "ready") {
     const pill = $("status-pill");
     if (pill && !pill.classList.contains("status-error")) {
-      setBombMood($("status-bomb"), mood);
+      setBombMood($("status-bomb"), "ready");
       const st = $("status-text");
-      if (st) {
-        st.textContent = `${PHASE_LABEL[phase] || phase}${elapsed ? ` · ${elapsed}` : ""}`;
+      if (st && !st.dataset.locked) {
+        st.textContent = state.hostStatusText || "Ready";
       }
     }
   }
@@ -409,11 +415,8 @@ function startPhraseCycle() {
   state.phraseTimer = setInterval(() => {
     if (!turnActive()) return;
     state.phraseIndex += 1;
-    const flavor = $("turn-flavor");
-    if (flavor) flavor.textContent = pickFlavor(state.turn.phase);
-    // Refresh stall clock / elapsed
     updateBombChrome();
-  }, 2000);
+  }, 6000);
 }
 
 function stopPhraseCycle() {
@@ -446,29 +449,43 @@ function shortId(id) {
 function setStatus(kind, text) {
   const pill = $("status-pill");
   const k = kind || "unknown";
+  state.hostStatusKind = k;
+  state.hostStatusText = text;
   pill.className = `status-pill status-${k}`;
   $("status-text").textContent = text;
-  // Map runtime status → bomb mood
+  // Host health only — static / ambient bomb, never turn monologue
   let mood = "idle";
-  if (k === "ready") mood = anySessionBusy() || selectedBusy() ? "running" : "ready";
+  if (k === "ready") mood = "ready";
   else if (k === "error") mood = "error";
-  else if (k === "thinking" || k === "running") mood = "thinking";
+  else if (k === "thinking" || k === "running") mood = "ready";
   else if (k === "unknown") mood = "idle";
-  setBombMood($("status-bomb"), mood);
+  const sb = $("status-bomb");
+  setBombMood(sb, mood);
+  if (sb) {
+    sb.classList.add("tier-satellite");
+    sb.classList.remove("tier-dock");
+  }
 }
 
 function pushEvent(text, cls = "", moodHint = null, opts = {}) {
   const feed = $("event-feed");
   if (!feed) return;
   const key = `${cls}|${text}`;
-  // Collapse spam (status flapping, token spam)
   if (!opts.force && key === state.lastEventKey && cls !== "err") return;
   state.lastEventKey = key;
   const line = document.createElement("div");
   line.className = `event-line ${cls}`;
   const ts = new Date().toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  // Bombs only on milestones (errors, explicit force+mood, boom completions)
+  const showBomb =
+    opts.milestone ||
+    cls === "err" ||
+    moodHint === "error" ||
+    moodHint === "boom" ||
+    moodHint === "wait";
   const mood = moodHint || moodFromEventCls(cls);
-  line.innerHTML = `${bombHtml(mood, "xs")}<span class="event-body"><span class="ts">${ts}</span>${escapeHtml(text)}</span>`;
+  const icon = showBomb ? bombHtml(mood, "xs") : "";
+  line.innerHTML = `${icon}<span class="event-body"><span class="ts">${ts}</span>${escapeHtml(text)}</span>`;
   feed.prepend(line);
   while (feed.children.length > 80) feed.lastChild.remove();
 }
@@ -483,8 +500,9 @@ function escapeHtml(s) {
 
 function toastError(e) {
   const msg = e?.message || String(e);
-  pushEvent(msg, "err");
-  setStatus(state.ready ? "ready" : "error", msg);
+  pushEvent(msg, "err", "error", { force: true, milestone: true });
+  // Host pill stays host-only; surface agent errors on timeline/dock only
+  if (!state.ready) setStatus("error", msg);
 }
 
 // ── Navigation ──────────────────────────────────────────────────────────
@@ -669,11 +687,12 @@ function renderTranscript() {
   }
 
   // Terminal-style continuous log (mirrors CLI, not just chat bubbles).
+  const liveView = P.formatPresence(state.turn, { phraseIndex: state.phraseIndex });
   const liveHint =
     turnActive() && isSelectedBusyForRender()
       ? `<div class="t-block term streaming term-live">
-  <div class="t-role">${bombHtml("thinking", "xs")}<span>live</span><span class="stream-caret" aria-hidden="true"></span></div>
-  <div class="t-body">${escapeHtml(buildTurnDetail())}</div>
+  <div class="t-role">${bombHtml(liveView.mood, "xs")}<span>live</span><span class="stream-caret" aria-hidden="true"></span></div>
+  <div class="t-body">${escapeHtml(liveView.subtitle)}</div>
 </div>`
       : "";
 
@@ -818,13 +837,25 @@ function renderTools() {
 }
 
 async function selectSession(id) {
-  state.selectedSession = id;
+  const prev = state.selectedSession;
+  // Persist current presence under previous id before switching
+  if (prev && state.turn && P) {
+    state.presenceBySession.set(prev, state.turn);
+  }
+  // Do not clear boom timer mid-hold — it is session-scoped in the callback
+  state.selectedSession = id || null;
+  if (!id) {
+    state.turn = P ? P.emptyPresence() : { phase: "idle" };
+  } else {
+    state.turn = state.presenceBySession.get(id) || (P ? P.emptyPresence() : { phase: "idle" });
+    state.presenceBySession.set(id, state.turn);
+  }
   renderThreads();
   const sess = state.sessions.find((s) => s.id === id);
   if (sess?.cwd) $("cwd").value = sess.cwd;
-  // Hydrate transcript from SQLite once (reboot / update memory).
-  await loadTranscriptFromDb(id);
+  if (id) await loadTranscriptFromDb(id);
   renderTranscript();
+  updateBombChrome();
 }
 
 /** Load durable thread history from ~/.grok/control-panel/sessions/control_panel.db */
@@ -889,17 +920,15 @@ function handleControlEvent(ev) {
   if (type === "agent_message" || type === "agentMessage") {
     const raw = ev.text != null ? String(ev.text) : "";
     if (!raw) return;
-    // Drop legacy status lines that were mis-tagged as agent speech.
     if (isNoiseAgentText(raw)) {
       appendTranscript(sid, "term", raw, nowIso(), { stream: true });
-      if (isSelected && turnActive()) {
-        noteTurn(state.turn.phase === "idle" ? "think" : state.turn.phase, {
+      if (sid && P.turnActive(presenceFor(sid))) {
+        noteTurn(presenceFor(sid).phase === "idle" ? "think" : presenceFor(sid).phase, {
           note: raw.slice(0, 80),
-        });
+        }, sid);
       }
       return;
     }
-    // Brain/status banners → system-ish term lines, not grok speech
     if (
       raw.startsWith("🧠") ||
       raw.startsWith("📜") ||
@@ -913,32 +942,38 @@ function handleControlEvent(ev) {
     const text = isThought ? raw.replace(/^💭\s*/, "") : raw;
     const role = isThought ? "thought" : "agent";
     appendTranscript(sid, role, text, nowIso(), { stream: true });
-    if (isSelected) {
-      const list = getTranscript(sid);
-      const body = list[list.length - 1]?.body || text;
-      if (isThought) {
-        noteTurn("think", {
-          thoughtChars: (state.turn.thoughtChars || 0) + text.length,
-          thoughtPreview: clipPreview(body),
-        });
-        if ((state.turn.thoughtChars || 0) <= text.length + 1) {
-          pushEvent(`thinking · ${shortId(sid)}`, "", "thinking");
-        }
-      } else {
-        const prev = state.turn.streamChars || 0;
-        noteTurn("reply", {
-          streamChars: prev + text.length,
-          preview: clipPreview(body),
-        });
-        if (prev === 0 || Math.floor((prev + text.length) / 400) > Math.floor(prev / 400)) {
-          pushEvent(`reply · ${formatCount(prev + text.length)} chars`, "", "stream");
-        }
+    if (!sid) return;
+    const list = getTranscript(sid);
+    const body = list[list.length - 1]?.body || text;
+    let p = presenceFor(sid);
+    if (isThought) {
+      p = P.applySignal(p, "think", {
+        thoughtChars: (p.thoughtChars || 0) + text.length,
+        thoughtPreview: clipPreview(body),
+      });
+      commitPresence(sid, p);
+      if (isSelected && (p.thoughtChars || 0) <= text.length + 1) {
+        pushEvent(`thinking · ${shortId(sid)}`, "", null, { force: true });
+      }
+    } else {
+      const prev = p.replyChars || 0;
+      p = P.applySignal(p, "reply", {
+        replyChars: prev + text.length,
+        preview: clipPreview(body),
+      });
+      commitPresence(sid, p);
+      if (
+        isSelected &&
+        (prev === 0 || Math.floor((prev + text.length) / 400) > Math.floor(prev / 400))
+      ) {
+        pushEvent(`reply · ${formatCount(prev + text.length)} chars`, "", null, { force: true });
       }
     }
   } else if (type === "tool_call" || type === "toolCall") {
     endAgentStream(sid);
     const te = ev.event || ev;
     const tool = te.tool || te.name || "tool";
+    const toolId = String(te.id || `${tool}-${Date.now()}`);
     const summary = te.args_summary || te.argsSummary || te.result_summary || te.resultSummary || "";
     const status = te.status || "running";
     state.tools.unshift({
@@ -950,13 +985,7 @@ function handleControlEvent(ev) {
     });
     if (state.tools.length > 80) state.tools.length = 80;
     renderTools();
-    const st = String(status).toLowerCase();
-    const done =
-      st.includes("done") ||
-      st.includes("complete") ||
-      st.includes("success") ||
-      st.includes("completed");
-    // Full detail in center column (like CLI tool traces)
+    const terminal = isToolTerminal(status);
     appendTranscript(
       sid,
       "tool",
@@ -966,69 +995,91 @@ function handleControlEvent(ev) {
           : ""
       }`
     );
-    pushEvent(`tool · ${tool} · ${status}`, done ? "ok" : "", done ? "boom" : "tooling", {
+    pushEvent(`tool · ${tool} · ${status}`, terminal ? "ok" : "", null, {
       force: true,
+      milestone: terminal && String(status).toLowerCase().includes("fail"),
     });
-    if (isSelected) {
-      noteTurn("tools", {
-        toolCount: (state.turn.toolCount || 0) + (done ? 0 : 1),
+    if (!sid) return;
+    const open = openToolsFor(sid);
+    let p = presenceFor(sid);
+    if (terminal) {
+      if (open.has(toolId)) {
+        open.delete(toolId);
+        p = P.markToolDone(p, tool, status, Date.now());
+      } else {
+        // Late terminal update without prior start — status patch only
+        p = P.applySignal(p, p.phase === "idle" ? "tools" : p.phase, {
+          lastTool: tool,
+          lastToolStatus: status,
+          toolsActive: open.size,
+        });
+      }
+      p.toolsActive = open.size;
+    } else if (!open.has(toolId)) {
+      open.add(toolId);
+      p = P.markToolStart(p, tool, Date.now());
+      p.note = String(summary).slice(0, 60);
+      p.toolsActive = open.size;
+    } else {
+      p = P.applySignal(p, "tools", {
         lastTool: tool,
         lastToolStatus: status,
         note: String(summary).slice(0, 60),
+        toolsActive: open.size,
       });
-      if (done && state.turn.streamChars) {
-        noteTurn("reply", { lastTool: tool, lastToolStatus: status });
-      }
     }
+    commitPresence(sid, p);
   } else if (type === "plan_update" || type === "planUpdate") {
     const pe = ev.event || ev;
     const steps = (pe.steps || [])
       .map((s) => `  - [${s.status || "pending"}] ${s.description || s.id}`)
       .join("\n");
     appendTranscript(sid, "plan", `plan ${pe.title || ""}\n${steps}`);
-    pushEvent(`plan · ${(pe.steps || []).length} steps`, "", "thinking");
-    if (isSelected) noteTurn("think", { note: pe.title || "plan update" });
+    pushEvent(`plan · ${(pe.steps || []).length} steps`, "", null, { force: true });
+    if (sid) noteTurn("think", { note: pe.title || "plan update" }, sid);
   } else if (type === "session_created" || type === "sessionCreated") {
     appendTranscript(sid, "term", `session ready · ${shortId(sid)}`);
-    pushEvent(`session · ${shortId(sid)} ready`, "ok", "boom", { force: true });
+    pushEvent(`session · ${shortId(sid)} ready`, "ok", "boom", { force: true, milestone: true });
     refreshSessions();
   } else if (type === "session_status_changed" || type === "sessionStatusChanged") {
     const st = String(ev.status || "").toLowerCase();
     appendTranscript(sid, "term", `status → ${ev.status}`);
-    pushEvent(`session · ${shortId(sid)} → ${ev.status}`, "", moodFromStatus(st));
-    if (isSelected) {
+    pushEvent(`session · ${shortId(sid)} → ${ev.status}`, "", null, { force: true });
+    if (sid) {
       if (st.includes("wait") || st.includes("approv")) {
-        noteTurn("wait", { note: "Waiting for approval" });
+        noteTurn("wait", { note: "Waiting for approval" }, sid);
       } else if (st.includes("fail") || st.includes("error")) {
         endAgentStream(sid);
-        noteTurn("error", { note: String(ev.status) });
+        endTurnPresence(sid, "error", String(ev.status));
       } else if (st.includes("cancel")) {
         endAgentStream(sid);
-        noteTurn("error", { note: "Cancelled" });
+        endTurnPresence(sid, "error", "Cancelled");
       } else if (st.includes("idle") || st.includes("complete")) {
         endAgentStream(sid);
-        if (turnActive() || state.turn.streamChars || state.turn.toolCount) {
-          flashBoomThenIdle();
+        const p = presenceFor(sid);
+        if (P.turnActive(p) || p.replyChars || p.toolCount) {
+          flashBoomThenIdle(undefined, sid);
         } else {
-          noteTurn("idle");
+          noteTurn("idle", {}, sid);
         }
-      } else if (st.includes("run") && !turnActive()) {
-        noteTurn("think", { note: "Session running" });
+      } else if (st.includes("run") && !P.turnActive(presenceFor(sid))) {
+        noteTurn("think", { note: "Session running" }, sid);
       }
     }
     refreshSessions();
   } else if (type === "session_cancelled" || type === "sessionCancelled") {
     endAgentStream(sid);
     appendTranscript(sid, "term", "session cancelled");
-    pushEvent(`cancelled · ${shortId(sid)}`, "", "error", { force: true });
-    if (isSelected) noteTurn("error", { note: "Cancelled" });
+    pushEvent(`cancelled · ${shortId(sid)}`, "err", "error", { force: true, milestone: true });
+    if (sid) endTurnPresence(sid, "error", "Cancelled");
     refreshSessions();
   } else if (type === "error") {
-    endAgentStream(sid || state.selectedSession);
-    appendTranscript(sid || state.selectedSession, "error", ev.message || "error");
-    pushEvent(ev.message || "error", "err", "error", { force: true });
-    setStatus(state.ready ? "ready" : "error", ev.message || "error");
-    if (isSelected) noteTurn("error", { note: ev.message || "error" });
+    const errSid = sid || state.selectedSession;
+    endAgentStream(errSid);
+    appendTranscript(errSid, "error", ev.message || "error");
+    pushEvent(ev.message || "error", "err", "error", { force: true, milestone: true });
+    if (!state.ready) setStatus("error", ev.message || "error");
+    if (errSid) endTurnPresence(errSid, "error", ev.message || "error");
   } else if (type === "approval_required" || type === "approvalRequired") {
     endAgentStream(sid);
     appendTranscript(
@@ -1036,24 +1087,38 @@ function handleControlEvent(ev) {
       "term",
       `! approval · ${ev.tool || "?"} — ${ev.summary || ev.request_id || ""}`
     );
-    pushEvent(`approval · ${ev.tool || "?"}`, "err", "wait", { force: true });
-    if (isSelected) {
-      noteTurn("wait", {
-        lastTool: ev.tool || "approval",
-        note: ev.summary || "approval required",
-      });
+    pushEvent(`approval · ${ev.tool || "?"}`, "err", "wait", { force: true, milestone: true });
+    if (sid) {
+      noteTurn(
+        "wait",
+        {
+          lastTool: ev.tool || "approval",
+          note: ev.summary || "approval required",
+        },
+        sid
+      );
     }
   } else if (type === "raw") {
     const payload = ev.payload || ev;
-    // Terminal channel from ACP stderr / session breadcrumbs
+    if (payload?.channel === "usage" && payload?.totalTokens != null) {
+      const n = Number(payload.totalTokens) || 0;
+      if (sid && n > 0) {
+        const p = presenceFor(sid);
+        if (P.turnActive(p) || p.phase === "idle") {
+          noteTurn(p.phase === "idle" ? "think" : p.phase, { contextTokens: n }, sid);
+        }
+      }
+      return;
+    }
     if (payload?.channel === "term" && payload?.line) {
-      appendTranscript(sid || state.selectedSession, "term", String(payload.line), nowIso(), {
-        stream: true,
-      });
-      if (isSelected && turnActive()) {
-        noteTurn(state.turn.phase === "idle" ? "think" : state.turn.phase, {
-          note: String(payload.line).slice(0, 80),
-        });
+      const tSid = sid || state.selectedSession;
+      appendTranscript(tSid, "term", String(payload.line), nowIso(), { stream: true });
+      if (tSid && P.turnActive(presenceFor(tSid))) {
+        noteTurn(
+          presenceFor(tSid).phase === "idle" ? "think" : presenceFor(tSid).phase,
+          { note: String(payload.line).slice(0, 80) },
+          tSid
+        );
       }
       return;
     }
@@ -1063,17 +1128,20 @@ function handleControlEvent(ev) {
       payload?.text ||
       (typeof payload?.message === "string" ? payload.message : null);
     if (maybe && typeof maybe === "string" && maybe.trim() && !isNoiseAgentText(maybe)) {
-      appendTranscript(sid || state.selectedSession, "agent", maybe, nowIso(), {
-        stream: true,
-      });
-      if (isSelected) {
-        noteTurn("reply", {
-          streamChars: (state.turn.streamChars || 0) + maybe.length,
-          preview: clipPreview(maybe),
-        });
+      const tSid = sid || state.selectedSession;
+      appendTranscript(tSid, "agent", maybe, nowIso(), { stream: true });
+      if (tSid) {
+        const p = presenceFor(tSid);
+        noteTurn(
+          "reply",
+          {
+            replyChars: (p.replyChars || 0) + maybe.length,
+            preview: clipPreview(maybe),
+          },
+          tSid
+        );
       }
     } else {
-      // Dump anything else so the center never goes silent
       const dump = JSON.stringify(payload);
       if (dump && dump !== "{}" && dump !== "null") {
         appendTranscript(
@@ -1321,16 +1389,16 @@ async function refreshSessions() {
     state.sessions = Array.isArray(list) ? list : [];
     renderThreads();
     renderAgents();
-    if (state.selectedSession && !state.sessions.some((s) => s.id === state.selectedSession)) {
-      state.selectedSession = state.sessions[0]?.id || null;
-    }
-    if (!state.selectedSession && state.sessions.length) {
-      state.selectedSession = state.sessions[0].id;
-    }
-    if (state.selectedSession) {
+    const stillThere =
+      state.selectedSession && state.sessions.some((s) => s.id === state.selectedSession);
+    if (!stillThere) {
+      const next = state.sessions[0]?.id || null;
+      await selectSession(next);
+    } else {
       await loadTranscriptFromDb(state.selectedSession);
+      renderTranscript();
+      updateBombChrome();
     }
-    renderTranscript();
   } catch (e) {
     toastError(e);
   }
@@ -1381,11 +1449,11 @@ async function startAcp() {
       sandboxProfile: "workspace",
     };
     const res = await invoke("start_session", { cwd, opts });
-    state.selectedSession = res.id;
     appendTranscript(res.id, "system", `session started · cwd ${cwd}`);
-    pushEvent(`ACP session ${shortId(res.id)}`, "ok");
+    pushEvent(`ACP session ${shortId(res.id)}`, "ok", "boom", { force: true, milestone: true });
     await refreshSessions();
-    selectSession(res.id);
+    // selectSession persists previous presence under the *previous* id
+    await selectSession(res.id);
   } catch (e) {
     toastError(e);
   }
@@ -1404,12 +1472,14 @@ async function sendPrompt() {
     $("prompt").value = "";
     endAgentStream(state.selectedSession);
     state.phraseIndex = 0;
-    state.turn = emptyTurn();
+    if (state.boomTimer) {
+      clearTimeout(state.boomTimer);
+      state.boomTimer = null;
+    }
+    state.turn = P.emptyPresence();
     noteTurn("send", {
       promptChars: prompt.length,
       note: needsResume ? "Resuming saved thread…" : "On the wire",
-      startedAt: Date.now(),
-      lastSignalAt: Date.now(),
     });
     if (needsResume) {
       noteTurn("think", {

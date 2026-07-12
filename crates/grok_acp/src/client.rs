@@ -22,6 +22,7 @@ use crate::messages::{
     AuthenticateParams, ClientCapabilities, ClientInfo, FsCapabilities, IncomingAgentRequest,
     InitializeParams, JsonRpcNotification, PromptContent, SessionPromptParams,
 };
+use crate::terminals::TerminalRegistry;
 use crate::transport::NdjsonTransport;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -136,6 +137,8 @@ pub struct AcpClient {
     pending_context: Mutex<Option<String>>,
     load_session_supported: RwLock<bool>,
     resume_session_supported: RwLock<bool>,
+    /// Host-side terminals for ACP terminal/* (required for run_terminal_command).
+    terminals: TerminalRegistry,
 }
 
 impl AcpClient {
@@ -239,6 +242,7 @@ impl AcpClient {
             .transcript_context
             .filter(|s| !s.trim().is_empty());
 
+        let default_cwd = config.cwd.clone();
         let client = Arc::new(Self {
             config,
             child: Mutex::new(Some(child)),
@@ -255,6 +259,7 @@ impl AcpClient {
             pending_context: Mutex::new(pending_context),
             load_session_supported: RwLock::new(false),
             resume_session_supported: RwLock::new(false),
+            terminals: TerminalRegistry::new(default_cwd),
         });
 
         client.initialize().await?;
@@ -301,6 +306,7 @@ impl AcpClient {
             pending_context: Mutex::new(None),
             load_session_supported: RwLock::new(false),
             resume_session_supported: RwLock::new(false),
+            terminals: TerminalRegistry::new(PathBuf::from("/tmp")),
         })
     }
 
@@ -921,6 +927,9 @@ impl AcpClient {
     }
 
     /// Handle agent-initiated JSON-RPC requests. Critical for unblocking turns.
+    ///
+    /// Each request runs in its own task so `terminal/wait_for_exit` (long) never
+    /// blocks `terminal/output`, fs/*, or permission responses.
     async fn run_agent_request_loop(self: Arc<Self>) -> Result<()> {
         let mut rx = self
             .agent_request_rx
@@ -930,9 +939,12 @@ impl AcpClient {
             .ok_or(AcpError::SessionNotReady)?;
 
         while let Some(req) = rx.recv().await {
-            if let Err(e) = self.handle_agent_request(req).await {
-                warn!(error = %e, "failed handling agent request");
-            }
+            let this = self.clone();
+            tokio::spawn(async move {
+                if let Err(e) = this.handle_agent_request(req).await {
+                    warn!(error = %e, "failed handling agent request");
+                }
+            });
         }
         Err(AcpError::ProcessExited)
     }
@@ -947,7 +959,11 @@ impl AcpClient {
                 let path = req
                     .params
                     .as_ref()
-                    .and_then(|p| p.get("path"))
+                    .and_then(|p| {
+                        p.get("path")
+                            .or_else(|| p.get("file_path"))
+                            .or_else(|| p.get("filePath"))
+                    })
                     .and_then(|v| v.as_str())
                     .unwrap_or("?");
                 self.emit_host_tool("fs/read", path, ToolCallStatus::Running);
@@ -970,7 +986,11 @@ impl AcpClient {
                 let path = req
                     .params
                     .as_ref()
-                    .and_then(|p| p.get("path"))
+                    .and_then(|p| {
+                        p.get("path")
+                            .or_else(|| p.get("file_path"))
+                            .or_else(|| p.get("filePath"))
+                    })
                     .and_then(|v| v.as_str())
                     .unwrap_or("?");
                 self.emit_host_tool("fs/write", path, ToolCallStatus::Running);
@@ -1011,15 +1031,80 @@ impl AcpClient {
                 }
                 transport.send_response(req.id, outcome).await?;
             }
-            // Terminal stubs — not fully implemented; return method-not-found cleanly
+            // ACP terminal host — required for Grok run_terminal_command.
             m if m.starts_with("terminal/") => {
-                transport
-                    .send_error_response(
-                        req.id,
-                        -32601,
-                        format!("terminal capability not fully implemented: {m}"),
-                    )
-                    .await?;
+                let result = self.terminals.handle(m, &req.params).await;
+                let line = TerminalRegistry::summary_line(m, &req.params, &result);
+                if let Some(bus) = &self.event_bus {
+                    Self::emit_term(bus, self.control_session_id, line);
+                    // Surface command output after wait so the center column mirrors the shell.
+                    if matches!(m, "terminal/wait_for_exit" | "terminal/waitForExit") {
+                        if let Ok(ref wait) = result {
+                            if let Some(tid) = req
+                                .params
+                                .as_ref()
+                                .and_then(|p| p.get("terminalId"))
+                                .and_then(|v| v.as_str())
+                            {
+                                if let Ok(out) = self
+                                    .terminals
+                                    .handle(
+                                        "terminal/output",
+                                        &Some(json!({ "terminalId": tid })),
+                                    )
+                                    .await
+                                {
+                                    let text = out
+                                        .get("output")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("");
+                                    if !text.is_empty() {
+                                        let clip = if text.len() > 4000 {
+                                            format!("{}…", &text[..4000])
+                                        } else {
+                                            text.to_string()
+                                        };
+                                        let code = wait
+                                            .get("exitCode")
+                                            .and_then(|c| c.as_i64())
+                                            .unwrap_or(-1);
+                                        Self::emit_term(
+                                            bus,
+                                            self.control_session_id,
+                                            format!("{clip}\n[exit {code}]"),
+                                        );
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                match result {
+                    Ok(val) => {
+                        self.emit_host_tool(
+                            m,
+                            req.params
+                                .as_ref()
+                                .and_then(|p| p.get("command"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or(m),
+                            if m.contains("create") {
+                                ToolCallStatus::Running
+                            } else if m.contains("wait") {
+                                ToolCallStatus::Completed
+                            } else {
+                                ToolCallStatus::Completed
+                            },
+                        );
+                        transport.send_response(req.id, val).await?;
+                    }
+                    Err(e) => {
+                        self.emit_host_tool(m, &e.to_string(), ToolCallStatus::Failed);
+                        transport
+                            .send_error_response(req.id, -32000, e.to_string())
+                            .await?;
+                    }
+                }
             }
             other => {
                 warn!(method = %other, "unhandled agent request — returning empty result");
@@ -1116,6 +1201,8 @@ impl AcpClient {
         let p = params.as_ref().ok_or_else(|| AcpError::Protocol("missing params".into()))?;
         let path = p
             .get("path")
+            .or_else(|| p.get("file_path"))
+            .or_else(|| p.get("filePath"))
             .and_then(|v| v.as_str())
             .ok_or_else(|| AcpError::Protocol("fs/read missing path".into()))?;
         let abs = self.resolve_sandbox_path(path)?;
@@ -1150,10 +1237,13 @@ impl AcpClient {
         let p = params.as_ref().ok_or_else(|| AcpError::Protocol("missing params".into()))?;
         let path = p
             .get("path")
+            .or_else(|| p.get("file_path"))
+            .or_else(|| p.get("filePath"))
             .and_then(|v| v.as_str())
             .ok_or_else(|| AcpError::Protocol("fs/write missing path".into()))?;
         let content = p
             .get("content")
+            .or_else(|| p.get("text"))
             .and_then(|v| v.as_str())
             .ok_or_else(|| AcpError::Protocol("fs/write missing content".into()))?;
         let abs = self.resolve_sandbox_path(path)?;
@@ -1310,6 +1400,27 @@ impl AcpClient {
         // ACP SessionNotification: { sessionId, update: SessionUpdate }
         // Some agents also flatten update fields onto params.
         let update = params.get("update").unwrap_or(params);
+
+        // Grok streams totalTokens on params._meta (context window usage).
+        if let Some(tokens) = params
+            .get("_meta")
+            .and_then(|m| m.get("totalTokens"))
+            .and_then(|v| v.as_u64())
+            .or_else(|| {
+                update
+                    .get("_meta")
+                    .and_then(|m| m.get("totalTokens"))
+                    .and_then(|v| v.as_u64())
+            })
+        {
+            bus.emit(ControlEvent::Raw {
+                session_id: Some(sid),
+                payload: json!({
+                    "channel": "usage",
+                    "totalTokens": tokens,
+                }),
+            });
+        }
 
         let update_type = update
             .get("sessionUpdate")
