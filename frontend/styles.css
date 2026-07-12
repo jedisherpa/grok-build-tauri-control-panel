@@ -319,10 +319,12 @@ body {
 
 .transcript {
   flex: 1; min-height: 0; overflow: auto;
-  padding: 16px 18px 12px;
+  padding: 12px 14px 10px;
   font-family: var(--font);
   font-size: 12.5px;
-  line-height: 1.55;
+  line-height: 1.45;
+  background:
+    linear-gradient(180deg, #0a0c10 0%, var(--bg) 48px);
 }
 #view-chat {
   position: relative;
@@ -339,21 +341,28 @@ body {
 }
 .welcome p { margin: 0 0 6px; font-family: var(--ui); }
 
+/* Terminal-style stream (center column = CLI mirror) */
 .t-block {
-  margin: 0 0 12px;
-  padding: 0;
+  margin: 0 0 6px;
+  padding: 4px 0 4px 10px;
   border-left: 2px solid transparent;
-  padding-left: 10px;
 }
 .t-block.user { border-color: var(--user); }
 .t-block.agent { border-color: var(--agent); }
 .t-block.thought { border-color: color-mix(in srgb, var(--bomb-fuse, #fb923c) 70%, var(--dim)); }
 .t-block.tool { border-color: var(--tool); }
 .t-block.system { border-color: var(--dim); }
+.t-block.term { border-color: color-mix(in srgb, var(--dim) 80%, var(--accent)); }
 .t-block.error { border-color: var(--err); }
 .t-block.plan { border-color: var(--accent); }
 .t-block.streaming {
   background: color-mix(in srgb, var(--agent) 4%, transparent);
+}
+.t-block.term-live {
+  border-color: var(--bomb-fuse, #fb923c);
+  background: color-mix(in srgb, var(--bomb-fuse, #fb923c) 6%, transparent);
+  position: sticky;
+  bottom: 0;
 }
 
 .t-role {
@@ -361,22 +370,42 @@ body {
   text-transform: uppercase;
   letter-spacing: 0.06em;
   color: var(--dim);
-  margin-bottom: 3px;
+  margin-bottom: 2px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.t-ts {
+  font-variant-numeric: tabular-nums;
+  opacity: 0.65;
+  text-transform: none;
+  letter-spacing: 0;
+  min-width: 4.6em;
 }
 .t-block.user .t-role { color: var(--user); }
 .t-block.agent .t-role { color: var(--agent); }
 .t-block.thought .t-role { color: var(--bomb-fuse, #fb923c); }
 .t-block.tool .t-role { color: var(--tool); }
+.t-block.term .t-role { color: var(--muted); }
 .t-block.error .t-role { color: var(--err); }
 
 .t-body {
   white-space: pre-wrap;
   word-break: break-word;
   color: var(--text);
+  font-size: 12.5px;
 }
 .t-block.thought .t-body {
   color: var(--muted);
   font-style: italic;
+}
+.t-block.term .t-body {
+  color: var(--muted);
+  font-size: 11.5px;
+}
+.t-block.tool .t-body {
+  color: color-mix(in srgb, var(--tool) 85%, var(--text));
+  font-size: 11.5px;
 }
 .t-body.dim { color: var(--muted); }
 .t-time { color: var(--dim); font-size: 10px; margin-top: 4px; }

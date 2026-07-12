@@ -493,11 +493,19 @@ pub async fn send_prompt(
         resume_saved_session(&state, id).await?;
     }
 
+    let prompt_len = prompt.len();
     state.registry.send_prompt(id, &prompt).await.map_err(err)?;
     // User message — durable immediately (agent side streams via event bus).
     let _ = state
         .persistence
         .append_message(id, "prompt", prompt, Utc::now());
+    // Terminal breadcrumb so center column never looks idle after send.
+    let _ = state.persistence.append_message(
+        id,
+        "system",
+        format!("→ prompt accepted ({prompt_len} chars) · agent stream open"),
+        Utc::now(),
+    );
     persist_session(&state, id).await;
     Ok(())
 }

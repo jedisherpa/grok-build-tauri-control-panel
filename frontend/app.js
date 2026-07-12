@@ -512,11 +512,16 @@ function appendTranscript(sessionId, role, body, at = nowIso(), opts = {}) {
   const text = body == null ? "" : String(body);
   const stream = !!opts.stream;
 
-  // Coalesce streaming agent chunks into one bubble (like a live terminal).
-  if (stream && (role === "agent" || role === "thought") && list.length) {
+  // Coalesce streaming agent/thought/term chunks into one live block (TTY feel).
+  if (stream && (role === "agent" || role === "thought" || role === "term") && list.length) {
     const last = list[list.length - 1];
     if (last.role === role && last.streaming) {
-      last.body = (last.body || "") + text;
+      // term lines: newline-join; agent speech: append raw chunks
+      if (role === "term") {
+        last.body = (last.body || "") + (last.body ? "\n" : "") + text;
+      } else {
+        last.body = (last.body || "") + text;
+      }
       last.at = at;
       if (sessionId === state.selectedSession) {
         patchLastTranscriptBody(last);
@@ -525,7 +530,7 @@ function appendTranscript(sessionId, role, body, at = nowIso(), opts = {}) {
     }
   }
 
-  // Non-stream agent after stream → close previous stream bubble.
+  // Non-stream after stream → close previous stream bubble.
   if (!stream && list.length) {
     const last = list[list.length - 1];
     if (last.streaming) last.streaming = false;
@@ -535,14 +540,18 @@ function appendTranscript(sessionId, role, body, at = nowIso(), opts = {}) {
     role,
     body: text,
     at,
-    streaming: stream && (role === "agent" || role === "thought"),
+    streaming: stream && (role === "agent" || role === "thought" || role === "term"),
   });
+  // Cap memory so huge TTY logs stay snappy
+  if (list.length > 2000) {
+    list.splice(0, list.length - 2000);
+  }
   if (sessionId === state.selectedSession) {
     renderTranscript();
   }
 }
 
-/** Fast path: update only the last agent bubble while streaming. */
+/** Fast path: update only the last streaming block. */
 function patchLastTranscriptBody(entry) {
   const root = $("transcript");
   if (!root) {
@@ -553,7 +562,9 @@ function patchLastTranscriptBody(entry) {
   const last = blocks[blocks.length - 1];
   if (
     !last ||
-    (!last.classList.contains("agent") && !last.classList.contains("thought"))
+    (!last.classList.contains("agent") &&
+      !last.classList.contains("thought") &&
+      !last.classList.contains("term"))
   ) {
     renderTranscript();
     return;
@@ -565,9 +576,30 @@ function patchLastTranscriptBody(entry) {
     return;
   }
   body.textContent = entry.body || "";
-  if (time) time.textContent = entry.at || "";
+  if (time) time.textContent = shortTime(entry.at || "");
   last.classList.toggle("streaming", !!entry.streaming);
   root.scrollTop = root.scrollHeight;
+}
+
+function shortTime(iso) {
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return iso;
+    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  } catch {
+    return iso;
+  }
+}
+
+function termPrefix(role) {
+  if (role === "user") return "you";
+  if (role === "agent") return "grok";
+  if (role === "thought") return "think";
+  if (role === "tool") return "tool";
+  if (role === "plan") return "plan";
+  if (role === "error") return "err";
+  if (role === "term") return "acp";
+  return "sys";
 }
 
 function endAgentStream(sessionId) {
@@ -593,6 +625,7 @@ function roleBombMood(role) {
   if (role === "tool") return "tooling";
   if (role === "plan") return "thinking";
   if (role === "error") return "error";
+  if (role === "term") return "running";
   if (role === "system") return "ready";
   return "idle";
 }
@@ -609,7 +642,7 @@ function renderTranscript() {
   ╚══════════════════════════════════════╝</pre>
 </div>
 <p>Select a thread or start a new ACP session.</p>
-<p class="muted">Pixel bombs track thinking, tools, and turn status while you wait.</p>
+<p class="muted">Center column mirrors the live agent terminal stream.</p>
 </div>`;
     $("composer-session").textContent = "no session";
     $("composer-model").textContent = "";
@@ -629,39 +662,39 @@ function renderTranscript() {
   <pre class="banner">session ${escapeHtml(shortId(sid))}</pre>
 </div>
 <p class="muted">${escapeHtml(sess?.cwd || "")}</p>
-<p>Connected. Type a prompt — the fuse lights while Grok works.</p>
+<p>Connected. Messages, tools, thoughts, and ACP lines stream here like a terminal.</p>
 </div>`;
     updateBombChrome();
     return;
   }
 
-  root.innerHTML = entries
-    .map((e) => {
-      const role = e.role || "system";
-      const label =
-        role === "user"
-          ? "you"
-          : role === "agent"
-            ? "grok"
-            : role === "thought"
-              ? "thinking"
-              : role === "tool"
-                ? "tool"
-                : role === "plan"
-                  ? "plan"
-                  : role === "error"
-                    ? "error"
-                    : "system";
-      const streamCls = e.streaming ? " streaming" : "";
-      return `<div class="t-block ${escapeHtml(role)}${streamCls}">
-  <div class="t-role">${bombHtml(roleBombMood(role), "xs")}<span>${label}</span>${e.streaming ? '<span class="stream-caret" aria-hidden="true"></span>' : ""}</div>
+  // Terminal-style continuous log (mirrors CLI, not just chat bubbles).
+  const liveHint =
+    turnActive() && isSelectedBusyForRender()
+      ? `<div class="t-block term streaming term-live">
+  <div class="t-role">${bombHtml("thinking", "xs")}<span>live</span><span class="stream-caret" aria-hidden="true"></span></div>
+  <div class="t-body">${escapeHtml(buildTurnDetail())}</div>
+</div>`
+      : "";
+
+  root.innerHTML =
+    entries
+      .map((e) => {
+        const role = e.role || "system";
+        const label = termPrefix(role);
+        const streamCls = e.streaming ? " streaming" : "";
+        return `<div class="t-block ${escapeHtml(role)}${streamCls}">
+  <div class="t-role"><span class="t-ts">${escapeHtml(shortTime(e.at || ""))}</span>${bombHtml(roleBombMood(role), "xs")}<span>${label}</span>${e.streaming ? '<span class="stream-caret" aria-hidden="true"></span>' : ""}</div>
   <div class="t-body">${escapeHtml(e.body)}</div>
-  <div class="t-time">${escapeHtml(e.at || "")}</div>
 </div>`;
-    })
-    .join("");
+      })
+      .join("") + liveHint;
   root.scrollTop = root.scrollHeight;
   updateBombChrome();
+}
+
+function isSelectedBusyForRender() {
+  return turnActive();
 }
 
 // ── Threads / agents ────────────────────────────────────────────────────
@@ -858,11 +891,22 @@ function handleControlEvent(ev) {
     if (!raw) return;
     // Drop legacy status lines that were mis-tagged as agent speech.
     if (isNoiseAgentText(raw)) {
+      appendTranscript(sid, "term", raw, nowIso(), { stream: true });
       if (isSelected && turnActive()) {
         noteTurn(state.turn.phase === "idle" ? "think" : state.turn.phase, {
           note: raw.slice(0, 80),
         });
       }
+      return;
+    }
+    // Brain/status banners → system-ish term lines, not grok speech
+    if (
+      raw.startsWith("🧠") ||
+      raw.startsWith("📜") ||
+      raw.startsWith("⚙") ||
+      raw.startsWith("wrote ")
+    ) {
+      appendTranscript(sid, "term", raw);
       return;
     }
     const isThought = raw.startsWith("💭");
@@ -877,7 +921,6 @@ function handleControlEvent(ev) {
           thoughtChars: (state.turn.thoughtChars || 0) + text.length,
           thoughtPreview: clipPreview(body),
         });
-        // Timeline only on first thought chunk
         if ((state.turn.thoughtChars || 0) <= text.length + 1) {
           pushEvent(`thinking · ${shortId(sid)}`, "", "thinking");
         }
@@ -887,13 +930,8 @@ function handleControlEvent(ev) {
           streamChars: prev + text.length,
           preview: clipPreview(body),
         });
-        // Timeline: first chunk + every ~400 chars
         if (prev === 0 || Math.floor((prev + text.length) / 400) > Math.floor(prev / 400)) {
-          pushEvent(
-            `reply · ${formatCount(prev + text.length)} chars`,
-            "",
-            "stream"
-          );
+          pushEvent(`reply · ${formatCount(prev + text.length)} chars`, "", "stream");
         }
       }
     }
@@ -901,7 +939,7 @@ function handleControlEvent(ev) {
     endAgentStream(sid);
     const te = ev.event || ev;
     const tool = te.tool || te.name || "tool";
-    const summary = te.args_summary || te.argsSummary || te.result_summary || "";
+    const summary = te.args_summary || te.argsSummary || te.result_summary || te.resultSummary || "";
     const status = te.status || "running";
     state.tools.unshift({
       id: te.id,
@@ -912,17 +950,22 @@ function handleControlEvent(ev) {
     });
     if (state.tools.length > 80) state.tools.length = 80;
     renderTools();
-    appendTranscript(
-      sid,
-      "tool",
-      `${tool} [${status}]\n${String(summary).slice(0, 400)}`
-    );
     const st = String(status).toLowerCase();
     const done =
       st.includes("done") ||
       st.includes("complete") ||
       st.includes("success") ||
       st.includes("completed");
+    // Full detail in center column (like CLI tool traces)
+    appendTranscript(
+      sid,
+      "tool",
+      `$ ${tool}  [${status}]\n${String(summary).slice(0, 2000)}${
+        te.result_summary || te.resultSummary
+          ? `\n→ ${String(te.result_summary || te.resultSummary).slice(0, 800)}`
+          : ""
+      }`
+    );
     pushEvent(`tool · ${tool} · ${status}`, done ? "ok" : "", done ? "boom" : "tooling", {
       force: true,
     });
@@ -933,7 +976,6 @@ function handleControlEvent(ev) {
         lastToolStatus: status,
         note: String(summary).slice(0, 60),
       });
-      // If tool finished and we already had reply chars, stay on tools until more reply
       if (done && state.turn.streamChars) {
         noteTurn("reply", { lastTool: tool, lastToolStatus: status });
       }
@@ -943,18 +985,17 @@ function handleControlEvent(ev) {
     const steps = (pe.steps || [])
       .map((s) => `  - [${s.status || "pending"}] ${s.description || s.id}`)
       .join("\n");
-    appendTranscript(sid, "plan", `${pe.title || "plan"} (${pe.status || ""})\n${steps}`);
+    appendTranscript(sid, "plan", `plan ${pe.title || ""}\n${steps}`);
     pushEvent(`plan · ${(pe.steps || []).length} steps`, "", "thinking");
     if (isSelected) noteTurn("think", { note: pe.title || "plan update" });
   } else if (type === "session_created" || type === "sessionCreated") {
+    appendTranscript(sid, "term", `session ready · ${shortId(sid)}`);
     pushEvent(`session · ${shortId(sid)} ready`, "ok", "boom", { force: true });
     refreshSessions();
   } else if (type === "session_status_changed" || type === "sessionStatusChanged") {
     const st = String(ev.status || "").toLowerCase();
-    // Quiet: only log meaningful transitions
-    if (st.includes("idle") || st.includes("fail") || st.includes("cancel") || st.includes("wait")) {
-      pushEvent(`session · ${shortId(sid)} → ${ev.status}`, "", moodFromStatus(st));
-    }
+    appendTranscript(sid, "term", `status → ${ev.status}`);
+    pushEvent(`session · ${shortId(sid)} → ${ev.status}`, "", moodFromStatus(st));
     if (isSelected) {
       if (st.includes("wait") || st.includes("approv")) {
         noteTurn("wait", { note: "Waiting for approval" });
@@ -978,7 +1019,7 @@ function handleControlEvent(ev) {
     refreshSessions();
   } else if (type === "session_cancelled" || type === "sessionCancelled") {
     endAgentStream(sid);
-    appendTranscript(sid, "system", "session cancelled");
+    appendTranscript(sid, "term", "session cancelled");
     pushEvent(`cancelled · ${shortId(sid)}`, "", "error", { force: true });
     if (isSelected) noteTurn("error", { note: "Cancelled" });
     refreshSessions();
@@ -992,8 +1033,8 @@ function handleControlEvent(ev) {
     endAgentStream(sid);
     appendTranscript(
       sid,
-      "system",
-      `approval required: ${ev.tool || "?"} — ${ev.summary || ev.request_id || ""}`
+      "term",
+      `! approval · ${ev.tool || "?"} — ${ev.summary || ev.request_id || ""}`
     );
     pushEvent(`approval · ${ev.tool || "?"}`, "err", "wait", { force: true });
     if (isSelected) {
@@ -1004,6 +1045,18 @@ function handleControlEvent(ev) {
     }
   } else if (type === "raw") {
     const payload = ev.payload || ev;
+    // Terminal channel from ACP stderr / session breadcrumbs
+    if (payload?.channel === "term" && payload?.line) {
+      appendTranscript(sid || state.selectedSession, "term", String(payload.line), nowIso(), {
+        stream: true,
+      });
+      if (isSelected && turnActive()) {
+        noteTurn(state.turn.phase === "idle" ? "think" : state.turn.phase, {
+          note: String(payload.line).slice(0, 80),
+        });
+      }
+      return;
+    }
     const maybe =
       payload?.update?.content?.text ||
       payload?.content?.text ||
@@ -1019,9 +1072,26 @@ function handleControlEvent(ev) {
           preview: clipPreview(maybe),
         });
       }
+    } else {
+      // Dump anything else so the center never goes silent
+      const dump = JSON.stringify(payload);
+      if (dump && dump !== "{}" && dump !== "null") {
+        appendTranscript(
+          sid || state.selectedSession,
+          "term",
+          dump.length > 400 ? dump.slice(0, 400) + "…" : dump,
+          nowIso(),
+          { stream: true }
+        );
+      }
     }
+  } else {
+    appendTranscript(
+      sid || state.selectedSession,
+      "term",
+      `event ${type}${sid ? ` · ${shortId(sid)}` : ""}`
+    );
   }
-  // swallow other low-value event types from timeline noise
 }
 
 // ── API actions ─────────────────────────────────────────────────────────

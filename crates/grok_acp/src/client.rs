@@ -203,10 +203,37 @@ impl AcpClient {
             .stdout
             .take()
             .ok_or_else(|| AcpError::Spawn("missing stdout".into()))?;
+        let stderr = child.stderr.take();
 
         let (notif_tx, notif_rx) = tokio::sync::mpsc::unbounded_channel();
         let (agent_req_tx, agent_req_rx) = tokio::sync::mpsc::unbounded_channel();
         let transport = NdjsonTransport::new(stdin, stdout, notif_tx, agent_req_tx);
+
+        // Mirror agent stderr into the control bus (center column / terminal view).
+        if let Some(stderr) = stderr {
+            let bus = event_bus.clone();
+            let sid = control_session_id;
+            tokio::spawn(async move {
+                use tokio::io::{AsyncBufReadExt, BufReader};
+                let mut lines = BufReader::new(stderr).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    let line = line.trim_end().to_string();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    if let Some(bus) = &bus {
+                        bus.emit(ControlEvent::Raw {
+                            session_id: Some(sid),
+                            payload: json!({
+                                "channel": "term",
+                                "stream": "stderr",
+                                "line": line,
+                            }),
+                        });
+                    }
+                }
+            });
+        }
 
         let pending_context = connect_opts
             .transcript_context
@@ -715,6 +742,17 @@ impl AcpClient {
         let params_val = serde_json::to_value(params)?;
         let transport = self.transport().await?;
 
+        if let Some(bus) = &self.event_bus {
+            bus.emit(ControlEvent::Raw {
+                session_id: Some(self.control_session_id),
+                payload: json!({
+                    "channel": "term",
+                    "stream": "acp",
+                    "line": format!("→ session/prompt ({} chars) — waiting for stream…", prompt.len()),
+                }),
+            });
+        }
+
         // Fire the RPC immediately; do not block the UI on the full agent turn.
         // Grok streams work via notifications while session/prompt stays open.
         let rx = transport
@@ -728,9 +766,22 @@ impl AcpClient {
         tokio::spawn(async move {
             match tokio::time::timeout(prompt_timeout, rx).await {
                 Ok(Ok(resp)) => match NdjsonTransport::unwrap_response(resp) {
-                    Ok(_) => {
+                    Ok(result) => {
                         info!("session/prompt completed");
-                        if let Some(bus) = bus {
+                        let stop = result
+                            .get("stopReason")
+                            .or_else(|| result.get("stop_reason"))
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("end_turn");
+                        if let Some(bus) = &bus {
+                            bus.emit(ControlEvent::Raw {
+                                session_id: Some(control_id),
+                                payload: json!({
+                                    "channel": "term",
+                                    "stream": "acp",
+                                    "line": format!("← session/prompt complete · stopReason={stop}"),
+                                }),
+                            });
                             bus.emit_status(control_id, SessionStatus::Idle).await;
                         }
                     }
@@ -753,16 +804,23 @@ impl AcpClient {
                     }
                 }
                 Err(_) => {
-                    // Soft timeout: agent may still be running; keep session Running.
                     warn!(
                         timeout_secs = prompt_timeout.as_secs(),
                         "session/prompt still open after timeout; continuing via stream"
                     );
-                    // Soft timeout only — do not invent agent speech.
-                    debug!(
-                        "prompt still open after {} min",
-                        prompt_timeout.as_secs() / 60
-                    );
+                    if let Some(bus) = &bus {
+                        bus.emit(ControlEvent::Raw {
+                            session_id: Some(control_id),
+                            payload: json!({
+                                "channel": "term",
+                                "stream": "acp",
+                                "line": format!(
+                                    "… session/prompt still open after {} min (stream may continue)",
+                                    prompt_timeout.as_secs() / 60
+                                ),
+                            }),
+                        });
+                    }
                 }
             }
         });
@@ -1237,6 +1295,17 @@ impl AcpClient {
         }
     }
 
+    fn emit_term(bus: &EventBus, sid: Uuid, line: impl Into<String>) {
+        bus.emit(ControlEvent::Raw {
+            session_id: Some(sid),
+            payload: json!({
+                "channel": "term",
+                "stream": "acp",
+                "line": line.into(),
+            }),
+        });
+    }
+
     async fn map_session_update(&self, bus: &EventBus, sid: Uuid, params: &Value) {
         // ACP SessionNotification: { sessionId, update: SessionUpdate }
         // Some agents also flatten update fields onto params.
@@ -1263,6 +1332,48 @@ impl AcpClient {
             .collect::<String>()
             .trim_start_matches('_')
             .to_string();
+
+        // Always leave a breadcrumb for non-text updates so the center looks like a TTY.
+        match update_type_norm.as_str() {
+            "agent_message_chunk"
+            | "agent_message"
+            | "message"
+            | "agentmessagechunk"
+            | "agentmessage"
+            | "agent_thought_chunk"
+            | "agent_thought"
+            | "agentthoughtchunk"
+            | "thought"
+            | "user_message_chunk"
+            | "usermessagechunk" => {}
+            other if !other.is_empty() => {
+                let snippet = extract_agent_text(update)
+                    .map(|t| {
+                        let t = t.replace('\n', " ");
+                        if t.len() > 120 {
+                            format!("{}…", &t[..120])
+                        } else {
+                            t
+                        }
+                    })
+                    .or_else(|| {
+                        update
+                            .get("title")
+                            .or_else(|| update.get("status"))
+                            .and_then(|v| v.as_str())
+                            .map(|s| s.to_string())
+                    })
+                    .unwrap_or_default();
+                if snippet.is_empty() {
+                    Self::emit_term(bus, sid, format!("· session/update {other}"));
+                } else {
+                    Self::emit_term(bus, sid, format!("· {other}: {snippet}"));
+                }
+            }
+            _ => {
+                Self::emit_term(bus, sid, "· session/update (untyped)");
+            }
+        }
 
         match update_type_norm.as_str() {
             "tool_call" | "toolcall" => {
@@ -1420,6 +1531,19 @@ impl AcpClient {
             }
             "available_commands_update" | "availablecommandsupdate" | "current_mode_update"
             | "currentmodeupdate" => {}
+            "usage_update" | "usageupdate" => {
+                let used = update.get("used").and_then(|v| v.as_u64());
+                let size = update.get("size").and_then(|v| v.as_u64());
+                Self::emit_term(
+                    bus,
+                    sid,
+                    format!(
+                        "· usage tokens {}/{}",
+                        used.map(|u| u.to_string()).unwrap_or_else(|| "?".into()),
+                        size.map(|s| s.to_string()).unwrap_or_else(|| "?".into())
+                    ),
+                );
+            }
             other => {
                 // Last-resort: if content looks like text, still surface it.
                 if let Some(text) = extract_agent_text(update) {
@@ -1434,10 +1558,17 @@ impl AcpClient {
                     }
                 }
                 debug!(other, "unmapped session update");
-                bus.emit(ControlEvent::Raw {
-                    session_id: Some(sid),
-                    payload: params.clone(),
-                });
+                let compact = serde_json::to_string(update).unwrap_or_default();
+                let compact = if compact.len() > 280 {
+                    format!("{}…", &compact[..280])
+                } else {
+                    compact
+                };
+                Self::emit_term(
+                    bus,
+                    sid,
+                    format!("· acp/{other}: {compact}"),
+                );
             }
         }
     }
