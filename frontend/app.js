@@ -23,6 +23,7 @@ const state = {
   ready: false,
   auth: null,
   loggingIn: false,
+  startingSession: false,
   devServer: null,
   transcriptBySession: new Map(),
   transcriptLoaded: new Set(),
@@ -2104,6 +2105,12 @@ async function loadBackends() {
 }
 
 async function startAcp() {
+  const newBtn = $("btn-new-session");
+  const startBtn = $("btn-start-acp");
+  if (state.startingSession) return; // double-click guard
+  state.startingSession = true;
+  if (newBtn) newBtn.disabled = true;
+  if (startBtn) startBtn.disabled = true;
   try {
     const backend = currentBackend();
     // Grok login gate only applies to the grok backend; claude/codex ride
@@ -2114,6 +2121,13 @@ async function startAcp() {
       const go = confirm("Not signed in with Grok. Log in now?");
       if (go) {
         await loginWithGrok();
+        // The device-code flow finishes in the browser — wait for the poll
+        // to land instead of failing instantly.
+        const deadline = Date.now() + 120_000;
+        while (state.loggingIn && Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 1000));
+        }
+        await refreshAuth().catch(() => null);
         if (!state.auth?.loggedIn) throw new Error("Login required before starting a session");
       } else {
         throw new Error("Sign in with Grok first");
@@ -2155,13 +2169,17 @@ async function startAcp() {
       );
     }
     const res = await invoke("start_session", { cwd, opts });
-    appendTranscript(res.id, "system", `session started · ${backend} · cwd ${cwd}`);
-    pushEvent(`ACP session ${shortId(res.id)}`, "ok", "boom", { force: true, milestone: true });
+    appendTranscript(res.id, "system", `session starting · ${backend} · cwd ${cwd}`);
+    pushEvent(`ACP session ${shortId(res.id)} starting`, "ok", "thinking", { force: true, milestone: true });
     await refreshSessions();
     // selectSession persists previous presence under the *previous* id
     await selectSession(res.id);
   } catch (e) {
     toastError(e);
+  } finally {
+    state.startingSession = false;
+    if (newBtn) newBtn.disabled = false;
+    if (startBtn) startBtn.disabled = false;
   }
 }
 

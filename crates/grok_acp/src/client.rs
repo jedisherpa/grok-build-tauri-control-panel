@@ -105,6 +105,9 @@ pub struct AcpClientConfig {
     pub client_version: String,
     /// Timeout for short control RPCs (initialize, auth, session/new, cancel).
     pub request_timeout: Duration,
+    /// Tighter timeout for the startup handshake (initialize/authenticate) —
+    /// a healthy agent answers these in ms; minutes-long hangs mean it's dead.
+    pub startup_timeout: Duration,
     /// Max wait for a full agent turn on session/prompt (long coding jobs).
     pub prompt_timeout: Duration,
     /// Ordered auth-method preference matched against agent-advertised methods.
@@ -127,6 +130,7 @@ impl AcpClientConfig {
             client_name: "BombCode".into(),
             client_version: env!("CARGO_PKG_VERSION").into(),
             request_timeout: Duration::from_secs(120),
+            startup_timeout: Duration::from_secs(30),
             // Long agent turns stream via notifications; still cap runaway jobs.
             prompt_timeout: Duration::from_secs(60 * 60 * 2), // 2 hours
             // Grok Build advertises cached_token + grok.com (not xai.api_key).
@@ -165,6 +169,8 @@ pub struct AcpClient {
     always_approve: std::sync::atomic::AtomicBool,
     /// Permission requests parked until the user answers via respond_approval.
     pending_permissions: Mutex<HashMap<String, PendingPermission>>,
+    /// Set during deliberate shutdown so process death isn't reported as failure.
+    shutting_down: std::sync::atomic::AtomicBool,
     brain_mode: RwLock<BrainMode>,
     /// Injected once on first prompt when brain is history-only.
     pending_context: Mutex<Option<String>>,
@@ -295,6 +301,7 @@ impl AcpClient {
             agent_request_rx: Mutex::new(Some(agent_req_rx)),
             always_approve: std::sync::atomic::AtomicBool::new(opts.always_approve),
             pending_permissions: Mutex::new(HashMap::new()),
+            shutting_down: std::sync::atomic::AtomicBool::new(false),
             brain_mode: RwLock::new(BrainMode::Fresh),
             pending_context: Mutex::new(pending_context),
             load_session_supported: RwLock::new(false),
@@ -312,9 +319,11 @@ impl AcpClient {
 
         // Background event loop for notifications
         let loop_client = client.clone();
+        let death_client = client.clone();
         tokio::spawn(async move {
             if let Err(e) = loop_client.run_event_loop().await {
                 warn!(error = %e, "ACP event loop terminated");
+                death_client.report_process_death().await;
             }
         });
 
@@ -345,6 +354,7 @@ impl AcpClient {
             agent_request_rx: Mutex::new(None),
             always_approve: std::sync::atomic::AtomicBool::new(false),
             pending_permissions: Mutex::new(HashMap::new()),
+            shutting_down: std::sync::atomic::AtomicBool::new(false),
             brain_mode: RwLock::new(BrainMode::Fresh),
             pending_context: Mutex::new(None),
             load_session_supported: RwLock::new(false),
@@ -374,6 +384,14 @@ impl AcpClient {
             .await
     }
 
+    /// Startup-handshake RPC with the tighter startup timeout.
+    async fn request_startup(&self, method: &str, params: Option<Value>) -> Result<Value> {
+        let transport = self.transport().await?;
+        transport
+            .request_with_timeout(method, params, self.config.startup_timeout)
+            .await
+    }
+
     async fn initialize(&self) -> Result<()> {
         let params = InitializeParams::new(
             ClientInfo {
@@ -389,7 +407,7 @@ impl AcpClient {
             },
         );
         let result = self
-            .request_timeout("initialize", Some(serde_json::to_value(params)?))
+            .request_startup("initialize", Some(serde_json::to_value(params)?))
             .await?;
         let caps = result.get("agentCapabilities").cloned();
         *self.agent_capabilities.write().await = caps.clone();
@@ -469,7 +487,7 @@ impl AcpClient {
             meta: Some(json!({ "headless": true })),
         };
         match self
-            .request_timeout("authenticate", Some(serde_json::to_value(params)?))
+            .request_startup("authenticate", Some(serde_json::to_value(params)?))
             .await
         {
             Ok(_) => {
@@ -487,7 +505,7 @@ impl AcpClient {
                         meta: Some(json!({ "headless": true })),
                     };
                     match self
-                        .request_timeout("authenticate", Some(serde_json::to_value(params)?))
+                        .request_startup("authenticate", Some(serde_json::to_value(params)?))
                         .await
                     {
                         Ok(_) => {
@@ -975,6 +993,8 @@ impl AcpClient {
                                 ),
                             }),
                         });
+                        // Don't leave the thread pinned on "running" forever.
+                        bus.emit_status(control_id, SessionStatus::Idle).await;
                     }
                 }
             }
@@ -1112,6 +1132,23 @@ impl AcpClient {
             }
         }
         Ok(())
+    }
+
+    /// The agent process died out from under us — surface it instead of
+    /// leaving the thread stuck on "running".
+    async fn report_process_death(&self) {
+        if self.shutting_down.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        self.drain_pending_permissions().await;
+        if let Some(bus) = &self.event_bus {
+            bus.emit_error(
+                Some(self.control_session_id),
+                format!("{} agent process exited unexpectedly", self.config.backend_label),
+            );
+            bus.emit_status(self.control_session_id, SessionStatus::Failed)
+                .await;
+        }
     }
 
     /// Answer every parked permission request as cancelled (turn cancel / shutdown).
@@ -2088,6 +2125,8 @@ fn extract_agent_text(update: &Value) -> Option<String> {
 
 impl AcpClient {
     pub async fn shutdown(&self) -> Result<()> {
+        self.shutting_down
+            .store(true, std::sync::atomic::Ordering::Relaxed);
         self.drain_pending_permissions().await;
         let _ = self.cancel().await;
         let mut child_guard = self.child.lock().await;

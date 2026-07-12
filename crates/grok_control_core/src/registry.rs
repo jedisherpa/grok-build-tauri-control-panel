@@ -19,10 +19,62 @@ use crate::handle::{AgentHandle, AgentHandleSnapshot, SessionMetadata};
 use crate::options::{AgentMode, SpawnOptions};
 
 pub struct SessionRegistry {
-    sessions: DashMap<Uuid, AgentHandle>,
+    sessions: Arc<DashMap<Uuid, AgentHandle>>,
     event_bus: Arc<EventBus>,
     config: Arc<tokio::sync::RwLock<GrokConfig>>,
     grok_cli: Arc<GrokCli>,
+}
+
+/// Everything the deferred ACP connect needs, detached from `&self` so it can
+/// run in a background task while the UI already shows the thread.
+struct PendingConnect {
+    client_cfg: AcpClientConfig,
+    acp_opts: AcpSpawnOptions,
+    connect_opts: ConnectOpts,
+}
+
+/// Run the ACP handshake and fill in (or fail) the placeholder session entry.
+async fn connect_and_fill(
+    sessions: Arc<DashMap<Uuid, AgentHandle>>,
+    event_bus: Arc<EventBus>,
+    id: Uuid,
+    pending: PendingConnect,
+) -> Result<()> {
+    match AcpClient::connect_with(
+        pending.client_cfg,
+        &pending.acp_opts,
+        Some(event_bus.clone()),
+        id,
+        pending.connect_opts,
+    )
+    .await
+    {
+        Ok(client) => {
+            let acp_session_id = client.session_id().await;
+            let brain_mode = client.brain_mode().await;
+            // Never hold a DashMap guard across an await.
+            if let Some(mut entry) = sessions.get_mut(&id) {
+                entry.metadata.acp_session_id = acp_session_id;
+                entry.metadata.brain_mode = brain_mode;
+                entry.metadata.status = SessionStatus::Idle;
+                entry.acp_client = Some(client);
+                entry.touch();
+            } else {
+                // Session was removed while starting — kill the orphan.
+                let _ = client.shutdown().await;
+            }
+            Ok(())
+        }
+        Err(e) => {
+            if let Some(mut entry) = sessions.get_mut(&id) {
+                entry.metadata.status = SessionStatus::Failed;
+                entry.touch();
+            }
+            event_bus.emit_error(Some(id), format!("session start failed: {e}"));
+            event_bus.emit_status(id, SessionStatus::Failed).await;
+            Err(e.into())
+        }
+    }
 }
 
 impl SessionRegistry {
@@ -32,16 +84,19 @@ impl SessionRegistry {
         grok_cli: Arc<GrokCli>,
     ) -> Arc<Self> {
         Arc::new(Self {
-            sessions: DashMap::new(),
+            sessions: Arc::new(DashMap::new()),
             event_bus,
             config,
             grok_cli,
         })
     }
 
+    /// Start a session. The thread appears (status `Starting`) immediately;
+    /// the ACP handshake completes in the background and flips it to
+    /// `Idle`/`Failed` via status events.
     pub async fn spawn_agent(&self, cwd: &str, opts: SpawnOptions) -> Result<Uuid> {
         let id = Uuid::new_v4();
-        self.spawn_agent_with_id(id, cwd, opts, None, ConnectOpts::default())
+        self.spawn_agent_with_id(id, cwd, opts, None, ConnectOpts::default(), true)
             .await?;
         Ok(id)
     }
@@ -64,7 +119,9 @@ impl SessionRegistry {
             };
             return Ok(mode);
         }
-        self.spawn_agent_with_id(id, cwd, opts, created_at, connect_opts)
+        // Resume is blocking: the caller sends a prompt right after, so the
+        // client must be live before we return.
+        self.spawn_agent_with_id(id, cwd, opts, created_at, connect_opts, false)
             .await?;
         let mode = self
             .sessions
@@ -87,6 +144,7 @@ impl SessionRegistry {
         opts: SpawnOptions,
         created_at: Option<chrono::DateTime<Utc>>,
         connect_opts: ConnectOpts,
+        background: bool,
     ) -> Result<()> {
         opts.validate().map_err(CoreError::InvalidOptions)?;
 
@@ -220,22 +278,57 @@ impl SessionRegistry {
                         .collect();
                     client_cfg.skip_auth_when_unadvertised = desc.skip_auth_when_unadvertised;
                     client_cfg.backend_label = backend.key().to_string();
-                    let client = AcpClient::connect_with(
-                        client_cfg,
-                        &acp_opts,
-                        Some(self.event_bus.clone()),
-                        id,
-                        connect_opts,
-                    )
-                    .await?;
-                    metadata.acp_session_id = client.session_id().await;
-                    metadata.brain_mode = client.brain_mode().await;
-                    metadata.status = SessionStatus::Idle;
-                    AgentHandle {
-                        metadata,
-                        child: None,
-                        acp_client: Some(client),
+
+                    // Insert a placeholder and announce the thread NOW — the
+                    // handshake (spawn + initialize + auth + session/new) can
+                    // take many seconds and the UI must not sit blank. The
+                    // entry API also makes concurrent resume/start of the same
+                    // id spawn exactly one process.
+                    match self.sessions.entry(id) {
+                        dashmap::mapref::entry::Entry::Occupied(_) => {
+                            return Err(CoreError::InvalidOptions(format!(
+                                "session {id} is already starting"
+                            )));
+                        }
+                        dashmap::mapref::entry::Entry::Vacant(v) => {
+                            v.insert(AgentHandle {
+                                metadata: metadata.clone(),
+                                child: None,
+                                acp_client: None,
+                            });
+                        }
                     }
+                    self.event_bus.emit_session_created(id, cwd, "acp").await;
+                    self.event_bus.emit_status(id, SessionStatus::Starting).await;
+
+                    let pending = PendingConnect {
+                        client_cfg,
+                        acp_opts,
+                        connect_opts,
+                    };
+                    if background {
+                        let sessions = self.sessions.clone();
+                        let bus = self.event_bus.clone();
+                        tokio::spawn(async move {
+                            let _ = connect_and_fill(sessions, bus, id, pending).await;
+                        });
+                    } else {
+                        // Blocking (resume): propagate failure and drop the
+                        // placeholder so callers see a clean error.
+                        if let Err(e) = connect_and_fill(
+                            self.sessions.clone(),
+                            self.event_bus.clone(),
+                            id,
+                            pending,
+                        )
+                        .await
+                        {
+                            self.sessions.remove(&id);
+                            return Err(e);
+                        }
+                    }
+                    info!(%id, cwd, background, "ACP session spawn initiated");
+                    return Ok(());
                 }
             }
             AgentMode::Headless => {
@@ -284,7 +377,7 @@ impl SessionRegistry {
         let mut opts = SpawnOptions::default();
         opts.model = Some("mock".into());
         opts.mode = AgentMode::Acp;
-        self.spawn_agent_with_id(id, cwd, opts, None, ConnectOpts::default())
+        self.spawn_agent_with_id(id, cwd, opts, None, ConnectOpts::default(), false)
             .await?;
         Ok(id)
     }
@@ -318,6 +411,13 @@ impl SessionRegistry {
                 .sessions
                 .get_mut(&id)
                 .ok_or(CoreError::SessionNotFound(id))?;
+            if entry.acp_client.is_none()
+                && matches!(entry.metadata.status, SessionStatus::Starting)
+            {
+                return Err(CoreError::InvalidOptions(
+                    "session is still starting — wait for it to become idle".into(),
+                ));
+            }
             entry.touch();
             entry.metadata.status = SessionStatus::Running;
             entry
