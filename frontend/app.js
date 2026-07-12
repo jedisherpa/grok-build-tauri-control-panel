@@ -1370,7 +1370,9 @@ function handleControlEvent(ev) {
       return;
     }
     const isThought = raw.startsWith("💭");
-    const text = isThought ? raw.replace(/^💭\s*/, "") : raw;
+    // Strip ONLY the marker — stripping whitespace after it ate each chunk's
+    // leading space and welded streamed thoughts into "Ihaveagoodpicture…".
+    const text = isThought ? raw.replace(/^💭/, "") : raw;
     const role = isThought ? "thought" : "agent";
     talkNote(sid, isThought ? "think" : "speak", text);
     appendTranscript(sid, role, text, nowIso(), { stream: true });
@@ -3517,17 +3519,31 @@ function wireExplainer() {
     })
     .catch(() => applyToggle());
 
-  const logToggle = $("log-toggle");
-  const feed = $("event-feed");
-  if (logToggle && feed) {
-    let open = false;
-    logToggle.onclick = () => {
-      open = !open;
-      feed.style.display = open ? "" : "none";
-      $("log-caret").textContent = open ? "▾" : "▸";
-      logToggle.setAttribute("aria-expanded", String(open));
-    };
-  }
+  wireAccordion("log-toggle", "event-feed", "log-caret", "log", false);
+  wireAccordion("agents-toggle", "agent-list", "agents-caret", "agents", true);
+  wireAccordion("tools-toggle", "tool-list", "tools-caret", "tools", true);
+}
+
+/** Collapsible right-bar section with persisted state. */
+function wireAccordion(toggleId, bodyId, caretId, key, defaultOpen) {
+  const toggle = $(toggleId);
+  const body = $(bodyId);
+  if (!toggle || !body) return;
+  const storageKey = `bomb.rightOpen.${key}`;
+  let open = localStorage.getItem(storageKey);
+  open = open === null ? defaultOpen : open === "1";
+  const apply = () => {
+    body.style.display = open ? "" : "none";
+    const caret = $(caretId);
+    if (caret) caret.textContent = open ? "▾" : "▸";
+    toggle.setAttribute("aria-expanded", String(open));
+  };
+  toggle.onclick = () => {
+    open = !open;
+    localStorage.setItem(storageKey, open ? "1" : "0");
+    apply();
+  };
+  apply();
 }
 
 // Approval cards: delegated listener — innerHTML rebuilds kill per-button handlers.

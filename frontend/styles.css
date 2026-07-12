@@ -844,8 +844,15 @@ body {
   min-height: 0;
   display: flex;
   flex-direction: column;
+  flex-shrink: 0;
 }
-.right-block.grow { flex: 1; border-bottom: none; }
+/* The narrator panel owns the leftover space and can never be crushed
+   below a readable height by other sections. */
+.right-block.grow { flex: 1; border-bottom: none; min-height: 140px; }
+/* Fixed lists get a cap + their own scrollbar instead of inflating the
+   column (a burst of tool cards used to shove Log over the narrator). */
+.agent-list { max-height: 140px; flex: 0 1 auto; }
+.tool-list { max-height: 180px; flex: 0 1 auto; }
 
 .agent-card, .tool-card {
   cursor: default;

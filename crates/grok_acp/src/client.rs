@@ -1983,7 +1983,9 @@ impl AcpClient {
                         // Surface thoughts in the transcript so the user sees reasoning stream.
                         bus.emit(ControlEvent::AgentMessage {
                             session_id: sid,
-                            text: format!("💭 {text}"),
+                            // No injected space: chunks carry their own leading
+                            // whitespace and any padding here corrupts joins.
+                            text: format!("💭{text}"),
                             at: Utc::now(),
                         });
                     }
