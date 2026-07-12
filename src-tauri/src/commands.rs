@@ -786,6 +786,35 @@ pub async fn set_plan_mode(
         .map_err(err)
 }
 
+// ── Explainer (right-panel ELI12 narrator) ───────────────────────────────
+
+#[tauri::command]
+pub async fn explainer_focus(
+    state: State<'_, AppState>,
+    id: Option<String>,
+) -> Result<(), String> {
+    let uuid = match id.as_deref().filter(|s| !s.is_empty()) {
+        Some(s) => Some(Uuid::parse_str(s).map_err(err)?),
+        None => None,
+    };
+    state.explainer.set_focus(uuid).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn set_explainer_enabled(
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<bool, String> {
+    state.explainer.set_enabled(enabled);
+    {
+        let mut cfg = state.config.write().await;
+        cfg.explainer_enabled = enabled;
+        cfg.save(&state.paths.config_file).map_err(err)?;
+    }
+    Ok(state.explainer.enabled())
+}
+
 #[tauri::command]
 pub async fn set_always_approve(
     state: State<'_, AppState>,

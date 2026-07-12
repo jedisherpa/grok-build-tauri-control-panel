@@ -794,10 +794,11 @@ impl AcpClient {
         if let Some(exact) = advertised.iter().find(|m| m.eq_ignore_ascii_case(wanted)) {
             return Some(exact.clone());
         }
-        // Intent aliases: different agents name the same modes differently.
+        // Intent aliases: different agents name the same modes differently
+        // (grok 0.2.x advertises read-only / agent / agent-full-access).
         let fallback = [wanted];
         let candidates: &[&str] = match wanted {
-            "plan" => &["plan", "planning"],
+            "plan" => &["plan", "planning", "read-only", "readonly"],
             "always_approve" | "yolo" => &[
                 "always_approve",
                 "alwaysallow",
@@ -805,8 +806,9 @@ impl AcpClient {
                 "bypasspermissions",
                 "yolo",
                 "acceptedits",
+                "agent-full-access",
             ],
-            "default" => &["default", "normal", "ask", "code"],
+            "default" => &["default", "normal", "ask", "code", "agent"],
             _ => &fallback,
         };
         for c in candidates {

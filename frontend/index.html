@@ -294,8 +294,22 @@
         </div>
 
         <div class="right-block grow">
-          <div class="section-label">Timeline</div>
-          <div id="event-feed" class="event-feed"></div>
+          <div class="section-label explain-header">
+            <span>What's happening</span>
+            <button id="explain-toggle" class="explain-toggle on" type="button"
+              title="Toggle the plain-English narrator (uses a small side LLM call)">on</button>
+          </div>
+          <div id="explain-feed" class="explain-feed">
+            <div class="empty-hint">Select a thread and send a prompt — I'll explain what the agent is doing in plain English.</div>
+          </div>
+        </div>
+
+        <div class="right-block">
+          <button class="section-label agent-talk-header" id="log-toggle" type="button" aria-expanded="false">
+            <span>Log</span>
+            <span class="section-meta muted" id="log-caret">▸</span>
+          </button>
+          <div id="event-feed" class="event-feed log-collapsed" style="display:none"></div>
         </div>
 
         <div class="dev-dock">

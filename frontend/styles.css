@@ -541,6 +541,49 @@ body {
 .approval-resolved {
   margin-top: 6px; font-size: 10px; color: var(--muted);
 }
+.approval-explain {
+  margin-top: 8px; padding: 6px 8px; border-radius: 6px;
+  font-size: 11px; line-height: 1.45; color: var(--text);
+  background: color-mix(in srgb, var(--warn) 9%, transparent);
+  border: 1px solid color-mix(in srgb, var(--warn) 30%, var(--border));
+}
+
+/* ── ELI12 explainer panel (right sidebar) ─────────────────────────────── */
+.explain-header {
+  display: flex; align-items: center; justify-content: space-between;
+}
+.explain-toggle {
+  font-family: var(--font); font-size: 9px; text-transform: uppercase;
+  padding: 1px 8px; border-radius: 999px; cursor: pointer;
+  background: transparent; color: var(--muted);
+  border: 1px solid var(--border);
+}
+.explain-toggle.on {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 45%, var(--border));
+}
+.explain-feed {
+  overflow: auto; flex: 1; min-height: 0;
+  display: flex; flex-direction: column; gap: 6px; padding: 4px 2px;
+}
+.explain-card {
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 7px 9px; background: var(--bg-soft);
+}
+.explain-card.approval {
+  border-color: color-mix(in srgb, var(--warn) 40%, var(--border));
+  background: color-mix(in srgb, var(--warn) 7%, var(--bg-soft));
+}
+.explain-card.error {
+  border-color: color-mix(in srgb, var(--err) 35%, var(--border));
+  color: var(--muted);
+}
+.explain-card.pending { opacity: 0.7; }
+.explain-dots { font-size: 11px; color: var(--muted); animation: explain-pulse 1.2s ease-in-out infinite; }
+@keyframes explain-pulse { 0%, 100% { opacity: 0.4; } 50% { opacity: 1; } }
+.explain-ts { font-size: 9px; color: var(--dim); margin-bottom: 3px; }
+.explain-text { font-size: 11.5px; line-height: 1.5; color: var(--text); }
+.event-feed.log-collapsed { max-height: 160px; }
 .t-block.streaming {
   background: color-mix(in srgb, var(--agent) 4%, transparent);
 }

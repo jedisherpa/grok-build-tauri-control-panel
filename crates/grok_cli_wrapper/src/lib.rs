@@ -89,6 +89,17 @@ impl GrokCli {
         Ok(out.stdout)
     }
 
+    /// Like `run_args` with an explicit timeout (long one-shot LLM calls).
+    pub async fn run_args_timeout(
+        &self,
+        args: &[&str],
+        cwd: Option<&Path>,
+        timeout: Duration,
+    ) -> Result<String> {
+        let out = self.run(args, cwd, timeout).await?;
+        Ok(out.stdout)
+    }
+
     /// Spawn headless one-shot: `grok -p '...'` (and optional flags).
     pub async fn spawn_headless(
         &self,

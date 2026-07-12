@@ -36,6 +36,10 @@ const state = {
   phraseTimer: null,
   phraseIndex: 0,
   lastEventKey: "",
+  /** sessionId → ELI12 explainer cards for the right panel. */
+  explainBySession: new Map(),
+  explainPending: false,
+  explainerEnabled: true,
   /** sessionId → boom-hold timer (per-session; one global slot let a second
    *  session's boom cancel the first one's reset). */
   boomTimers: new Map(),
@@ -708,6 +712,76 @@ function roleBombMood(role) {
   return "idle";
 }
 
+// ── ELI12 explainer panel (right sidebar) ────────────────────────────────
+function explainListFor(sid) {
+  if (!state.explainBySession.has(sid)) state.explainBySession.set(sid, []);
+  return state.explainBySession.get(sid);
+}
+
+function handleExplainEvent(sid, payload) {
+  if (!sid) return;
+  const kind = String(payload.kind || "tick");
+  if (kind === "pending") {
+    state.explainPending = true;
+    if (sid === state.selectedSession) renderExplainFeed();
+    return;
+  }
+  state.explainPending = false;
+  const text = String(payload.text || "").trim();
+  if (!text) return;
+  const list = explainListFor(sid);
+  list.push({ text, kind, requestId: payload.requestId || null, at: payload.at || nowIso() });
+  if (list.length > 50) list.splice(0, list.length - 50);
+
+  // Approval explanations also land under the matching approval card.
+  if (kind === "approval" && payload.requestId) {
+    const entries = getTranscript(sid);
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const e = entries[i];
+      if (e.role === "approval" && e.meta?.requestId === payload.requestId) {
+        e.meta.explanation = text;
+        if (sid === state.selectedSession) renderTranscript({ keepScroll: true });
+        break;
+      }
+    }
+  }
+  if (sid === state.selectedSession) renderExplainFeed();
+}
+
+function renderExplainFeed() {
+  const root = $("explain-feed");
+  if (!root) return;
+  const sid = state.selectedSession;
+  const list = sid ? state.explainBySession.get(sid) || [] : [];
+  if (!state.explainerEnabled) {
+    root.innerHTML = `<div class="empty-hint">Narrator is off — toggle it on to get plain-English explanations.</div>`;
+    return;
+  }
+  if (!list.length && !state.explainPending) {
+    root.innerHTML = `<div class="empty-hint">${
+      sid
+        ? "Waiting for activity in this thread — I'll explain it as it happens."
+        : "Select a thread and send a prompt — I'll explain what the agent is doing in plain English."
+    }</div>`;
+    return;
+  }
+  const pending = state.explainPending
+    ? `<div class="explain-card pending"><span class="explain-dots">thinking…</span></div>`
+    : "";
+  root.innerHTML =
+    pending +
+    [...list]
+      .reverse()
+      .map((e) => {
+        const cls = e.kind === "approval" ? " approval" : e.kind === "error" ? " error" : "";
+        return `<div class="explain-card${cls}">
+  <div class="explain-ts">${escapeHtml(shortTime(e.at))}${e.kind === "approval" ? " · about the approval" : ""}</div>
+  <div class="explain-text">${escapeHtml(e.text)}</div>
+</div>`;
+      })
+      .join("");
+}
+
 /** Mark an approval card resolved and refresh it if visible. */
 function resolveApprovalEntry(sessionId, requestId, resolution) {
   if (!sessionId || !requestId) return;
@@ -809,9 +883,12 @@ function renderTranscript({ keepScroll = false } = {}) {
   data-sid="${escapeHtml(String(m.sid || sid))}"
   data-request-id="${escapeHtml(String(m.requestId || ""))}"
   data-option-id="">Cancel</button>`;
+          const explain = m.explanation
+            ? `<div class="approval-explain">💡 ${escapeHtml(String(m.explanation))}</div>`
+            : "";
           const foot = m.resolved
-            ? `<div class="approval-resolved">resolved · ${escapeHtml(String(m.resolved))}</div>`
-            : `<div class="approval-actions">${buttons}${deny}</div>`;
+            ? `${explain}<div class="approval-resolved">resolved · ${escapeHtml(String(m.resolved))}</div>`
+            : `${explain}<div class="approval-actions">${buttons}${deny}</div>`;
           return `<div class="t-block approval${m.resolved ? "" : " pending"}">
   <div class="t-role"><span class="t-ts">${escapeHtml(shortTime(e.at || ""))}</span>${bombHtml("wait", "xs")}<span>${label}</span></div>
   <div class="t-body">${escapeHtml(e.body)}${foot}</div>
@@ -996,6 +1073,10 @@ async function selectSession(id) {
   syncSelectorsToSession(sess);
   if (id) await loadTranscriptFromDb(id);
   renderTranscript();
+  // Point the ELI12 narrator at the newly selected thread (best-effort).
+  state.explainPending = false;
+  renderExplainFeed();
+  invoke("explainer_focus", { id: id || null }).catch(() => {});
   updateBombChrome();
 }
 
@@ -1272,6 +1353,10 @@ function handleControlEvent(ev) {
     if (sid) noteTurn("run", { note: "Approval resolved" }, sid);
   } else if (type === "raw") {
     const payload = ev.payload || ev;
+    if (payload?.channel === "explain") {
+      handleExplainEvent(sid, payload);
+      return;
+    }
     if (payload?.channel === "usage" && payload?.totalTokens != null) {
       const n = Number(payload.totalTokens) || 0;
       if (sid && n > 0) {
@@ -2909,6 +2994,53 @@ $("btn-shutdown").onclick = async () => {
   }
 };
 
+// Explainer toggle + demoted Log accordion.
+function wireExplainer() {
+  const toggle = $("explain-toggle");
+  const applyToggle = () => {
+    if (!toggle) return;
+    toggle.classList.toggle("on", state.explainerEnabled);
+    toggle.textContent = state.explainerEnabled ? "on" : "off";
+    toggle.setAttribute("aria-pressed", String(state.explainerEnabled));
+  };
+  if (toggle) {
+    toggle.onclick = async () => {
+      const next = !state.explainerEnabled;
+      try {
+        state.explainerEnabled = await invoke("set_explainer_enabled", { enabled: next });
+      } catch (e) {
+        toastError(e);
+      }
+      applyToggle();
+      renderExplainFeed();
+    };
+  }
+  // Reflect persisted config once it loads (best-effort).
+  invoke("get_config")
+    .then((cfg) => {
+      if (typeof cfg?.explainer_enabled === "boolean") {
+        state.explainerEnabled = cfg.explainer_enabled;
+      } else if (typeof cfg?.explainerEnabled === "boolean") {
+        state.explainerEnabled = cfg.explainerEnabled;
+      }
+      applyToggle();
+      renderExplainFeed();
+    })
+    .catch(() => applyToggle());
+
+  const logToggle = $("log-toggle");
+  const feed = $("event-feed");
+  if (logToggle && feed) {
+    let open = false;
+    logToggle.onclick = () => {
+      open = !open;
+      feed.style.display = open ? "" : "none";
+      $("log-caret").textContent = open ? "▾" : "▸";
+      logToggle.setAttribute("aria-expanded", String(open));
+    };
+  }
+}
+
 // Approval cards: delegated listener — innerHTML rebuilds kill per-button handlers.
 $("transcript")?.addEventListener("click", async (e) => {
   const btn = e.target.closest?.(".approval-btn");
@@ -2995,4 +3127,5 @@ $("cwd")?.addEventListener("input", () => {
 wireModeButtons();
 wireProjectChip();
 wireAgentTalk();
+wireExplainer();
 boot();

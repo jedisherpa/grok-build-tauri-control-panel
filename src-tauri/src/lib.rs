@@ -2,6 +2,7 @@
 
 mod commands;
 mod devserver;
+mod explainer;
 mod haven;
 mod state;
 
@@ -98,6 +99,8 @@ pub fn run() {
             commands::remove_session,
             commands::set_plan_mode,
             commands::set_always_approve,
+            commands::explainer_focus,
+            commands::set_explainer_enabled,
             commands::respond_approval,
             commands::list_worktrees,
             commands::create_worktree,

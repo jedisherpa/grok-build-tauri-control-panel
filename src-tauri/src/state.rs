@@ -19,6 +19,7 @@ use grok_scheduler::{JobHandler, Scheduler, ScheduledJob};
 use grok_worktree::WorktreeManager;
 
 use crate::devserver::DevServerManager;
+use crate::explainer::ExplainerService;
 use crate::haven::HavenClient;
 
 pub struct AppState {
@@ -36,6 +37,7 @@ pub struct AppState {
     pub dev_server: Arc<DevServerManager>,
     pub login: Arc<LoginManager>,
     pub haven: Arc<HavenClient>,
+    pub explainer: Arc<ExplainerService>,
 }
 
 impl AppState {
@@ -193,6 +195,17 @@ impl AppState {
         let login = LoginManager::new(grok_cli.grok_path.clone());
         let haven = HavenClient::new(paths.home_dir.clone());
 
+        // ELI12 narrator for the right panel (selected-thread side LLM calls).
+        let explainer = {
+            let cfg = config.read().await;
+            ExplainerService::start(
+                grok_cli.clone(),
+                event_bus.clone(),
+                cfg.explainer_enabled,
+                cfg.explainer_model.clone(),
+            )
+        };
+
         // Auto-link Haven (Hetzner process/temp host) on startup.
         {
             let haven_bg = haven.clone();
@@ -224,6 +237,7 @@ impl AppState {
             dev_server,
             login,
             haven,
+            explainer,
         })
     }
 }
