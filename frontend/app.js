@@ -2710,6 +2710,7 @@ async function startDevServer() {
   } finally {
     btn.disabled = false;
     await refreshDevStatus();
+    loadHavenSettings().catch(() => {});
   }
 }
 
@@ -2980,12 +2981,106 @@ $("btn-haven").onclick = async () => {
     const jobs = await invoke("haven_list_jobs").catch(() => []);
     const files = await invoke("haven_list_files").catch(() => []);
     $("sys-out").textContent = JSON.stringify({ status: st, jobs, files }, null, 2);
+    renderHavenState(st);
     pushEvent(
       st.connected ? st.message : st.message || "Haven offline",
       st.connected ? "ok" : "err",
       st.connected ? "boom" : "error",
       { force: true }
     );
+  } catch (e) {
+    toastError(e);
+  }
+};
+
+// ── Haven settings card ───────────────────────────────────────────────────
+function renderHavenState(st) {
+  const el = $("haven-state");
+  if (!el || !st) return;
+  el.textContent = st.connected ? "connected" : st.configured ? "offline" : "not configured";
+  el.className = `badge ${st.connected ? "running" : st.configured ? "failed" : "saved"}`;
+  el.title = st.message || "";
+}
+
+function havenOut(data) {
+  const el = $("haven-out");
+  el.style.display = "";
+  el.textContent = typeof data === "string" ? data : JSON.stringify(data, null, 2);
+}
+
+async function loadHavenSettings() {
+  try {
+    const cfg = await invoke("haven_get_config");
+    $("haven-url").value = cfg.base_url || "";
+    $("haven-token").value = cfg.auth_token || "";
+    $("haven-label").value = cfg.label || "haven";
+    $("haven-enabled").checked = !!cfg.enabled;
+    $("haven-autoconnect").checked = !!cfg.auto_connect;
+    renderHavenState(await invoke("haven_status").catch(() => null));
+  } catch (e) {
+    console.warn("haven config load failed", e);
+  }
+}
+
+function havenConfigFromForm() {
+  return {
+    enabled: $("haven-enabled").checked,
+    base_url: $("haven-url").value.trim(),
+    auth_token: $("haven-token").value.trim(),
+    label: $("haven-label").value.trim() || "haven",
+    auto_connect: $("haven-autoconnect").checked,
+  };
+}
+
+$("btn-haven-save").onclick = async () => {
+  try {
+    // Backend keeps the existing secret when it receives a masked token.
+    const st = await invoke("haven_set_config", { config: havenConfigFromForm() });
+    renderHavenState(st);
+    pushEvent(`Haven saved · ${st.message || "config updated"}`, st.connected ? "ok" : "", null, {
+      force: true,
+    });
+  } catch (e) {
+    toastError(e);
+  }
+};
+
+$("btn-haven-test").onclick = async () => {
+  try {
+    const st = await invoke("haven_status");
+    renderHavenState(st);
+    havenOut(st);
+  } catch (e) {
+    toastError(e);
+  }
+};
+
+$("btn-haven-run").onclick = async () => {
+  try {
+    const name = $("haven-job-name").value.trim();
+    const command = $("haven-job-cmd").value.trim();
+    if (!name || !command) throw new Error("Job needs a name and a command");
+    const cwd = $("haven-job-cwd").value.trim() || null;
+    const res = await invoke("haven_start_shell", { name, command, cwd });
+    havenOut(res);
+    pushEvent(`Haven job started · ${name}`, "ok", "boom", { force: true, milestone: true });
+    $("haven-job-cmd").value = "";
+  } catch (e) {
+    toastError(e);
+  }
+};
+
+$("btn-haven-jobs").onclick = async () => {
+  try {
+    havenOut(await invoke("haven_list_jobs"));
+  } catch (e) {
+    toastError(e);
+  }
+};
+
+$("btn-haven-files").onclick = async () => {
+  try {
+    havenOut(await invoke("haven_list_files"));
   } catch (e) {
     toastError(e);
   }

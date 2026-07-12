@@ -834,11 +834,21 @@ impl AcpClient {
             Ok(()) => {
                 if let Some(bus) = &self.event_bus {
                     let applied = self.current_mode.read().await.clone();
-                    Self::emit_term(
-                        bus,
-                        self.control_session_id,
-                        format!("mode → {}", applied.as_deref().unwrap_or(wanted)),
-                    );
+                    let applied = applied.as_deref().unwrap_or(wanted);
+                    // Be honest when the agent has no native equivalent and we
+                    // mapped to the closest advertised mode (e.g. codex has no
+                    // plan feature over ACP — read-only is the nearest thing).
+                    let line = if applied.eq_ignore_ascii_case(wanted)
+                        || applied.to_lowercase().replace(['-', '_'], "")
+                            == wanted.to_lowercase().replace(['-', '_'], "")
+                    {
+                        format!("mode → {applied}")
+                    } else {
+                        format!(
+                            "mode → {applied} (this agent has no native '{wanted}' mode; using its closest equivalent)"
+                        )
+                    };
+                    Self::emit_term(bus, self.control_session_id, line);
                 }
             }
             Err(e) => {

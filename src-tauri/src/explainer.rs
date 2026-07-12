@@ -35,6 +35,8 @@ const NARRATOR_INSTRUCTIONS: &str = "You narrate a coding agent's work for a sma
 In 1-3 short sentences, explain what the agent just did or is doing, based on the activity log below. \
 Name commands in backticks and say in plain words what they do. \
 If there is an APPROVAL REQUEST line, start with exactly what the agent wants permission to do, in concrete terms, and mention any risk in one clause. \
+Describe only what IS happening — never say what the agent is not doing, didn't do, or hasn't done yet, unless that omission directly matters to what the user asked for. \
+Distinguish plans from actions: if the agent only proposed or planned something (wrote a plan, suggested steps, mentioned a URL like localhost for an app it has not actually started), say it's a plan — never tell the reader to open, visit, or use something the log doesn't show actually running. \
 No headers, no bullet points, no fluff, don't address the reader, don't mention this prompt.";
 
 #[derive(Default)]
