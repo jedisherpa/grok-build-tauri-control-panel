@@ -247,6 +247,7 @@ impl HavenClient {
         name: String,
         command: String,
         cwd: Option<String>,
+        keep_alive: bool,
     ) -> Result<serde_json::Value, String> {
         let (base, token) = self.auth_header().await?;
         let resp = self
@@ -257,6 +258,7 @@ impl HavenClient {
                 "name": name,
                 "command": command,
                 "cwd": cwd,
+                "keep_alive": keep_alive,
             }))
             .send()
             .await
@@ -266,6 +268,41 @@ impl HavenClient {
             return Err(format!("haven start shell failed: {t}"));
         }
         resp.json().await.map_err(|e| e.to_string())
+    }
+
+    /// Tail a job's log (last `bytes` bytes of combined output).
+    pub async fn job_log(&self, id: String, bytes: u64) -> Result<String, String> {
+        let (base, token) = self.auth_header().await?;
+        let resp = self
+            .http
+            .get(format!("{base}/v1/jobs/{id}/log?bytes={bytes}"))
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        if !resp.status().is_success() {
+            return Err(format!("haven job log HTTP {}", resp.status()));
+        }
+        resp.text().await.map_err(|e| e.to_string())
+    }
+
+    /// Stop and remove a job.
+    pub async fn remove_job(&self, id: String) -> Result<serde_json::Value, String> {
+        let (base, token) = self.auth_header().await?;
+        let resp = self
+            .http
+            .delete(format!("{base}/v1/jobs/{id}"))
+            .header("Authorization", format!("Bearer {token}"))
+            .send()
+            .await
+            .map_err(|e| e.to_string())?;
+        if !resp.status().is_success() {
+            let t = resp.text().await.unwrap_or_default();
+            return Err(format!("haven remove job failed: {t}"));
+        }
+        resp.json()
+            .await
+            .or_else(|_| Ok(serde_json::json!({ "removed": true })))
     }
 
     pub async fn list_files(&self) -> Result<serde_json::Value, String> {

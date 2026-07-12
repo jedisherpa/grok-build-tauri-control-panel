@@ -156,6 +156,8 @@ pub fn run() {
             commands::haven_set_config,
             commands::haven_list_jobs,
             commands::haven_start_shell,
+            commands::haven_job_log,
+            commands::haven_remove_job,
             commands::haven_list_files,
         ])
         .run(tauri::generate_context!())

@@ -175,6 +175,9 @@ pub struct AcpClient {
     pending_permissions: Mutex<HashMap<String, PendingPermission>>,
     /// Set during deliberate shutdown so process death isn't reported as failure.
     shutting_down: std::sync::atomic::AtomicBool,
+    /// Plan requested but the agent has no native plan mode: we set its most
+    /// restrictive mode and inject planning instructions into each prompt.
+    plan_emulation: std::sync::atomic::AtomicBool,
     /// Deny rules enforced ahead of the approval flow.
     deny_patterns: Vec<String>,
     brain_mode: RwLock<BrainMode>,
@@ -308,6 +311,7 @@ impl AcpClient {
             always_approve: std::sync::atomic::AtomicBool::new(opts.always_approve),
             pending_permissions: Mutex::new(HashMap::new()),
             shutting_down: std::sync::atomic::AtomicBool::new(false),
+            plan_emulation: std::sync::atomic::AtomicBool::new(false),
             deny_patterns: opts.deny_patterns.clone(),
             brain_mode: RwLock::new(BrainMode::Fresh),
             pending_context: Mutex::new(pending_context),
@@ -362,6 +366,7 @@ impl AcpClient {
             always_approve: std::sync::atomic::AtomicBool::new(false),
             pending_permissions: Mutex::new(HashMap::new()),
             shutting_down: std::sync::atomic::AtomicBool::new(false),
+            plan_emulation: std::sync::atomic::AtomicBool::new(false),
             deny_patterns: Vec::new(),
             brain_mode: RwLock::new(BrainMode::Fresh),
             pending_context: Mutex::new(None),
@@ -843,6 +848,10 @@ impl AcpClient {
                             == wanted.to_lowercase().replace(['-', '_'], "")
                     {
                         format!("mode → {applied}")
+                    } else if self.plan_emulation_active() {
+                        format!(
+                            "mode → {applied} + plan emulation (no native plan mode: writes blocked, planning instructions injected into each prompt)"
+                        )
                     } else {
                         format!(
                             "mode → {applied} (this agent has no native '{wanted}' mode; using its closest equivalent)"
@@ -903,6 +912,13 @@ impl AcpClient {
                     at: Utc::now(),
                 });
             }
+        }
+
+        // Emulated plan mode: prepend planning instructions to the message —
+        // the agent's restrictive mode blocks writes, this sets the
+        // investigate → clarify → propose-a-plan behavior.
+        if self.plan_emulation.load(std::sync::atomic::Ordering::Relaxed) {
+            text = format!("{PLAN_EMULATION_PREAMBLE}\n\n{text}");
         }
 
         if let Some(bus) = &self.event_bus {
@@ -1059,6 +1075,8 @@ impl AcpClient {
     pub async fn set_mode(&self, mode: &str) -> Result<()> {
         if self.transport.read().await.is_none() {
             debug!(%mode, "set_mode (mock/local)");
+            self.plan_emulation
+                .store(mode == "plan", std::sync::atomic::Ordering::Relaxed);
             *self.current_mode.write().await = Some(mode.to_string());
             return Ok(());
         }
@@ -1094,8 +1112,21 @@ impl AcpClient {
             Err(e) => Err(e),
         }?;
         let _ = result;
+        // Plan requested but the agent only has a restrictive mode (codex/grok
+        // ACP adapters advertise read-only/agent/agent-full-access, no plan):
+        // emulate by also injecting planning instructions into each prompt.
+        self.plan_emulation.store(
+            mode == "plan" && !is_plan_like(&mode_id),
+            std::sync::atomic::Ordering::Relaxed,
+        );
         *self.current_mode.write().await = Some(mode_id);
         Ok(())
+    }
+
+    /// True while plan mode runs via emulation (restrictive mode + injected
+    /// planning instructions) rather than a native agent plan mode.
+    pub fn plan_emulation_active(&self) -> bool {
+        self.plan_emulation.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Answer a parked `session/request_permission`. `option_id: None` = cancel.
@@ -2058,6 +2089,21 @@ impl AcpClient {
     }
 }
 
+/// Does this advertised mode id represent a native plan mode?
+fn is_plan_like(mode_id: &str) -> bool {
+    let m = mode_id.to_lowercase().replace(['-', '_'], "");
+    m == "plan" || m == "planning"
+}
+
+/// Injected into each prompt while plan mode is emulated (agent lacks a
+/// native plan mode; its restrictive mode blocks writes, this sets the
+/// investigate → clarify → propose behavior).
+const PLAN_EMULATION_PREAMBLE: &str = "[Plan mode] Work in planning mode for this turn: \
+investigate the codebase read-only first; if any requirement is ambiguous, ask the user \
+clarifying questions before planning; then produce a clear, step-by-step implementation plan \
+(files to touch, order of changes, risks, how to verify). Do NOT modify files, run mutating \
+commands, or start implementing — end your turn after presenting the plan and wait for approval.";
+
 /// Resolve `.` and `..` components lexically (no filesystem access).
 fn lexical_normalize(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
@@ -2280,6 +2326,39 @@ mod tests {
             lexical_normalize(Path::new("/a/b/../c/./d")),
             PathBuf::from("/a/c/d")
         );
+    }
+
+    #[test]
+    fn plan_like_detection() {
+        assert!(is_plan_like("plan"));
+        assert!(is_plan_like("Planning"));
+        assert!(!is_plan_like("read-only"));
+        assert!(!is_plan_like("agent"));
+    }
+
+    #[tokio::test]
+    async fn plan_maps_to_read_only_on_codex_style_modes() {
+        let c = AcpClient::mock_for_tests("sess-1", None);
+        *c.available_modes.write().await = vec![
+            "read-only".into(),
+            "agent".into(),
+            "agent-full-access".into(),
+        ];
+        assert_eq!(c.resolve_mode_id("plan").await.as_deref(), Some("read-only"));
+        assert_eq!(
+            c.resolve_mode_id("always_approve").await.as_deref(),
+            Some("agent-full-access")
+        );
+        assert_eq!(c.resolve_mode_id("default").await.as_deref(), Some("agent"));
+    }
+
+    #[tokio::test]
+    async fn mock_set_mode_tracks_plan_emulation() {
+        let c = AcpClient::mock_for_tests("sess-1", None);
+        c.set_mode("plan").await.unwrap();
+        assert!(c.plan_emulation_active());
+        c.set_mode("default").await.unwrap();
+        assert!(!c.plan_emulation_active());
     }
 
     #[test]

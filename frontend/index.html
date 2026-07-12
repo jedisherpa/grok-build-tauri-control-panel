@@ -283,10 +283,14 @@
                 <input id="haven-job-name" type="text" spellcheck="false" placeholder="job name" />
                 <input id="haven-job-cmd" type="text" spellcheck="false" placeholder="command, e.g. npm run build" class="grow" />
                 <input id="haven-job-cwd" type="text" spellcheck="false" placeholder="cwd (optional)" />
+                <label class="toggle" title="Restart on crash; survives Haven restarts">
+                  <input id="haven-job-keepalive" type="checkbox" /> <span>keep alive</span>
+                </label>
                 <button id="btn-haven-run" class="btn primary">Start job</button>
-                <button id="btn-haven-jobs" class="btn">Jobs</button>
+                <button id="btn-haven-jobs" class="btn">Refresh jobs</button>
                 <button id="btn-haven-files" class="btn">Files</button>
               </div>
+              <div id="haven-jobs" class="haven-jobs"></div>
               <pre id="haven-out" class="mono-pane" style="display:none"></pre>
             </div>
 

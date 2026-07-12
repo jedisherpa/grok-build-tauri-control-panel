@@ -322,8 +322,29 @@ pub async fn haven_start_shell(
     name: String,
     command: String,
     cwd: Option<String>,
+    keep_alive: Option<bool>,
 ) -> Result<serde_json::Value, String> {
-    state.haven.start_shell(name, command, cwd).await
+    state
+        .haven
+        .start_shell(name, command, cwd, keep_alive.unwrap_or(false))
+        .await
+}
+
+#[tauri::command]
+pub async fn haven_job_log(
+    state: State<'_, AppState>,
+    id: String,
+    bytes: Option<u64>,
+) -> Result<String, String> {
+    state.haven.job_log(id, bytes.unwrap_or(64_000)).await
+}
+
+#[tauri::command]
+pub async fn haven_remove_job(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<serde_json::Value, String> {
+    state.haven.remove_job(id).await
 }
 
 #[tauri::command]

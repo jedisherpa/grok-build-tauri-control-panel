@@ -3016,7 +3016,9 @@ async function loadHavenSettings() {
     $("haven-label").value = cfg.label || "haven";
     $("haven-enabled").checked = !!cfg.enabled;
     $("haven-autoconnect").checked = !!cfg.auto_connect;
-    renderHavenState(await invoke("haven_status").catch(() => null));
+    const st = await invoke("haven_status").catch(() => null);
+    renderHavenState(st);
+    if (st?.connected) refreshHavenJobs().catch(() => {});
   } catch (e) {
     console.warn("haven config load failed", e);
   }
@@ -3061,22 +3063,75 @@ $("btn-haven-run").onclick = async () => {
     const command = $("haven-job-cmd").value.trim();
     if (!name || !command) throw new Error("Job needs a name and a command");
     const cwd = $("haven-job-cwd").value.trim() || null;
-    const res = await invoke("haven_start_shell", { name, command, cwd });
+    const keepAlive = $("haven-job-keepalive").checked;
+    const res = await invoke("haven_start_shell", { name, command, cwd, keepAlive });
     havenOut(res);
-    pushEvent(`Haven job started · ${name}`, "ok", "boom", { force: true, milestone: true });
+    pushEvent(`Haven job started · ${name}${keepAlive ? " (keep-alive)" : ""}`, "ok", "boom", {
+      force: true,
+      milestone: true,
+    });
     $("haven-job-cmd").value = "";
+    await refreshHavenJobs();
   } catch (e) {
     toastError(e);
   }
 };
 
-$("btn-haven-jobs").onclick = async () => {
+/// Render jobs as an interactive list: status, keep-alive, Log / Stop.
+async function refreshHavenJobs() {
+  const root = $("haven-jobs");
+  if (!root) return;
+  let jobs;
   try {
-    havenOut(await invoke("haven_list_jobs"));
+    jobs = await invoke("haven_list_jobs");
   } catch (e) {
-    toastError(e);
+    root.innerHTML = `<div class="empty-hint">${escapeHtml(String(e))}</div>`;
+    return;
   }
-};
+  const list = Array.isArray(jobs) ? jobs : jobs?.jobs || [];
+  if (!list.length) {
+    root.innerHTML = `<div class="empty-hint">No jobs on Haven</div>`;
+    return;
+  }
+  root.innerHTML = list
+    .map((j) => {
+      const id = j.id || j.job_id || j.name || "";
+      const status = String(j.status || j.state || "unknown").toLowerCase();
+      const running = /run|alive|active/.test(status);
+      return `<div class="haven-job" data-id="${escapeHtml(String(id))}">
+        <span class="badge ${running ? "running" : "saved"}">${escapeHtml(status)}</span>
+        <span class="haven-job-name">${escapeHtml(j.name || String(id))}</span>
+        ${j.keep_alive || j.keepAlive ? '<span class="badge idle">keep-alive</span>' : ""}
+        <span class="haven-job-cmd muted">${escapeHtml(String(j.command || "").slice(0, 60))}</span>
+        <span class="haven-job-actions">
+          <button class="btn ghost haven-log" type="button">Log</button>
+          <button class="btn danger ghost haven-stop" type="button">Stop</button>
+        </span>
+      </div>`;
+    })
+    .join("");
+  root.querySelectorAll(".haven-job").forEach((el) => {
+    const id = el.dataset.id;
+    el.querySelector(".haven-log").onclick = async () => {
+      try {
+        havenOut(await invoke("haven_job_log", { id, bytes: 64000 }));
+      } catch (e) {
+        toastError(e);
+      }
+    };
+    el.querySelector(".haven-stop").onclick = async () => {
+      try {
+        await invoke("haven_remove_job", { id });
+        pushEvent(`Haven job stopped · ${id}`, "ok", null, { force: true });
+        await refreshHavenJobs();
+      } catch (e) {
+        toastError(e);
+      }
+    };
+  });
+}
+
+$("btn-haven-jobs").onclick = () => refreshHavenJobs().catch(toastError);
 
 $("btn-haven-files").onclick = async () => {
   try {
