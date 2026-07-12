@@ -1685,6 +1685,20 @@ function talkNote(sessionId, kind, text) {
   ensureTalkLoop();
 }
 
+// Original ASCII dance loop for working agents (hand-drawn frames).
+// Cycle: arms-up groove → hip sways → bent-over bounce, then repeat.
+const TALK_DANCER_FRAMES = [
+  ["\\o/", " | ", " | ", "/ \\"],
+  ["\\o_", " | ", "<| ", "/ \\"],
+  ["\\o/", " | ", " |>", "/ \\"],
+  ["_o/", " | ", "<| ", "/ \\"],
+  [" o ", "/|\\", " )_", "/\\ "],
+  [" o ", "/|\\", "_( ", " /\\"],
+  [" o ", "/|_", " ) ", "/\\ "],
+  [" o ", "_|\\", " ( ", " /\\"],
+];
+const TALK_NOTES = ["♪", "♫", "♬"];
+
 function ensureTalkLoop() {
   if (talk.collapsed || talk.raf) return;
   talk.lastFrame = performance.now();
@@ -1731,31 +1745,57 @@ function talkFrame(now) {
     const active = a.phase === "think" || a.phase === "speak" || a.phase === "tool";
     if (active || a.sparks.length || a.embers.length || a.toolFlash) anyActive = true;
 
-    // Bomb body (pixel-ish) + glow when active.
     if (active) {
+      // Working agent: ASCII dancer grooving to the token stream.
+      const frame =
+        TALK_DANCER_FRAMES[Math.floor(now / 140 + i * 3) % TALK_DANCER_FRAMES.length];
       ctx.shadowColor = color;
-      ctx.shadowBlur = 14;
+      ctx.shadowBlur = 10;
+      ctx.font = "bold 12px ui-monospace, monospace";
+      ctx.textAlign = "center";
+      ctx.fillStyle = color;
+      const lineH = 12;
+      frame.forEach((line, li) => {
+        ctx.fillText(line, cx, cy - (frame.length - 1 - li) * lineH);
+      });
+      ctx.shadowBlur = 0;
+      // Floating music notes.
+      if (a.sparks.length < 36 && Math.random() < 0.15) {
+        a.sparks.push({
+          x: (Math.random() - 0.5) * 24,
+          y: -frame.length * lineH,
+          vx: (Math.random() - 0.5) * 12,
+          vy: -16 - Math.random() * 10,
+          life: 1,
+          text: TALK_NOTES[Math.floor(Math.random() * TALK_NOTES.length)],
+          color,
+        });
+      }
+    } else {
+      // Idle / post-boom: the classic dim bomb on the bench.
+      ctx.font = "20px system-ui";
+      ctx.textAlign = "center";
+      ctx.globalAlpha = a.phase === "idle" ? 0.55 : 1;
+      ctx.fillText("💣", cx, cy);
+      ctx.globalAlpha = 1;
     }
-    ctx.font = "20px system-ui";
-    ctx.textAlign = "center";
-    ctx.globalAlpha = a.phase === "idle" ? 0.55 : 1;
-    ctx.fillText("💣", cx, cy);
-    ctx.shadowBlur = 0;
-    ctx.globalAlpha = 1;
 
     // Label.
     ctx.font = "9px ui-monospace, monospace";
     ctx.fillStyle = color;
+    ctx.textAlign = "center";
     ctx.fillText(a.backend, cx, H - 26);
 
-    // Fuse: a short curved line whose burn point advances with fuse progress.
+    // Fuse spark rides along while active (sparkler next to the dancer).
     const fx = cx + 9, fy = cy - 16;
-    ctx.strokeStyle = "rgba(255,255,255,0.28)";
-    ctx.lineWidth = 1.4;
-    ctx.beginPath();
-    ctx.moveTo(fx, fy);
-    ctx.quadraticCurveTo(fx + 8, fy - 9, fx + 3, fy - 16);
-    ctx.stroke();
+    if (!active) {
+      ctx.strokeStyle = "rgba(255,255,255,0.28)";
+      ctx.lineWidth = 1.4;
+      ctx.beginPath();
+      ctx.moveTo(fx, fy);
+      ctx.quadraticCurveTo(fx + 8, fy - 9, fx + 3, fy - 16);
+      ctx.stroke();
+    }
     if (active) {
       const t = a.fuse;
       const bx = fx + 8 * t * (1 - t) * 2 + 3 * t;
@@ -1789,10 +1829,11 @@ function talkFrame(now) {
       if (s.life <= 0) continue;
       ctx.globalAlpha = Math.max(0, s.life);
       if (s.text) {
-        ctx.font = "9px ui-monospace, monospace";
+        const isNote = TALK_NOTES.includes(s.text);
+        ctx.font = isNote ? "12px ui-monospace, monospace" : "9px ui-monospace, monospace";
         ctx.fillStyle = s.color;
         ctx.textAlign = "center";
-        ctx.fillText(`“${s.text}”`, cx + s.x, cy + s.y - 14);
+        ctx.fillText(isNote ? s.text : `“${s.text}”`, cx + s.x, cy + s.y - 14);
       } else {
         ctx.fillStyle = s.color;
         ctx.fillRect(cx + s.x, cy + s.y - 14, 2, 2);
