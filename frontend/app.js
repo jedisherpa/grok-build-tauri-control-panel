@@ -638,8 +638,7 @@ function patchLastTranscriptBody(entry) {
     return;
   }
   const follow = isNearBottom(root);
-  // Skip the synthetic live-hint row — patching it froze the real bubble.
-  const blocks = root.querySelectorAll(".t-block:not(.term-live)");
+  const blocks = root.querySelectorAll(".t-block");
   const last = blocks[blocks.length - 1];
   if (
     !last ||
@@ -866,15 +865,8 @@ function renderTranscript({ keepScroll = false } = {}) {
   }
 
   // Terminal-style continuous log (mirrors CLI, not just chat bubbles).
-  const liveView = P.formatPresence(state.turn, { phraseIndex: state.phraseIndex });
-  const liveHint =
-    turnActive()
-      ? `<div class="t-block term streaming term-live">
-  <div class="t-role">${bombHtml(liveView.mood, "xs")}<span>live</span><span class="stream-caret" aria-hidden="true"></span></div>
-  <div class="t-body">${escapeHtml(liveView.subtitle)}</div>
-</div>`
-      : "";
-
+  // Live turn status lives in the turn dock below — no in-transcript
+  // duplicate bar (the old sticky LIVE card).
   root.innerHTML =
     entries
       .map((e, idx) => {
@@ -932,7 +924,7 @@ function renderTranscript({ keepScroll = false } = {}) {
   <div class="t-body">${body}</div>
 </div>`;
       })
-      .join("") + liveHint;
+      .join("");
   root.querySelectorAll(".term-toggle").forEach((btn) => {
     btn.onclick = (ev) => {
       ev.stopPropagation();

@@ -680,17 +680,8 @@ body {
 .t-block.streaming {
   background: color-mix(in srgb, var(--agent) 4%, transparent);
 }
-.t-block.term-live {
-  border-color: var(--bomb-fuse, #fb923c);
-  /* Sticky bar: must be OPAQUE — a transparent tint let the scrolled rows
-     underneath bleed through and look like overlapping text. */
-  background: color-mix(in srgb, var(--bomb-fuse, #fb923c) 8%, var(--bg));
-  position: sticky;
-  bottom: 0;
-  z-index: 2;
-  margin-top: 6px;
-  box-shadow: 0 -6px 12px -8px rgba(0, 0, 0, 0.6);
-}
+/* (LIVE hint bar removed — the turn dock below the transcript is the single
+   source of live turn status.) */
 
 .t-role {
   font-size: 10px;
