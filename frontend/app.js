@@ -36,6 +36,8 @@ const state = {
   phraseTimer: null,
   phraseIndex: 0,
   lastEventKey: "",
+  /** Persisted project folders (sidebar groups exist even with 0 threads). */
+  projects: [],
   /** sessionId → ELI12 explainer cards for the right panel. */
   explainBySession: new Map(),
   explainPending: false,
@@ -1024,7 +1026,11 @@ function renderThreads() {
     )
   );
   // Group by project (real folder) — worktree threads collapse under it.
+  // Persisted projects appear even when they have no threads yet.
   const groups = new Map();
+  for (const p of state.projects || []) {
+    if (!groups.has(p)) groups.set(p, []);
+  }
   for (const s of sorted) {
     const key = threadProjectKey(s);
     if (!groups.has(key)) groups.set(key, []);
@@ -1033,11 +1039,16 @@ function renderThreads() {
   root.innerHTML = [...groups.entries()]
     .map(([key, list]) => {
       const name = key.split("/").filter(Boolean).pop() || key;
-      const collapsed = projectCollapsed(key);
-      const rows = collapsed ? "" : list.map(renderThreadRow).join("");
+      const collapsed = projectCollapsed(key) && list.length > 0;
+      const active = $("cwd")?.value?.replace(/\/+$/, "") === key ? " active" : "";
+      const rows = collapsed
+        ? ""
+        : list.length
+          ? list.map(renderThreadRow).join("")
+          : `<div class="empty-hint project-empty">no threads yet — click the folder name, then +</div>`;
       return `<div class="project-group" data-key="${escapeHtml(key)}">
-  <button class="project-header" type="button" data-key="${escapeHtml(key)}" title="${escapeHtml(key)}">
-    <span class="project-caret">${collapsed ? "▸" : "▾"}</span>
+  <button class="project-header${active}" type="button" data-key="${escapeHtml(key)}" title="${escapeHtml(key)} — click to make this the active project">
+    <span class="project-caret" data-key="${escapeHtml(key)}">${collapsed ? "▸" : "▾"}</span>
     <span class="project-name">${escapeHtml(name)}</span>
     <span class="project-count muted">${list.length}</span>
   </button>
@@ -1053,9 +1064,17 @@ function renderThreads() {
     el.onclick = (ev) => {
       ev.stopPropagation();
       const key = el.dataset.key;
-      const now = !projectCollapsed(key);
-      localStorage.setItem(`bomb.projCollapsed.${key}`, now ? "1" : "0");
+      if (ev.target.classList.contains("project-caret")) {
+        // Caret toggles collapse; the name selects the project.
+        const now = !projectCollapsed(key);
+        localStorage.setItem(`bomb.projCollapsed.${key}`, now ? "1" : "0");
+        renderThreads();
+        return;
+      }
+      // Clicking a project makes it the active folder for the next thread.
+      setProjectCwd(key);
       renderThreads();
+      pushEvent(`project → ${key.split("/").filter(Boolean).pop()}`, "ok", null, { force: true });
     };
   });
   root.querySelectorAll(".thread-delete").forEach((el) => {
@@ -2234,6 +2253,26 @@ function setProjectCwd(path, { remember = true } = {}) {
   if (p && remember) {
     const list = [p, ...recentProjects().filter((x) => x !== p)].slice(0, 8);
     localStorage.setItem(RECENT_PROJECTS_KEY, JSON.stringify(list));
+    // Register as a project so the sidebar group appears immediately.
+    if (!state.projects.includes(p)) {
+      invoke("add_project", { path: p })
+        .then((projects) => {
+          state.projects = Array.isArray(projects) ? projects : state.projects;
+          renderThreads();
+        })
+        .catch(() => {});
+    } else {
+      renderThreads();
+    }
+  }
+}
+
+async function loadProjects() {
+  try {
+    const projects = await invoke("list_projects");
+    state.projects = Array.isArray(projects) ? projects : [];
+  } catch (_) {
+    state.projects = [];
   }
 }
 
@@ -2556,6 +2595,15 @@ async function sendPrompt() {
     if (!prompt.trim()) throw new Error("Empty prompt");
     if (state.selectedSession && turnActive()) {
       pushEvent("turn in progress — wait for it to finish or cancel first", "err", "wait", {
+        force: true,
+      });
+      return;
+    }
+    // Sending into a still-starting session fails backend-side; don't spin up
+    // turn presence for a prompt that can't be delivered yet.
+    const selectedSess = state.sessions.find((s) => s.id === state.selectedSession);
+    if (selectedSess && String(selectedSess.status || "").toLowerCase().includes("start")) {
+      pushEvent("session is still starting — give it a second, then send", "err", "wait", {
         force: true,
       });
       return;
@@ -3481,6 +3529,21 @@ setInterval(() => {
   if (turnActive() || state.turn.phase === "done") updateBombChrome();
   if (turnActive()) startPhraseCycle();
   else stopPhraseCycle();
+  // Watchdog: presence must never disagree with the thread for long. If the
+  // dock says a turn is running but the session has been idle/failed with no
+  // new signal for 20s, the turn desynced (missed event, rejected send) —
+  // reset instead of showing "Quiet" forever.
+  if (turnActive() && state.selectedSession) {
+    const sess = state.sessions.find((s) => s.id === state.selectedSession);
+    const st = String(sess?.status || "").toLowerCase();
+    const settled =
+      st.includes("idle") || st.includes("complete") || st.includes("fail") || st.includes("cancel");
+    const lastSignal = state.turn.lastSignalAt || state.turn.startedAt || 0;
+    if (settled && lastSignal && Date.now() - lastSignal > 20_000) {
+      noteTurn("idle", {}, state.selectedSession);
+      pushEvent("turn indicator desynced from thread status — reset", "", null, { force: true });
+    }
+  }
 }, 1000);
 
 async function boot() {
@@ -3500,6 +3563,7 @@ async function boot() {
   await refreshStatus().catch(toastError);
   await loadBackends().catch(toastError);
   await loadMcpCatalog().catch(() => {});
+  await loadProjects();
   await refreshSessions().catch(toastError);
   await refreshDevStatus().catch(() => {});
   try {

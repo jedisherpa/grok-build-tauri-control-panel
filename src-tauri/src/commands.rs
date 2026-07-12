@@ -1081,6 +1081,51 @@ pub async fn respond_approval(
         .map_err(err)
 }
 
+// ── Projects (persisted folder list for the sidebar) ─────────────────────
+
+#[tauri::command]
+pub async fn list_projects(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    Ok(state
+        .persistence
+        .get_kv("projects")
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+        .unwrap_or_default())
+}
+
+#[tauri::command]
+pub async fn add_project(state: State<'_, AppState>, path: String) -> Result<Vec<String>, String> {
+    let path = path.trim().trim_end_matches('/').to_string();
+    if path.is_empty() || !PathBuf::from(&path).is_dir() {
+        return Err(format!("not a folder: {path}"));
+    }
+    let mut list = list_projects(state.clone()).await?;
+    if !list.contains(&path) {
+        list.push(path);
+        list.sort();
+        state
+            .persistence
+            .set_kv("projects", &serde_json::to_string(&list).map_err(err)?)
+            .map_err(err)?;
+    }
+    Ok(list)
+}
+
+#[tauri::command]
+pub async fn remove_project(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<Vec<String>, String> {
+    let mut list = list_projects(state.clone()).await?;
+    list.retain(|p| p != &path);
+    state
+        .persistence
+        .set_kv("projects", &serde_json::to_string(&list).map_err(err)?)
+        .map_err(err)?;
+    Ok(list)
+}
+
 // ── Thread land / sync (worktree merge flow) ─────────────────────────────
 
 #[derive(Debug, Serialize)]
