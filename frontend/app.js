@@ -1643,6 +1643,8 @@ function talkNote(sessionId, kind, text) {
 
   if (kind === "think" || kind === "speak") {
     a.phase = kind;
+    // Beat energy: every token/thought signal pushes the dancers harder.
+    a.energy = Math.min(1, (a.energy || 0) + 0.12);
     a.fuse = Math.min(1, a.fuse + 0.006);
     a.lastText = talkFragment(text) || a.lastText;
     if (kind === "speak") a.replyText += ` ${text || ""}`;
@@ -1658,6 +1660,7 @@ function talkNote(sessionId, kind, text) {
     }
   } else if (kind === "tool") {
     a.phase = "tool";
+    a.energy = Math.min(1, (a.energy || 0) + 0.2);
     a.toolFlash = { name: talkFragment(text).slice(0, 14) || "tool", life: 1 };
     a.fuse = Math.min(1, a.fuse + 0.02);
   } else if (kind === "boom") {
@@ -1685,19 +1688,41 @@ function talkNote(sessionId, kind, text) {
   ensureTalkLoop();
 }
 
-// Original ASCII dance loop for working agents (hand-drawn frames).
-// Cycle: arms-up groove → hip sways → bent-over bounce, then repeat.
-const TALK_DANCER_FRAMES = [
-  ["\\o/", " | ", " | ", "/ \\"],
-  ["\\o_", " | ", "<| ", "/ \\"],
-  ["\\o/", " | ", " |>", "/ \\"],
-  ["_o/", " | ", "<| ", "/ \\"],
-  [" o ", "/|\\", " )_", "/\\ "],
-  [" o ", "/|\\", "_( ", " /\\"],
-  [" o ", "/|_", " ) ", "/\\ "],
-  [" o ", "_|\\", " ( ", " /\\"],
+// Original ASCII dance banks for working agents (hand-drawn frames; every
+// line in a frame is the same width so centered monospace stays aligned).
+// GROOVE: standing warm-up. TWERK: bent-over hip-bounce — the visualizer
+// drops into it when the token stream runs hot (energy > threshold).
+const TALK_GROOVE_FRAMES = [
+  [" \\o/   ", "  |    ", " <|>   ", "  |    ", "  |    ", " / \\   "],
+  [" \\o_   ", "  |    ", " <|    ", "  |    ", "  |    ", " / \\   "],
+  [" _o/   ", "  |    ", "  |>   ", "  |    ", "  |    ", " / \\   "],
+  [" \\o/   ", "  |    ", "  |>   ", " <|    ", "  |    ", " / \\   "],
+];
+const TALK_TWERK_FRAMES = [
+  // alternating hips-up / hips-down every frame = bounce; drifts R→L
+  [" o     ", "  \\_   ", "   (_) ", "   ||  ", "   ||  ", "  _||_ "],
+  [" o     ", "  \\__  ", "   ||  ", "  '(_)'", "   ||  ", "  _||_ "],
+  [" o     ", "  \\_   ", "    (_)", "   ||  ", "   ||  ", "  _||_ "],
+  [" o     ", "  \\__  ", "   ||  ", "   '(_)", "   ||  ", "  _||_ "],
+  [" o     ", "  \\_   ", "  (_)  ", "   ||  ", "   ||  ", "  _||_ "],
+  [" o     ", "  \\__  ", "   ||  ", "  (_)  ", "   ||  ", "  _||_ "],
 ];
 const TALK_NOTES = ["♪", "♫", "♬"];
+const TWERK_ENERGY_THRESHOLD = 0.35;
+
+/** Draw one dancer frame centered at (cx, baseY), lines rising upward. */
+function drawDancer(ctx, frame, cx, baseY, px, color, alpha) {
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = color;
+  ctx.textAlign = "center";
+  ctx.font = `bold ${px}px ui-monospace, monospace`;
+  const lineH = px;
+  frame.forEach((line, li) => {
+    ctx.fillText(line, cx, baseY - (frame.length - 1 - li) * lineH);
+  });
+  ctx.restore();
+}
 
 function ensureTalkLoop() {
   if (talk.collapsed || talk.raf) return;
@@ -1746,24 +1771,33 @@ function talkFrame(now) {
     if (active || a.sparks.length || a.embers.length || a.toolFlash) anyActive = true;
 
     if (active) {
-      // Working agent: ASCII dancer grooving to the token stream.
-      const frame =
-        TALK_DANCER_FRAMES[Math.floor(now / 140 + i * 3) % TALK_DANCER_FRAMES.length];
+      // Beat sync: energy decays between signals; frame rate rides it
+      // (idle stream ≈ 3fps sway, hot stream ≈ 12fps bounce).
+      a.energy = Math.max(0, (a.energy || 0) - dt * 0.2);
+      a.beat = (a.beat || 0) + dt * (3 + (a.energy || 0) * 9);
+      const bank =
+        (a.energy || 0) > TWERK_ENERGY_THRESHOLD ? TALK_TWERK_FRAMES : TALK_GROOVE_FRAMES;
+      const idx = Math.floor(a.beat) % bank.length;
+
       ctx.shadowColor = color;
       ctx.shadowBlur = 10;
-      ctx.font = "bold 12px ui-monospace, monospace";
-      ctx.textAlign = "center";
-      ctx.fillStyle = color;
-      const lineH = 12;
-      frame.forEach((line, li) => {
-        ctx.fillText(line, cx, cy - (frame.length - 1 - li) * lineH);
-      });
+      // Backup dancers first (behind, smaller, out of phase) when there's room.
+      if (slot >= 110) {
+        const backupBank = bank; // formation dances the same routine
+        const bl = backupBank[(idx + 2) % backupBank.length];
+        const br = backupBank[(idx + 4) % backupBank.length];
+        drawDancer(ctx, bl, cx - 34, cy, 10, color, 0.55);
+        drawDancer(ctx, br, cx + 34, cy, 10, color, 0.55);
+      }
+      // Lead dancer.
+      drawDancer(ctx, bank[idx], cx, cy, 13, color, 1);
       ctx.shadowBlur = 0;
-      // Floating music notes.
-      if (a.sparks.length < 36 && Math.random() < 0.15) {
+
+      // Floating music notes — more of them the harder the stream hits.
+      if (a.sparks.length < 36 && Math.random() < 0.08 + (a.energy || 0) * 0.25) {
         a.sparks.push({
-          x: (Math.random() - 0.5) * 24,
-          y: -frame.length * lineH,
+          x: (Math.random() - 0.5) * 40,
+          y: -bank[idx].length * 13,
           vx: (Math.random() - 0.5) * 12,
           vy: -16 - Math.random() * 10,
           life: 1,
