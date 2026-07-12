@@ -268,6 +268,36 @@ impl GrokCli {
         self.run_args(&["sessions", "list"], None).await
     }
 
+    /// Live model catalog from `grok models`: (model_id, is_default).
+    /// The CLI's list is the source of truth — built-in catalogs go stale
+    /// and a stale id fails every `-m` call with "unknown model id".
+    pub async fn list_models(&self) -> Result<Vec<(String, bool)>> {
+        let out = self.run_args(&["models"], None).await?;
+        let mut models = Vec::new();
+        for line in out.lines() {
+            let t = line.trim();
+            let (rest, is_default_marker) = if let Some(r) = t.strip_prefix("* ") {
+                (r, true)
+            } else if let Some(r) = t.strip_prefix("- ") {
+                (r, false)
+            } else {
+                continue;
+            };
+            let name = rest
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if name.is_empty() {
+                continue;
+            }
+            let is_default = is_default_marker || rest.contains("(default)");
+            models.push((name, is_default));
+        }
+        Ok(models)
+    }
+
     pub async fn doctor(&self) -> Result<String> {
         self.run_args(&["doctor"], None).await
     }

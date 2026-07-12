@@ -320,10 +320,31 @@ impl ExplainerService {
         let model = self.model.read().await.clone();
         let backend = self.backend.read().await.clone();
         debug!(%sid, lines = new_lines.len(), kind, %backend, %model, "explainer call");
-        let out = self
-            .run_narrator(&backend, &model, &prompt)
-            .await
-            .map_err(|e| e.to_string())?;
+        let out = match self.run_narrator(&backend, &model, &prompt).await {
+            Ok(out) => out,
+            // Stale/invalid model id: self-heal onto the known fast model
+            // instead of parking the narrator on an error card.
+            Err(e)
+                if backend == "grok"
+                    && model != DEFAULT_EXPLAINER_MODEL
+                    && (e.contains("unknown model id") || e.contains("Couldn't set model")) =>
+            {
+                warn!(%model, "narrator model rejected; falling back to {DEFAULT_EXPLAINER_MODEL}");
+                *self.model.write().await = DEFAULT_EXPLAINER_MODEL.to_string();
+                self.emit(
+                    sid,
+                    &format!(
+                        "(model '{model}' isn't available on this grok CLI — narrator switched to {DEFAULT_EXPLAINER_MODEL})"
+                    ),
+                    "error",
+                    None,
+                );
+                self.run_narrator(&backend, DEFAULT_EXPLAINER_MODEL, &prompt)
+                    .await
+                    .map_err(|e| e.to_string())?
+            }
+            Err(e) => return Err(e),
+        };
         let text = clip(out.trim(), MAX_OUTPUT_CHARS);
         if text.is_empty() {
             return Err("narrator returned empty output".into());

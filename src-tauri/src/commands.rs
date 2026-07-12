@@ -58,6 +58,9 @@ pub struct BackendInfo {
 #[tauri::command]
 pub async fn list_backends(state: State<'_, AppState>) -> Result<Vec<BackendInfo>, String> {
     let cfg = state.config.read().await.clone();
+    // Grok's model ids move fast — ask the CLI for the live catalog so the
+    // pickers never offer an id that fails every `-m` call.
+    let live_grok_models = state.grok_cli.list_models().await.unwrap_or_default();
     Ok(grok_config::Backend::ALL
         .iter()
         .map(|&b| {
@@ -74,14 +77,29 @@ pub async fn list_backends(state: State<'_, AppState>) -> Result<Vec<BackendInfo
                 }
                 Err(e) => (false, None, Some(e.to_string())),
             };
+            let (default_model, models) = if b == grok_config::Backend::Grok
+                && !live_grok_models.is_empty()
+            {
+                let default = live_grok_models
+                    .iter()
+                    .find(|(_, d)| *d)
+                    .map(|(m, _)| m.clone())
+                    .unwrap_or_else(|| cfg.model_for(b));
+                (
+                    default,
+                    live_grok_models.iter().map(|(m, _)| m.clone()).collect(),
+                )
+            } else {
+                (cfg.model_for(b), cfg.models_for(b))
+            };
             BackendInfo {
                 id: b.key().to_string(),
                 display_name: desc.display_name.to_string(),
                 available,
                 via,
                 reason,
-                default_model: cfg.model_for(b),
-                models: cfg.models_for(b),
+                default_model,
+                models,
                 supports_headless: desc.supports_headless,
             }
         })
