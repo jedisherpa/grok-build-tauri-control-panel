@@ -200,8 +200,10 @@ impl AppState {
             let cfg = config.read().await;
             ExplainerService::start(
                 grok_cli.clone(),
+                config.clone(),
                 event_bus.clone(),
                 cfg.explainer_enabled,
+                cfg.explainer_backend.clone(),
                 cfg.explainer_model.clone(),
             )
         };

@@ -18,6 +18,7 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use grok_cli_wrapper::GrokCli;
+use grok_config::GrokConfig;
 use grok_events::{ControlEvent, EventBus};
 
 /// Cheapest known fast model (verified against `grok models`); config can
@@ -48,11 +49,14 @@ struct SessionBuffer {
 
 pub struct ExplainerService {
     grok_cli: Arc<GrokCli>,
+    config: Arc<RwLock<GrokConfig>>,
     event_bus: Arc<EventBus>,
     buffers: Mutex<HashMap<Uuid, SessionBuffer>>,
     focused: RwLock<Option<Uuid>>,
     enabled: AtomicBool,
     busy: AtomicBool,
+    /// Narrator backend key (grok | claude | codex).
+    backend: RwLock<String>,
     model: RwLock<String>,
     /// Suppress calls until this instant after a narrator failure.
     backoff_until: Mutex<Option<std::time::Instant>>,
@@ -61,17 +65,21 @@ pub struct ExplainerService {
 impl ExplainerService {
     pub fn start(
         grok_cli: Arc<GrokCli>,
+        config: Arc<RwLock<GrokConfig>>,
         event_bus: Arc<EventBus>,
         enabled: bool,
+        backend: Option<String>,
         model: Option<String>,
     ) -> Arc<Self> {
         let svc = Arc::new(Self {
             grok_cli,
+            config,
             event_bus: event_bus.clone(),
             buffers: Mutex::new(HashMap::new()),
             focused: RwLock::new(None),
             enabled: AtomicBool::new(enabled),
             busy: AtomicBool::new(false),
+            backend: RwLock::new(backend.unwrap_or_else(|| "grok".into())),
             model: RwLock::new(model.unwrap_or_else(|| DEFAULT_EXPLAINER_MODEL.into())),
             backoff_until: Mutex::new(None),
         });
@@ -115,6 +123,22 @@ impl ExplainerService {
     pub fn set_enabled(&self, enabled: bool) {
         self.enabled.store(enabled, Ordering::Relaxed);
         info!(enabled, "explainer toggled");
+    }
+
+    /// Switch narrator provider/model (from the panel's gear menu).
+    pub async fn set_provider(&self, backend: Option<String>, model: Option<String>) {
+        if let Some(b) = backend {
+            *self.backend.write().await = b;
+        }
+        if let Some(m) = model {
+            *self.model.write().await = m;
+        }
+        // A provider switch should retry immediately, not wait out a backoff
+        // caused by the previous provider.
+        *self.backoff_until.lock().await = None;
+        let backend = self.backend.read().await.clone();
+        let model = self.model.read().await.clone();
+        info!(%backend, %model, "explainer provider set");
     }
 
     pub fn enabled(&self) -> bool {
@@ -292,25 +316,10 @@ impl ExplainerService {
         prompt.push_str(&format!("\n\nNew activity:\n{activity}"));
 
         let model = self.model.read().await.clone();
-        let args: Vec<&str> = vec![
-            "-p",
-            &prompt,
-            "-m",
-            &model,
-            "--output-format",
-            "plain",
-            "--max-turns",
-            "1",
-            "--disable-web-search",
-            "--no-subagents",
-            "--no-memory",
-            "--tools",
-            "",
-        ];
-        debug!(%sid, lines = new_lines.len(), kind, "explainer call");
+        let backend = self.backend.read().await.clone();
+        debug!(%sid, lines = new_lines.len(), kind, %backend, %model, "explainer call");
         let out = self
-            .grok_cli
-            .run_args_timeout(&args, None, CALL_TIMEOUT)
+            .run_narrator(&backend, &model, &prompt)
             .await
             .map_err(|e| e.to_string())?;
         let text = clip(out.trim(), MAX_OUTPUT_CHARS);
@@ -327,6 +336,53 @@ impl ExplainerService {
         }
         self.emit(sid, &text, kind, approval_request_id);
         Ok(())
+    }
+
+    /// One locked-down text-only call on the chosen provider. Grok is the
+    /// primary tested path; claude/codex use their headless one-shot flags
+    /// (best-effort — failures surface as an explainer card + backoff).
+    async fn run_narrator(
+        &self,
+        backend: &str,
+        model: &str,
+        prompt: &str,
+    ) -> Result<String, String> {
+        match backend {
+            "claude" | "codex" => {
+                let b = grok_config::Backend::from_key(backend)
+                    .ok_or_else(|| format!("unknown narrator backend: {backend}"))?;
+                let cfg = self.config.read().await.clone();
+                let resolved =
+                    grok_config::resolve_backend(b, &cfg).map_err(|e| e.to_string())?;
+                if !matches!(resolved.via, grok_config::LaunchVia::Binary) {
+                    return Err(format!(
+                        "{backend} is only available via npx here — narrator needs the CLI binary installed"
+                    ));
+                }
+                let cli = GrokCli::new(&resolved.program);
+                let args: Vec<&str> = match backend {
+                    "claude" => vec![
+                        "-p", prompt, "--model", model, "--output-format", "text",
+                        "--max-turns", "1",
+                    ],
+                    _ => vec!["exec", "-m", model, prompt],
+                };
+                cli.run_args_timeout(&args, None, CALL_TIMEOUT)
+                    .await
+                    .map_err(|e| e.to_string())
+            }
+            _ => {
+                let args: Vec<&str> = vec![
+                    "-p", prompt, "-m", model, "--output-format", "plain",
+                    "--max-turns", "1", "--disable-web-search", "--no-subagents",
+                    "--no-memory", "--tools", "",
+                ];
+                self.grok_cli
+                    .run_args_timeout(&args, None, CALL_TIMEOUT)
+                    .await
+                    .map_err(|e| e.to_string())
+            }
+        }
     }
 
     fn emit(&self, sid: Uuid, text: &str, kind: &str, request_id: Option<String>) {

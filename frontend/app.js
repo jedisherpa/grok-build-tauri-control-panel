@@ -654,7 +654,23 @@ function patchLastTranscriptBody(entry) {
     renderTranscript();
     return;
   }
-  body.textContent = entry.body || "";
+  const lines = String(entry.body || "").split("\n");
+  if (entry.role === "term" && !entry.expanded && lines.length > 1) {
+    // Collapsed live log: tail the newest line + bump the counter, keeping
+    // the expand button intact instead of dumping the whole payload.
+    const tail = last.querySelector(".term-tail");
+    const btn = last.querySelector(".term-toggle");
+    if (tail && btn) {
+      tail.textContent = lines[lines.length - 1].slice(0, 400);
+      btn.textContent = `▸ ${lines.length - 1} more line${lines.length > 2 ? "s" : ""}`;
+    } else {
+      // Structure not built yet (entry just grew past one line).
+      renderTranscript({ keepScroll: true });
+      return;
+    }
+  } else {
+    body.textContent = entry.body || "";
+  }
   if (time) time.textContent = shortTime(entry.at || "");
   last.classList.toggle("streaming", !!entry.streaming);
   // Only follow the stream if the user was already at the bottom.
@@ -751,6 +767,7 @@ function handleExplainEvent(sid, payload) {
 function renderExplainFeed() {
   const root = $("explain-feed");
   if (!root) return;
+  const follow = isNearBottom(root);
   const sid = state.selectedSession;
   const list = sid ? state.explainBySession.get(sid) || [] : [];
   if (!state.explainerEnabled) {
@@ -765,13 +782,13 @@ function renderExplainFeed() {
     }</div>`;
     return;
   }
+  // Chronological like a chat: newest at the bottom, auto-follow the tail
+  // unless the user scrolled up to read.
   const pending = state.explainPending
     ? `<div class="explain-card pending"><span class="explain-dots">thinking…</span></div>`
     : "";
   root.innerHTML =
-    pending +
-    [...list]
-      .reverse()
+    list
       .map((e) => {
         const cls = e.kind === "approval" ? " approval" : e.kind === "error" ? " error" : "";
         return `<div class="explain-card${cls}">
@@ -779,7 +796,8 @@ function renderExplainFeed() {
   <div class="explain-text">${escapeHtml(e.text)}</div>
 </div>`;
       })
-      .join("");
+      .join("") + pending;
+  if (follow) root.scrollTop = root.scrollHeight;
 }
 
 /** Mark an approval card resolved and refresh it if visible. */
@@ -894,13 +912,16 @@ function renderTranscript({ keepScroll = false } = {}) {
   <div class="t-body">${escapeHtml(e.body)}${foot}</div>
 </div>`;
         }
-        // Multi-line ACP noise collapses to its first line until expanded.
+        // Multi-line ACP noise collapses by default — streaming included
+        // (giant live protocol dumps were eating the whole column). While
+        // streaming, the collapsed view tails the newest line.
         const lines = String(e.body || "").split("\n");
-        if (role === "term" && !e.streaming && lines.length > 1) {
+        if (role === "term" && lines.length > 1) {
           if (e.expanded) {
             body = `${escapeHtml(e.body)}\n<button class="term-toggle" type="button" data-idx="${idx}">▾ collapse</button>`;
           } else {
-            body = `${escapeHtml(lines[0]).slice(0, 400)} <button class="term-toggle" type="button" data-idx="${idx}">▸ ${lines.length - 1} more line${lines.length > 2 ? "s" : ""}</button>`;
+            const shown = e.streaming ? lines[lines.length - 1] : lines[0];
+            body = `<span class="term-tail">${escapeHtml(shown).slice(0, 400)}</span> <button class="term-toggle" type="button" data-idx="${idx}">▸ ${lines.length - 1} more line${lines.length > 2 ? "s" : ""}</button>`;
           }
         }
         return `<div class="t-block ${escapeHtml(role)}${streamCls}">
@@ -3015,6 +3036,53 @@ function wireExplainer() {
       renderExplainFeed();
     };
   }
+  // Gear menu: pick which connected provider/model narrates.
+  const gear = $("explain-config");
+  const row = $("explain-config-row");
+  const backendSel = $("explain-backend");
+  const modelSel = $("explain-model");
+  const fillModels = (backendId, current) => {
+    if (!modelSel) return;
+    const b = (state.backends || []).find((x) => x.id === backendId);
+    const models = b?.models?.length ? b.models : [];
+    modelSel.innerHTML = models
+      .map((m) => `<option value="${escapeHtml(m)}"${m === current ? " selected" : ""}>${escapeHtml(m)}</option>`)
+      .join("");
+  };
+  const fillProviders = (currentBackend, currentModel) => {
+    if (!backendSel) return;
+    const avail = (state.backends || []).filter((b) => b.available);
+    backendSel.innerHTML = avail
+      .map((b) => `<option value="${escapeHtml(b.id)}"${b.id === currentBackend ? " selected" : ""}>${escapeHtml(b.displayName || b.id)}</option>`)
+      .join("");
+    fillModels(backendSel.value || currentBackend, currentModel);
+  };
+  if (gear && row) {
+    gear.onclick = () => {
+      const open = row.style.display === "none";
+      if (open) fillProviders(state.explainerBackend || "grok", state.explainerModel || "");
+      row.style.display = open ? "" : "none";
+    };
+  }
+  if (backendSel) backendSel.onchange = () => fillModels(backendSel.value, "");
+  const apply = $("explain-apply");
+  if (apply) {
+    apply.onclick = async () => {
+      try {
+        state.explainerBackend = backendSel?.value || "grok";
+        state.explainerModel = modelSel?.value || null;
+        await invoke("set_explainer_provider", {
+          backend: state.explainerBackend,
+          model: state.explainerModel,
+        });
+        pushEvent(`narrator → ${state.explainerBackend} · ${state.explainerModel || "default"}`, "ok");
+        row.style.display = "none";
+      } catch (e) {
+        toastError(e);
+      }
+    };
+  }
+
   // Reflect persisted config once it loads (best-effort).
   invoke("get_config")
     .then((cfg) => {
@@ -3023,6 +3091,8 @@ function wireExplainer() {
       } else if (typeof cfg?.explainerEnabled === "boolean") {
         state.explainerEnabled = cfg.explainerEnabled;
       }
+      state.explainerBackend = cfg?.explainer_backend || cfg?.explainerBackend || "grok";
+      state.explainerModel = cfg?.explainer_model || cfg?.explainerModel || null;
       applyToggle();
       renderExplainFeed();
     })

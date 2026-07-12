@@ -296,8 +296,17 @@
         <div class="right-block grow">
           <div class="section-label explain-header">
             <span>What's happening</span>
-            <button id="explain-toggle" class="explain-toggle on" type="button"
-              title="Toggle the plain-English narrator (uses a small side LLM call)">on</button>
+            <span class="explain-header-actions">
+              <button id="explain-config" class="explain-gear" type="button"
+                title="Choose which provider/model narrates">⚙</button>
+              <button id="explain-toggle" class="explain-toggle on" type="button"
+                title="Toggle the plain-English narrator (uses a small side LLM call)">on</button>
+            </span>
+          </div>
+          <div id="explain-config-row" class="explain-config-row" style="display:none">
+            <select id="explain-backend" title="Narrator provider"></select>
+            <select id="explain-model" title="Narrator model"></select>
+            <button id="explain-apply" class="btn" type="button">Set</button>
           </div>
           <div id="explain-feed" class="explain-feed">
             <div class="empty-hint">Select a thread and send a prompt — I'll explain what the agent is doing in plain English.</div>

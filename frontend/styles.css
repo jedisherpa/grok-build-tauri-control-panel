@@ -552,6 +552,20 @@ body {
 .explain-header {
   display: flex; align-items: center; justify-content: space-between;
 }
+.explain-header-actions { display: flex; align-items: center; gap: 6px; }
+.explain-gear {
+  font-size: 12px; line-height: 1; padding: 1px 5px; border-radius: 6px;
+  cursor: pointer; background: transparent; color: var(--muted);
+  border: 1px solid transparent;
+}
+.explain-gear:hover { border-color: var(--border); color: var(--text); }
+.explain-config-row {
+  display: flex; gap: 6px; align-items: center; padding: 4px 2px 6px;
+}
+.explain-config-row select {
+  flex: 1; min-width: 0; font-size: 10px;
+}
+.explain-config-row .btn { font-size: 10px; padding: 2px 10px; }
 .explain-toggle {
   font-family: var(--font); font-size: 9px; text-transform: uppercase;
   padding: 1px 8px; border-radius: 999px; cursor: pointer;

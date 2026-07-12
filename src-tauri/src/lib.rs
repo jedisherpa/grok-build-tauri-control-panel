@@ -101,6 +101,7 @@ pub fn run() {
             commands::set_always_approve,
             commands::explainer_focus,
             commands::set_explainer_enabled,
+            commands::set_explainer_provider,
             commands::respond_approval,
             commands::list_worktrees,
             commands::create_worktree,

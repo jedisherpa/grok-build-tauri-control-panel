@@ -61,6 +61,8 @@ pub struct GrokConfig {
     pub worktrees_root: Option<PathBuf>,
     /// Right-panel ELI12 narrator (side LLM calls on the selected thread).
     pub explainer_enabled: bool,
+    /// Backend for narrator calls (grok | claude | codex); None → grok.
+    pub explainer_backend: Option<String>,
     /// Model for narrator calls; None → cheapest known fast model.
     pub explainer_model: Option<String>,
     pub mcp_servers: HashMap<String, McpServerConfig>,
@@ -85,6 +87,7 @@ impl Default for GrokConfig {
             sandbox_profile: SandboxProfile::Workspace,
             worktrees_root: None,
             explainer_enabled: true,
+            explainer_backend: None,
             explainer_model: None,
             mcp_servers: HashMap::new(),
             skills: HashMap::new(),
@@ -241,6 +244,9 @@ impl GrokConfig {
         }
         if overlay.explainer_enabled != defaults.explainer_enabled {
             self.explainer_enabled = overlay.explainer_enabled;
+        }
+        if overlay.explainer_backend.is_some() {
+            self.explainer_backend = overlay.explainer_backend.clone();
         }
         if overlay.explainer_model.is_some() {
             self.explainer_model = overlay.explainer_model.clone();

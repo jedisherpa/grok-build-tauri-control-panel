@@ -802,6 +802,29 @@ pub async fn explainer_focus(
 }
 
 #[tauri::command]
+pub async fn set_explainer_provider(
+    state: State<'_, AppState>,
+    backend: Option<String>,
+    model: Option<String>,
+) -> Result<(), String> {
+    state
+        .explainer
+        .set_provider(backend.clone(), model.clone())
+        .await;
+    {
+        let mut cfg = state.config.write().await;
+        if backend.is_some() {
+            cfg.explainer_backend = backend;
+        }
+        if model.is_some() {
+            cfg.explainer_model = model;
+        }
+        cfg.save(&state.paths.config_file).map_err(err)?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn set_explainer_enabled(
     state: State<'_, AppState>,
     enabled: bool,
