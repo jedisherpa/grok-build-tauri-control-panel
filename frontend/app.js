@@ -1179,7 +1179,11 @@ function handleControlEvent(ev) {
       .join("\n");
     appendTranscript(sid, "plan", `plan ${pe.title || ""}\n${steps}`);
     pushEvent(`plan · ${(pe.steps || []).length} steps`, "", null, { force: true });
-    if (sid) noteTurn("think", { note: pe.title || "plan update" }, sid);
+    // Only nudge presence during an actual turn — agents emit an initial plan
+    // right after session start, which left the dock stuck on "thinking".
+    if (sid && P.turnActive(presenceFor(sid))) {
+      noteTurn("think", { note: pe.title || "plan update" }, sid);
+    }
   } else if (type === "session_created" || type === "sessionCreated") {
     appendTranscript(sid, "term", `session ready · ${shortId(sid)}`);
     pushEvent(`session · ${shortId(sid)} ready`, "ok", "boom", { force: true, milestone: true });
