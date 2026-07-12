@@ -3417,6 +3417,9 @@ $("btn-haven-run").onclick = async () => {
 };
 
 /// Render jobs as an interactive list: status, keep-alive, Log / Stop.
+/// While any job is running, re-poll every few seconds so finished jobs
+/// flip to their real status without a manual refresh.
+let havenPollTimer = null;
 async function refreshHavenJobs() {
   const root = $("haven-jobs");
   if (!root) return;
@@ -3428,6 +3431,14 @@ async function refreshHavenJobs() {
     return;
   }
   const list = Array.isArray(jobs) ? jobs : jobs?.jobs || [];
+  clearTimeout(havenPollTimer);
+  if (
+    list.some((j) =>
+      /run|alive|active|start/.test(String(j.status || j.state || "").toLowerCase())
+    )
+  ) {
+    havenPollTimer = setTimeout(() => refreshHavenJobs().catch(() => {}), 4000);
+  }
   if (!list.length) {
     root.innerHTML = `<div class="empty-hint">No jobs on Haven</div>`;
     return;
@@ -3437,11 +3448,20 @@ async function refreshHavenJobs() {
       const id = j.id || j.job_id || j.name || "";
       const status = String(j.status || j.state || "unknown").toLowerCase();
       const running = /run|alive|active/.test(status);
+      const failed = j.last_exit_code != null && j.last_exit_code !== 0;
+      // Shell jobs show their real command line, not the /bin/bash wrapper.
+      const cmdText =
+        Array.isArray(j.args) && j.args.length ? j.args[j.args.length - 1] : j.command || "";
+      const exitTag =
+        !running && j.last_exit_code != null
+          ? `<span class="badge ${failed ? "failed" : "idle"}">exit ${j.last_exit_code}</span>`
+          : "";
       return `<div class="haven-job" data-id="${escapeHtml(String(id))}">
-        <span class="badge ${running ? "running" : "saved"}">${escapeHtml(status)}</span>
+        <span class="badge ${running ? "running" : failed ? "failed" : "saved"}">${escapeHtml(status)}</span>
         <span class="haven-job-name">${escapeHtml(j.name || String(id))}</span>
+        ${exitTag}
         ${j.keep_alive || j.keepAlive ? '<span class="badge idle">keep-alive</span>' : ""}
-        <span class="haven-job-cmd muted">${escapeHtml(String(j.command || "").slice(0, 60))}</span>
+        <span class="haven-job-cmd muted">${escapeHtml(String(cmdText).slice(0, 60))}</span>
         <span class="haven-job-actions">
           <button class="btn ghost haven-log" type="button">Log</button>
           <button class="btn danger ghost haven-stop" type="button">Stop</button>

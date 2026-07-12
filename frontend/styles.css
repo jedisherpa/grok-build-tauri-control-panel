@@ -682,9 +682,14 @@ body {
 }
 .t-block.term-live {
   border-color: var(--bomb-fuse, #fb923c);
-  background: color-mix(in srgb, var(--bomb-fuse, #fb923c) 6%, transparent);
+  /* Sticky bar: must be OPAQUE — a transparent tint let the scrolled rows
+     underneath bleed through and look like overlapping text. */
+  background: color-mix(in srgb, var(--bomb-fuse, #fb923c) 8%, var(--bg));
   position: sticky;
   bottom: 0;
+  z-index: 2;
+  margin-top: 6px;
+  box-shadow: 0 -6px 12px -8px rgba(0, 0, 0, 0.6);
 }
 
 .t-role {
@@ -827,9 +832,11 @@ body {
   flex-shrink: 0;
 }
 .composer-meta {
-  display: flex; justify-content: space-between;
+  display: flex; align-items: center; gap: 10px;
   margin-bottom: 6px; font-family: var(--font); font-size: 11px;
+  min-width: 0;
 }
+.composer-meta > span { white-space: nowrap; }
 .composer-row { display: flex; gap: 8px; align-items: flex-end; }
 .composer-row textarea {
   flex: 1; resize: none; min-height: 52px; max-height: 160px;
