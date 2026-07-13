@@ -628,28 +628,16 @@
   color: var(--bomb-fuse);
 }
 
-/* ── Status pill with bomb ───────────────────────────────────────────────── */
-.status-pill {
-  gap: 8px;
+/* ── Services header bomb (host health) ──────────────────────────────────── */
+/* Bomb sits with the word "Services"; the refresh button keeps the far edge. */
+.services-label {
+  justify-content: flex-start;
+  gap: 6px;
 }
-.status-pill .px-bomb {
-  margin-left: -1px;
-}
-.status-pill .dot { display: none; } /* replaced by bomb */
-.status-pill.status-ready .px-bomb { /* ready mood set in JS */ }
-.status-pill.status-thinking,
-.status-pill.status-running {
-  border-color: color-mix(in srgb, var(--bomb-fuse) 30%, var(--border));
-}
-.status-pill.status-error {
+.services-label .px-bomb { flex: 0 0 auto; }
+.services-label #btn-refresh-services { margin-left: auto; }
+.auth-box.host-error {
   border-color: color-mix(in srgb, var(--bomb-err) 35%, var(--border));
-  color: var(--err);
-}
-/* Startup state before the first status refresh lands. */
-.status-pill.status-unknown {
-  color: var(--muted);
-  border-color: var(--border);
-  opacity: 0.85;
 }
 
 /* ── Badges with mini bomb ───────────────────────────────────────────────── */

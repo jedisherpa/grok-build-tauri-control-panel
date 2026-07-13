@@ -346,21 +346,6 @@ body {
 }
 .auth-code-row { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
 .auth-code-row .btn { width: 100%; font-size: 11px; }
-.status-pill {
-  display: flex; align-items: center; gap: 8px;
-  font-size: 11px; color: var(--muted);
-  padding: 6px 8px; border-radius: 8px;
-  background: var(--bg); border: 1px solid var(--border);
-  overflow: hidden;
-}
-.status-pill .dot {
-  width: 7px; height: 7px; border-radius: 50%; background: var(--dim); flex-shrink: 0;
-}
-.status-ready .dot { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
-.status-error .dot { background: var(--err); }
-#status-text {
-  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-}
 
 /* Center */
 .center-header {

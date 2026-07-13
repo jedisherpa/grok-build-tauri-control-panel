@@ -9,10 +9,11 @@ const P = window.BombPresence;
 if (!P || typeof P.emptyPresence !== "function") {
   console.error("BombPresence missing — presence.js failed to load before app.js");
   document.addEventListener("DOMContentLoaded", () => {
-    const st = document.getElementById("status-text");
-    if (st) st.textContent = "Presence module failed to load";
-    const pill = document.getElementById("status-pill");
-    if (pill) pill.className = "status-pill status-error";
+    // app.js is dead in the water here; say so where the eye already goes.
+    const box = document.getElementById("auth-box");
+    if (box) box.classList.add("host-error");
+    const svc = document.getElementById("services");
+    if (svc) svc.innerHTML = '<div class="empty-hint">Presence module failed to load</div>';
   });
 }
 
@@ -380,15 +381,11 @@ function updateBombChrome() {
     actBomb.classList.toggle("wick-on", actMood !== "idle");
   }
 
-  // Status pill: HOST HEALTH ONLY (plan §5.3) — do not overwrite with turn monologue
+  // Services bomb: HOST HEALTH ONLY (plan §5.3) — never the turn monologue.
   if (state.ready && state.hostStatusKind === "ready") {
-    const pill = $("status-pill");
-    if (pill && !pill.classList.contains("status-error")) {
+    const box = $("auth-box");
+    if (box && !box.classList.contains("host-error")) {
       setBombMood($("status-bomb"), "ready");
-      const st = $("status-text");
-      if (st) {
-        st.textContent = state.hostStatusText || "Ready";
-      }
     }
   }
 }
@@ -430,12 +427,13 @@ function shortId(id) {
 }
 
 function setStatus(kind, text) {
-  const pill = $("status-pill");
   const k = kind || "unknown";
   state.hostStatusKind = k;
   state.hostStatusText = text;
-  pill.className = `status-pill status-${k}`;
-  $("status-text").textContent = text;
+  // Host health is carried by the Services bomb (mood + tooltip); the identity
+  // it used to spell out is already in the service rows below it.
+  const box = $("auth-box");
+  if (box) box.classList.toggle("host-error", k === "error");
   // Host health only — static / ambient bomb, never turn monologue
   let mood = "idle";
   if (k === "ready") mood = "ready";
@@ -447,6 +445,7 @@ function setStatus(kind, text) {
   if (sb) {
     sb.classList.add("tier-satellite");
     sb.classList.remove("tier-dock");
+    sb.title = text || "";
   }
 }
 
