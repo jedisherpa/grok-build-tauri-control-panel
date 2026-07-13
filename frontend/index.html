@@ -259,13 +259,22 @@
         <section id="view-memory" class="view">
           <div class="pane-pad">
             <div class="toolbar">
-              <input id="mem-scope" type="text" value="workspace" />
-              <input id="mem-content" type="text" placeholder="note" class="grow" />
-              <button id="btn-mem-add" class="btn primary">Add</button>
-              <button id="btn-mem-list" class="btn">List</button>
-              <button id="btn-mem-flush" class="btn">Flush</button>
+              <select id="mem-scope" title="Scope — which sessions see these notes"></select>
+              <button id="btn-mem-digest" class="btn"
+                title="Summarize this scope's notes into one compact entry (uses the narrator model)">Digest</button>
+              <button id="btn-mem-export" class="btn"
+                title="Write this scope as a markdown file next to memory.json">Export .md</button>
             </div>
-            <pre id="mem-out" class="mono-pane"></pre>
+            <p class="muted mem-hint">Notes here are injected into every new thread — global notes always,
+              project notes for threads in that project. Pin agent replies with 📌 to save them.</p>
+            <div id="mem-list" class="mem-list">
+              <div class="empty-hint">No notes yet</div>
+            </div>
+            <div class="toolbar">
+              <input id="mem-content" type="text" placeholder="note (e.g. 'we use pnpm, never npm')" class="grow" />
+              <input id="mem-tags" type="text" placeholder="tags, comma-separated" />
+              <button id="btn-mem-add" class="btn primary">Add</button>
+            </div>
           </div>
         </section>
 

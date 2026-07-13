@@ -1,6 +1,7 @@
-//! Memory service: workspace MEMORY.md + structured entries.
+//! Memory service: durable notes (global + per-project scopes) that are
+//! injected into new agent sessions as context.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -76,10 +77,6 @@ impl MemoryService {
         self.root.join("memory.json")
     }
 
-    pub fn workspace_memory_path(project_root: &Path) -> PathBuf {
-        project_root.join("MEMORY.md")
-    }
-
     pub async fn list(&self, scope: Option<&str>) -> Vec<MemoryEntry> {
         let store = self.store.read().await;
         store
@@ -145,40 +142,23 @@ impl MemoryService {
         Ok(md)
     }
 
-    /// Dream: compact/summarize by concatenating recent entries (simple heuristic).
-    pub async fn dream(&self, scope: &str, max_chars: usize) -> Result<String> {
+    /// Format a scope's recent entries as a compact context block for
+    /// injection into a new agent session. No file writes.
+    pub async fn context_pack(&self, scope: &str, max_chars: usize) -> Option<String> {
         let mut entries = self.list(Some(scope)).await;
+        if entries.is_empty() {
+            return None;
+        }
         entries.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
-        let mut summary = String::from("# Dream summary\n\n");
+        let mut out = String::new();
         for e in entries {
-            if summary.len() >= max_chars {
+            let line = format!("- {}\n", e.content.replace('\n', " ").trim());
+            if out.len() + line.len() > max_chars {
                 break;
             }
-            let snippet: String = e.content.chars().take(400).collect();
-            summary.push_str(&format!("- {}\n", snippet.replace('\n', " ")));
+            out.push_str(&line);
         }
-        self.add(
-            format!("{scope}/dreams"),
-            summary.clone(),
-            vec!["dream".into()],
-        )
-        .await?;
-        Ok(summary)
-    }
-
-    /// Write/read project MEMORY.md
-    pub async fn write_workspace_memory(project_root: &Path, content: &str) -> Result<()> {
-        let path = Self::workspace_memory_path(project_root);
-        tokio::fs::write(path, content).await?;
-        Ok(())
-    }
-
-    pub async fn read_workspace_memory(project_root: &Path) -> Result<String> {
-        let path = Self::workspace_memory_path(project_root);
-        if !path.exists() {
-            return Ok(String::new());
-        }
-        Ok(tokio::fs::read_to_string(path).await?)
+        if out.trim().is_empty() { None } else { Some(out) }
     }
 
     async fn persist(&self) -> Result<()> {
@@ -200,7 +180,7 @@ mod tests {
     use tempfile::tempdir;
 
     #[tokio::test]
-    async fn add_flush_dream() {
+    async fn add_flush_and_context_pack() {
         let dir = tempdir().unwrap();
         let bus = shared_bus();
         let mem = MemoryService::open(dir.path(), bus).await.unwrap();
@@ -209,7 +189,8 @@ mod tests {
             .unwrap();
         let md = mem.flush_markdown("ws").await.unwrap();
         assert!(md.contains("ACP"));
-        let dream = mem.dream("ws", 2000).await.unwrap();
-        assert!(dream.contains("Dream"));
+        let pack = mem.context_pack("ws", 4000).await.unwrap();
+        assert!(pack.contains("ACP"));
+        assert!(mem.context_pack("empty-scope", 4000).await.is_none());
     }
 }

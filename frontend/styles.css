@@ -697,6 +697,25 @@ body {
 /* (LIVE hint bar removed — the turn dock below the transcript is the single
    source of live turn status.) */
 
+/* Memory view */
+.mem-hint { font-size: 10px; margin: 2px 0 8px; }
+.mem-list { display: flex; flex-direction: column; gap: 6px; overflow: auto; min-height: 0; flex: 1; margin-bottom: 8px; }
+.mem-card { border: 1px solid var(--border); border-radius: 8px; padding: 7px 9px; }
+.mem-content { font-size: 12px; line-height: 1.45; white-space: pre-wrap; }
+.mem-meta { display: flex; align-items: center; gap: 6px; margin-top: 5px; font-size: 9px; }
+.mem-del {
+  margin-left: auto; background: transparent; border: none; cursor: pointer;
+  color: var(--dim); font-size: 10px; opacity: 0; transition: opacity 0.12s;
+}
+.mem-card:hover .mem-del { opacity: 1; }
+.mem-del:hover { color: var(--err); }
+.pin-mem {
+  margin-left: auto; background: transparent; border: none; cursor: pointer;
+  font-size: 10px; opacity: 0; transition: opacity 0.12s; padding: 0 2px;
+}
+.t-block:hover .pin-mem { opacity: 0.85; }
+.pin-mem:disabled { opacity: 0.4 !important; cursor: default; }
+
 /* MCP card manager */
 .mcp-cards { display: flex; flex-direction: column; gap: 8px; overflow: auto; min-height: 0; flex: 1; }
 .mcp-card { border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; }

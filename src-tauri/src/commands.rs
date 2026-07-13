@@ -576,9 +576,17 @@ pub async fn start_session(
         }
     }
 
+    // Durable memory rides along: global notes + this project's notes are
+    // injected with the thread's first prompt.
+    let memory_context = build_memory_context(&state, &requested_cwd).await;
+    let connect_opts = grok_control_core::ConnectOpts {
+        resume_acp_session_id: None,
+        transcript_context: None,
+        memory_context,
+    };
     state
         .registry
-        .spawn_agent_preallocated(id, &spawn_cwd, opts)
+        .spawn_agent_preallocated(id, &spawn_cwd, opts, connect_opts)
         .await
         .map_err(err)?;
     if let Some(note) = isolation_note {
@@ -862,6 +870,10 @@ async fn resume_saved_session(
     }
 
     let transcript_context = build_transcript_context(state, id);
+    let memory_root = opts
+        .project_root
+        .clone()
+        .unwrap_or_else(|| rec.cwd.clone());
     let connect_opts = grok_control_core::ConnectOpts {
         // A prior ACP session id from another agent can't be loaded/resumed.
         resume_acp_session_id: if backend_switched {
@@ -870,6 +882,7 @@ async fn resume_saved_session(
             rec.acp_session_id.clone().filter(|s| !s.is_empty())
         },
         transcript_context: transcript_context.clone(),
+        memory_context: build_memory_context(state, &memory_root).await,
     };
 
     let brain = state
@@ -923,6 +936,33 @@ fn emit_thread_label(state: &AppState, id: Uuid, label: &str) {
 }
 
 /// Pack recent transcript for history-only rehydration (bounded).
+/// Stable, readable memory scope key for a project folder.
+pub(crate) fn project_memory_scope(project_root: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let clean = project_root.trim_end_matches('/');
+    let base = clean.split('/').filter(|s| !s.is_empty()).last().unwrap_or("project");
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    clean.hash(&mut h);
+    format!("{base}-{:06x}", h.finish() & 0xff_ffff)
+}
+
+/// Global notes + the project's notes, capped, for first-prompt injection.
+async fn build_memory_context(state: &AppState, project_root: &str) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(g) = state.memory.context_pack("global", 1500).await {
+        parts.push(format!("Global:\n{g}"));
+    }
+    let scope = project_memory_scope(project_root);
+    if let Some(p) = state.memory.context_pack(&scope, 2500).await {
+        parts.push(format!("This project:\n{p}"));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n"))
+    }
+}
+
 fn build_transcript_context(state: &AppState, id: Uuid) -> Option<String> {
     let entries = state.persistence.transcript_entries(id).ok()?;
     if entries.is_empty() {
@@ -1701,15 +1741,69 @@ pub async fn memory_flush(state: State<'_, AppState>, scope: String) -> Result<S
     state.memory.flush_markdown(&scope).await.map_err(err)
 }
 
+/// Digest: LLM-summarize a scope's notes into one compact entry (tagged
+/// `digest`). Originals stay — the user deletes what's superseded.
 #[tauri::command]
-pub async fn memory_dream(
+pub async fn memory_digest(
     state: State<'_, AppState>,
     scope: String,
-    max_chars: Option<usize>,
-) -> Result<String, String> {
+) -> Result<MemoryEntry, String> {
+    let pack = state
+        .memory
+        .context_pack(&scope, 6000)
+        .await
+        .ok_or("no notes in this scope to digest")?;
+    let summary = state
+        .explainer
+        .summarize(&format!(
+            "Condense these project notes into at most 8 short bullet points, \
+             merging duplicates and dropping anything obsolete. Keep concrete \
+             facts (commands, versions, decisions). Output only the bullets.\n\n{pack}"
+        ))
+        .await?;
     state
         .memory
-        .dream(&scope, max_chars.unwrap_or(4000))
+        .add(&scope, summary, vec!["digest".into()])
+        .await
+        .map_err(err)
+}
+
+/// Scope key the given project folder maps to (for the Memory view).
+#[tauri::command]
+pub async fn project_scope(path: String) -> Result<String, String> {
+    if path.trim().is_empty() {
+        return Ok("global".into());
+    }
+    Ok(project_memory_scope(&path))
+}
+
+/// Pin a piece of transcript text into the project's durable memory.
+#[tauri::command]
+pub async fn remember(
+    state: State<'_, AppState>,
+    id: String,
+    content: String,
+) -> Result<MemoryEntry, String> {
+    let id = Uuid::parse_str(&id).map_err(err)?;
+    let content = content.trim();
+    if content.is_empty() {
+        return Err("nothing to remember".into());
+    }
+    let content: String = content.chars().take(600).collect();
+    // Scope by the thread's project (fall back to its cwd, then global).
+    let root = state
+        .registry
+        .get_snapshot(id)
+        .ok()
+        .map(|s| s.metadata.project_root.clone().unwrap_or(s.metadata.cwd))
+        .or_else(|| state.persistence.get_session(id).ok().map(|r| r.cwd))
+        .filter(|s| !s.is_empty());
+    let scope = root
+        .map(|r| project_memory_scope(&r))
+        .unwrap_or_else(|| "global".into());
+    state
+        .memory
+        .add(&scope, content, vec!["remembered".into()])
         .await
         .map_err(err)
 }

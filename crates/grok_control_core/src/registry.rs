@@ -124,19 +124,22 @@ impl SessionRegistry {
     /// `Idle`/`Failed` via status events.
     pub async fn spawn_agent(&self, cwd: &str, opts: SpawnOptions) -> Result<Uuid> {
         let id = Uuid::new_v4();
-        self.spawn_agent_preallocated(id, cwd, opts).await?;
+        self.spawn_agent_preallocated(id, cwd, opts, ConnectOpts::default())
+            .await?;
         Ok(id)
     }
 
     /// Spawn with a caller-chosen id — used when the caller needs the id
     /// before spawning (e.g. to name the thread's worktree after it).
+    /// `connect_opts` carries first-prompt injections (memory context).
     pub async fn spawn_agent_preallocated(
         &self,
         id: Uuid,
         cwd: &str,
         opts: SpawnOptions,
+        connect_opts: ConnectOpts,
     ) -> Result<()> {
-        self.spawn_agent_with_id(id, cwd, opts, None, ConnectOpts::default(), true)
+        self.spawn_agent_with_id(id, cwd, opts, None, connect_opts, true)
             .await
     }
 

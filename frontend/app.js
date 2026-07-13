@@ -551,6 +551,7 @@ function activateView(name) {
   // Per-view refresh hooks: data views load themselves on entry.
   if (name === "worktrees") refreshWorktrees();
   if (name === "mcp") refreshMcpView();
+  if (name === "memory") refreshMemoryView();
 }
 
 document.querySelectorAll(".nav-item").forEach((btn) => {
@@ -969,8 +970,13 @@ function renderTranscript({ keepScroll = false } = {}) {
             body = `<span class="term-tail">${escapeHtml(shown).slice(0, 400)}</span> <button class="term-toggle" type="button" data-idx="${idx}">▸ ${lines.length - 1} more line${lines.length > 2 ? "s" : ""}</button>`;
           }
         }
+        // Agent replies get a hover 📌 that saves the text to project memory.
+        const pin =
+          role === "agent" && !e.streaming
+            ? `<button class="pin-mem" data-idx="${idx}" title="Remember this — saved to project memory, injected into future threads">📌</button>`
+            : "";
         return `<div class="t-block ${escapeHtml(role)}${streamCls}">
-  <div class="t-role"><span class="t-ts">${escapeHtml(shortTime(e.at || ""))}</span>${bombHtml(roleBombMood(role), "xs")}<span>${label}</span>${e.streaming ? '<span class="stream-caret" aria-hidden="true"></span>' : ""}</div>
+  <div class="t-role"><span class="t-ts">${escapeHtml(shortTime(e.at || ""))}</span>${bombHtml(roleBombMood(role), "xs")}<span>${label}</span>${e.streaming ? '<span class="stream-caret" aria-hidden="true"></span>' : ""}${pin}</div>
   <div class="t-body">${body}</div>
 </div>`;
       })
@@ -982,6 +988,21 @@ function renderTranscript({ keepScroll = false } = {}) {
       if (entry) {
         entry.expanded = !entry.expanded;
         renderTranscript({ keepScroll: true });
+      }
+    };
+  });
+  root.querySelectorAll(".pin-mem").forEach((btn) => {
+    btn.onclick = async (ev) => {
+      ev.stopPropagation();
+      const entry = entries[Number(btn.dataset.idx)];
+      if (!entry || !state.selectedSession) return;
+      btn.disabled = true;
+      try {
+        await invoke("remember", { id: state.selectedSession, content: entry.body });
+        pushEvent("📌 saved to project memory", "ok", null, { force: true });
+      } catch (e) {
+        toastError(e);
+        btn.disabled = false;
       }
     };
   });
@@ -3749,41 +3770,109 @@ $("btn-wt-create").onclick = async () => {
   }
 };
 
-// Memory
+// ── Memory view: scoped notes injected into new sessions ─────────────────
+async function refreshMemoryView() {
+  const list = $("mem-list");
+  const scopeSel = $("mem-scope");
+  if (!list || !scopeSel) return;
+  let entries = [];
+  try {
+    entries = (await invoke("memory_list", { scope: null })) || [];
+  } catch (e) {
+    list.innerHTML = `<div class="empty-hint">${escapeHtml(String(e))}</div>`;
+    return;
+  }
+  // Scope options: global, the active project, plus any scope with entries.
+  const activeProject = $("cwd")?.value?.trim() || "";
+  let projectScope = null;
+  if (activeProject) {
+    projectScope = await invoke("project_scope", { path: activeProject }).catch(() => null);
+  }
+  const scopes = new Set(["global"]);
+  if (projectScope) scopes.add(projectScope);
+  for (const e of entries) scopes.add(e.scope);
+  const prev = scopeSel.value || projectScope || "global";
+  scopeSel.innerHTML = [...scopes]
+    .map((s) => {
+      const label =
+        s === projectScope
+          ? `${activeProject.split("/").filter(Boolean).pop()} (this project)`
+          : s;
+      return `<option value="${escapeHtml(s)}"${s === prev ? " selected" : ""}>${escapeHtml(label)}</option>`;
+    })
+    .join("");
+
+  const shown = entries
+    .filter((e) => e.scope === scopeSel.value)
+    .sort((a, b) => String(b.updated_at || "").localeCompare(String(a.updated_at || "")));
+  list.innerHTML = shown.length
+    ? shown
+        .map(
+          (e) => `<div class="mem-card">
+  <div class="mem-content">${escapeHtml(e.content)}</div>
+  <div class="mem-meta muted">
+    ${(e.tags || []).map((t) => `<span class="badge">${escapeHtml(t)}</span>`).join(" ")}
+    <span>${escapeHtml(shortTime(e.updated_at || e.created_at || ""))}</span>
+    <button class="mem-del" data-id="${escapeHtml(e.id)}" title="Delete note">✕</button>
+  </div>
+</div>`
+        )
+        .join("")
+    : `<div class="empty-hint">No notes in this scope — add one below or 📌 an agent reply.</div>`;
+  list.querySelectorAll(".mem-del").forEach((el) => {
+    el.onclick = async () => {
+      try {
+        await invoke("memory_remove", { id: el.dataset.id });
+        refreshMemoryView();
+      } catch (e) {
+        toastError(e);
+      }
+    };
+  });
+}
+
+$("mem-scope") && ($("mem-scope").onchange = refreshMemoryView);
 $("btn-mem-add").onclick = async () => {
   try {
+    const content = $("mem-content").value.trim();
+    if (!content) return;
     await invoke("memory_add", {
-      scope: $("mem-scope").value,
-      content: $("mem-content").value,
-      tags: [],
+      scope: $("mem-scope").value || "global",
+      content,
+      tags: parseCsv($("mem-tags")?.value || ""),
     });
-    $("mem-out").textContent = JSON.stringify(
-      await invoke("memory_list", { scope: $("mem-scope").value }),
-      null,
-      2
-    );
+    $("mem-content").value = "";
+    if ($("mem-tags")) $("mem-tags").value = "";
+    refreshMemoryView();
   } catch (e) {
     toastError(e);
   }
 };
-$("btn-mem-list").onclick = async () => {
-  try {
-    $("mem-out").textContent = JSON.stringify(
-      await invoke("memory_list", { scope: $("mem-scope").value }),
-      null,
-      2
-    );
-  } catch (e) {
-    toastError(e);
-  }
-};
-$("btn-mem-flush").onclick = async () => {
-  try {
-    $("mem-out").textContent = await invoke("memory_flush", { scope: $("mem-scope").value });
-  } catch (e) {
-    toastError(e);
-  }
-};
+$("btn-mem-digest") &&
+  ($("btn-mem-digest").onclick = async () => {
+    const btn = $("btn-mem-digest");
+    btn.disabled = true;
+    try {
+      await invoke("memory_digest", { scope: $("mem-scope").value || "global" });
+      pushEvent("memory digested", "ok", null, { force: true });
+      refreshMemoryView();
+    } catch (e) {
+      toastError(e);
+    } finally {
+      btn.disabled = false;
+    }
+  });
+$("btn-mem-export") &&
+  ($("btn-mem-export").onclick = async () => {
+    try {
+      await invoke("memory_flush", { scope: $("mem-scope").value || "global" });
+      pushEvent(`exported ${$("mem-scope").value}.md to the memory folder`, "ok", null, {
+        force: true,
+      });
+    } catch (e) {
+      toastError(e);
+    }
+  });
 
 // System
 $("btn-status").onclick = () => refreshStatus().catch(toastError);

@@ -361,6 +361,19 @@ impl ExplainerService {
         Ok(())
     }
 
+    /// General one-shot text task on the narrator provider (e.g. memory
+    /// digests). Errors bubble to the caller.
+    pub async fn summarize(&self, prompt: &str) -> Result<String, String> {
+        let backend = self.backend.read().await.clone();
+        let model = self.model.read().await.clone();
+        let out = self.run_narrator(&backend, &model, prompt).await?;
+        let text = out.trim().to_string();
+        if text.is_empty() {
+            return Err("narrator returned empty output".into());
+        }
+        Ok(text)
+    }
+
     /// One-shot 2-4 word title for a thread's first prompt (smart naming).
     /// Uses the same locked-down narrator provider; errors bubble so callers
     /// can keep the local slug.

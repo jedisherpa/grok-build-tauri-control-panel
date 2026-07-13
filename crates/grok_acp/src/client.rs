@@ -94,6 +94,8 @@ pub struct ConnectOpts {
     pub resume_acp_session_id: Option<String>,
     /// SQLite transcript summary to inject if load/resume fails.
     pub transcript_context: Option<String>,
+    /// Durable memory notes (global + project) injected with the first prompt.
+    pub memory_context: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -183,6 +185,8 @@ pub struct AcpClient {
     brain_mode: RwLock<BrainMode>,
     /// Injected once on first prompt when brain is history-only.
     pending_context: Mutex<Option<String>>,
+    /// Durable memory notes injected once with the first prompt.
+    pending_memory: Mutex<Option<String>>,
     load_session_supported: RwLock<bool>,
     resume_session_supported: RwLock<bool>,
     /// Mode ids the agent advertised in the session/new//load result.
@@ -295,6 +299,10 @@ impl AcpClient {
         let pending_context = connect_opts
             .transcript_context
             .filter(|s| !s.trim().is_empty());
+        let pending_memory = connect_opts
+            .memory_context
+            .clone()
+            .filter(|s| !s.trim().is_empty());
 
         let default_cwd = config.cwd.clone();
         let client = Arc::new(Self {
@@ -315,6 +323,7 @@ impl AcpClient {
             deny_patterns: opts.deny_patterns.clone(),
             brain_mode: RwLock::new(BrainMode::Fresh),
             pending_context: Mutex::new(pending_context),
+            pending_memory: Mutex::new(pending_memory),
             load_session_supported: RwLock::new(false),
             resume_session_supported: RwLock::new(false),
             available_modes: RwLock::new(Vec::new()),
@@ -370,6 +379,7 @@ impl AcpClient {
             deny_patterns: Vec::new(),
             brain_mode: RwLock::new(BrainMode::Fresh),
             pending_context: Mutex::new(None),
+            pending_memory: Mutex::new(None),
             load_session_supported: RwLock::new(false),
             resume_session_supported: RwLock::new(false),
             available_modes: RwLock::new(Vec::new()),
@@ -911,6 +921,21 @@ impl AcpClient {
                     ),
                     at: Utc::now(),
                 });
+            }
+        }
+
+        // Durable memory: prepend once on the first prompt (before recovery
+        // context so notes read as standing knowledge, not conversation).
+        if let Some(mem) = self.pending_memory.lock().await.take() {
+            text = format!(
+                "[Project memory — durable notes the user saved; treat as ground truth]\n{mem}\n\n{text}"
+            );
+            if let Some(bus) = &self.event_bus {
+                Self::emit_term(
+                    bus,
+                    self.control_session_id,
+                    format!("◈ injected {} chars of saved memory", mem.len()),
+                );
             }
         }
 
