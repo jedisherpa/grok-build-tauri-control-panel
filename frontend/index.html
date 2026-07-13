@@ -190,11 +190,13 @@
                   style="display:none"
                 />
               </div>
-              <div class="mode-group" role="group" aria-label="Session mode">
+              <div class="mode-group" role="group" aria-label="Approval mode">
                 <button id="plan-mode" class="mode-btn" type="button" aria-pressed="false"
-                  title="Plan mode — agent proposes a plan before acting">plan</button>
+                  title="Plan — investigate read-only and propose a plan; no changes">plan</button>
+                <button id="auto-mode" class="mode-btn auto" type="button" aria-pressed="false"
+                  title="Auto — auto-approves reads, file edits and safe commands (build/test/git status); still asks before anything risky (rm, sudo, force-push, network…)">auto</button>
                 <button id="always-approve" class="mode-btn yolo" type="button" aria-pressed="false"
-                  title="Yolo — auto-approve all tool calls">yolo</button>
+                  title="Yolo — auto-approve EVERYTHING, including destructive commands">yolo</button>
                 <button id="worktree-mode" class="mode-btn" type="button" aria-pressed="false"
                   title="Isolate new threads in their own git worktree (parallel threads can't overwrite each other)">🌱</button>
               </div>
@@ -307,17 +309,20 @@
                 <label class="toggle" title="New threads in a git project get their own worktree + branch">
                   <input id="cfg-worktree" type="checkbox" /> <span>isolate new threads in worktrees</span>
                 </label>
-                <label class="toggle" title="Plan pill starts on for new threads">
-                  <input id="cfg-plan" type="checkbox" /> <span>plan mode by default</span>
-                </label>
-                <label class="toggle" title="⚠ Auto-approves every tool call — approvals never shown">
-                  <input id="cfg-yolo" type="checkbox" /> <span>yolo (always approve) by default</span>
-                </label>
                 <label class="toggle" title="Plain-English narrator in the right panel">
                   <input id="cfg-explainer" type="checkbox" /> <span>explainer narration</span>
                 </label>
               </div>
               <div class="settings-grid">
+                <label class="settings-field">
+                  <span>Default approvals for new threads</span>
+                  <select id="cfg-approval">
+                    <option value="ask">ask — confirm every action</option>
+                    <option value="plan">plan — investigate and propose first</option>
+                    <option value="auto">auto — reads, edits and safe commands run; risky ones ask</option>
+                    <option value="yolo">yolo — approve everything (dangerous)</option>
+                  </select>
+                </label>
                 <label class="settings-field">
                   <span>Max concurrent sessions</span>
                   <input id="cfg-max-sessions" type="number" min="1" max="50" />
@@ -332,8 +337,12 @@
                 </label>
               </div>
               <label class="settings-field grow">
-                <span>Denied commands — one rule per line, blocked before any approval (e.g. <code>Bash(sudo *)</code>)</span>
-                <textarea id="cfg-deny" rows="4" spellcheck="false"></textarea>
+                <span>Denied — one rule per line, blocked before any approval, beats every mode (e.g. <code>Bash(sudo *)</code>)</span>
+                <textarea id="cfg-deny" rows="3" spellcheck="false"></textarea>
+              </label>
+              <label class="settings-field grow">
+                <span>Always allowed — auto-approved in any mode (e.g. <code>Read(**)</code>, <code>Bash(cargo test *)</code>)</span>
+                <textarea id="cfg-allow" rows="3" spellcheck="false"></textarea>
               </label>
               <div class="toolbar">
                 <button id="btn-cfg-save" class="btn primary">Save settings</button>

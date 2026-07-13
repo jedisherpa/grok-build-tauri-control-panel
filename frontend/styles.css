@@ -540,6 +540,11 @@ body {
   border-color: color-mix(in srgb, var(--err) 55%, var(--border));
   background: color-mix(in srgb, var(--err) 10%, transparent);
 }
+.mode-btn.auto.active {
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 55%, var(--border));
+  background: color-mix(in srgb, var(--ok) 10%, transparent);
+}
 .toggle {
   display: flex; align-items: center; gap: 4px;
   color: var(--muted); font-family: var(--font); font-size: 11px;
@@ -616,6 +621,11 @@ body {
 .approval-btn.kind-reject_once, .approval-btn.kind-reject_always, .approval-btn.kind-cancel {
   color: var(--err);
   border-color: color-mix(in srgb, var(--err) 40%, var(--border));
+}
+.approval-btn.kind-always {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 45%, var(--border));
+  border-style: dashed;
 }
 .approval-resolved {
   margin-top: 6px; font-size: 10px; color: var(--muted);

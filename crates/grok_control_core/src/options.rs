@@ -12,6 +12,8 @@ pub enum AgentMode {
 
 // Note: AgentMode accepts "acp" / "headless" (snake). Frontend may send same.
 
+pub use grok_acp::ApprovalMode;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct SpawnOptions {
@@ -22,6 +24,10 @@ pub struct SpawnOptions {
     pub mode: AgentMode,
     pub prompt: Option<String>,
     pub rules: Vec<String>,
+    /// Approval stance: plan | ask | auto | yolo. The two booleans below are
+    /// legacy inputs (older payloads / persisted metadata) — `resolved_mode()`
+    /// reconciles them.
+    pub approval_mode: Option<ApprovalMode>,
     pub always_approve: bool,
     pub plan_mode: bool,
     pub sandbox_profile: Option<String>,
@@ -51,6 +57,7 @@ impl Default for SpawnOptions {
             mode: AgentMode::Acp,
             prompt: None,
             rules: Vec::new(),
+            approval_mode: None,
             always_approve: false,
             plan_mode: true,
             sandbox_profile: Some("workspace".into()),
@@ -83,5 +90,20 @@ impl SpawnOptions {
             // Explicit always_approve wins; plan_mode soft-disabled
         }
         Ok(())
+    }
+
+    /// The stance to run with: an explicit `approval_mode` wins; otherwise
+    /// derive it from the legacy booleans (old payloads / restored metadata).
+    pub fn resolved_mode(&self) -> ApprovalMode {
+        if let Some(m) = self.approval_mode {
+            return m;
+        }
+        if self.always_approve {
+            ApprovalMode::Yolo
+        } else if self.plan_mode {
+            ApprovalMode::Plan
+        } else {
+            ApprovalMode::Ask
+        }
     }
 }

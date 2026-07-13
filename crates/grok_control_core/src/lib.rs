@@ -7,7 +7,7 @@ mod registry;
 
 pub use error::{CoreError, Result};
 pub use handle::{AgentHandle, AgentHandleSnapshot, SessionMetadata};
-pub use options::{AgentMode, SpawnOptions};
+pub use options::{AgentMode, ApprovalMode, SpawnOptions};
 pub use registry::SessionRegistry;
 
 pub use grok_acp::{BrainMode, ConnectOpts};

@@ -9,7 +9,8 @@ mod terminals;
 mod transport;
 
 pub use client::{
-    AcpClient, AcpClientConfig, BrainMode, ConnectOpts, SpawnOptions as AcpSpawnOptions,
+    AcpClient, AcpClientConfig, ApprovalMode, BrainMode, ConnectOpts,
+    SpawnOptions as AcpSpawnOptions, ToolClass,
 };
 pub use error::{AcpError, Result};
 pub use messages::{

@@ -9,7 +9,7 @@ use serde_json::json;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use grok_acp::{AcpClient, AcpClientConfig, AcpSpawnOptions, BrainMode, ConnectOpts};
+use grok_acp::{AcpClient, AcpClientConfig, AcpSpawnOptions, ApprovalMode, BrainMode, ConnectOpts};
 use grok_cli_wrapper::{GrokCli, HeadlessSpawnOptions};
 use grok_config::{Backend, GrokConfig, ResolvedBackend, descriptor, resolve_backend};
 use grok_events::{EventBus, SessionStatus};
@@ -243,7 +243,12 @@ impl SessionRegistry {
         // by the ACP client ahead of any approval.
         let mut deny_patterns = cfg.permissions.deny.clone();
         deny_patterns.extend(opts.permission_deny.iter().cloned());
+        // Allow rules: auto-approve matching requests in any mode (deny wins).
+        // These were previously built in config and silently dropped here.
+        let mut allow_patterns = cfg.permissions.allow.clone();
+        allow_patterns.extend(opts.permission_allow.iter().cloned());
         drop(cfg);
+        let approval_mode = opts.resolved_mode();
 
         let now = Utc::now();
         let mut metadata = SessionMetadata {
@@ -256,8 +261,9 @@ impl SessionRegistry {
             backend,
             mode: opts.mode,
             status: SessionStatus::Starting,
-            plan_mode: opts.plan_mode && !opts.always_approve,
-            always_approve: opts.always_approve,
+            approval_mode,
+            plan_mode: approval_mode == ApprovalMode::Plan,
+            always_approve: approval_mode == ApprovalMode::Yolo,
             sandbox_profile: opts.sandbox_profile.clone(),
             mcp_servers: opts.mcp_server_names.clone(),
             approved_high_risk_mcp: opts.approved_high_risk_mcp.clone(),
@@ -296,10 +302,12 @@ impl SessionRegistry {
                         },
                         mcp_servers: opts.mcp_servers.clone(),
                         plan_mode: metadata.plan_mode,
-                        always_approve: opts.always_approve,
+                        always_approve: metadata.always_approve,
+                        approval_mode,
                         sandbox_profile: opts.sandbox_profile.clone(),
                         extra_env: Vec::new(),
                         deny_patterns,
+                        allow_patterns,
                     };
                     let resolved = resolved.expect("resolved backend for live ACP spawn");
                     let desc = descriptor(backend);
@@ -537,6 +545,49 @@ impl SessionRegistry {
             let mode = if enabled { "plan" } else { "default" };
             client.set_mode(mode).await?;
         }
+        Ok(())
+    }
+
+    /// Switch a live session's approval stance (composer pills).
+    pub async fn set_approval_mode(&self, id: Uuid, mode: ApprovalMode) -> Result<()> {
+        let client = {
+            let mut entry = self
+                .sessions
+                .get_mut(&id)
+                .ok_or(CoreError::SessionNotFound(id))?;
+            entry.metadata.approval_mode = mode;
+            entry.metadata.plan_mode = mode == ApprovalMode::Plan;
+            entry.metadata.always_approve = mode == ApprovalMode::Yolo;
+            entry.touch();
+            entry.acp_client.clone()
+        };
+        if let Some(client) = client {
+            // Client-side gating is authoritative; the agent-side mode is
+            // best-effort (most adapters don't advertise an auto mode).
+            client.set_approval_mode(mode).await;
+            let wanted = match mode {
+                ApprovalMode::Plan => "plan",
+                ApprovalMode::Auto => "auto",
+                ApprovalMode::Yolo => "always_approve",
+                ApprovalMode::Ask => "default",
+            };
+            if let Err(e) = client.set_mode(wanted).await {
+                tracing::warn!(error = %e, ?mode, "agent-side mode not applied (client gate still enforces it)");
+            }
+        }
+        Ok(())
+    }
+
+    /// Record an "always allow this" rule for the rest of the session.
+    pub async fn add_session_allow_rule(&self, id: Uuid, pattern: String) -> Result<()> {
+        let client = self
+            .sessions
+            .get(&id)
+            .ok_or(CoreError::SessionNotFound(id))?
+            .acp_client
+            .clone()
+            .ok_or(CoreError::NotAcp)?;
+        client.add_session_allow_rule(pattern).await;
         Ok(())
     }
 

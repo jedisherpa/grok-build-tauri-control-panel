@@ -99,6 +99,8 @@ pub fn run() {
             commands::remove_session,
             commands::set_plan_mode,
             commands::set_always_approve,
+            commands::set_approval_mode,
+            commands::add_session_allow_rule,
             commands::explainer_focus,
             commands::set_explainer_enabled,
             commands::set_explainer_provider,

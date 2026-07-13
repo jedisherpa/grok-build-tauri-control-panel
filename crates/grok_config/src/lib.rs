@@ -57,6 +57,10 @@ pub struct GrokConfig {
     pub session_timeout_secs: u64,
     pub always_approve_default: bool,
     pub plan_mode_default: bool,
+    /// Default approval stance for new threads: ask | plan | auto | yolo.
+    /// Supersedes the two booleans above when set.
+    #[serde(default)]
+    pub approval_mode_default: Option<String>,
     pub sandbox_profile: SandboxProfile,
     pub worktrees_root: Option<PathBuf>,
     /// Give each new thread in a git project its own worktree by default.
@@ -86,6 +90,7 @@ impl Default for GrokConfig {
             session_timeout_secs: 3600,
             always_approve_default: false,
             plan_mode_default: true,
+            approval_mode_default: None,
             sandbox_profile: SandboxProfile::Workspace,
             worktrees_root: None,
             worktree_isolation_default: true,
@@ -238,6 +243,9 @@ impl GrokConfig {
         }
         if overlay.plan_mode_default != defaults.plan_mode_default {
             self.plan_mode_default = overlay.plan_mode_default;
+        }
+        if overlay.approval_mode_default.is_some() {
+            self.approval_mode_default = overlay.approval_mode_default.clone();
         }
         if overlay.sandbox_profile != defaults.sandbox_profile {
             self.sandbox_profile = overlay.sandbox_profile;

@@ -28,6 +28,10 @@ pub struct SessionMetadata {
     pub backend: Backend,
     pub mode: AgentMode,
     pub status: SessionStatus,
+    /// Approval stance for this session (plan | ask | auto | yolo).
+    /// The booleans below are kept for back-compat with older records.
+    #[serde(default)]
+    pub approval_mode: grok_acp::ApprovalMode,
     pub plan_mode: bool,
     pub always_approve: bool,
     pub sandbox_profile: Option<String>,

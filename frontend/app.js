@@ -853,6 +853,22 @@ function renderExplainFeed() {
   if (follow) root.scrollTop = root.scrollHeight;
 }
 
+/** Rule an "always allow" button would install: narrow enough to be safe,
+ *  broad enough to stop the repeat asks (e.g. `Bash(cargo test *)`). */
+function allowPatternFor(tool, summary) {
+  const name = String(tool || "tool").trim();
+  if (!name) return null;
+  // Commands: key on the program + first subcommand, not the whole line.
+  const cmdMatch = String(summary || "").match(/:\s*([^\n]+)/);
+  const isCommandish = /bash|shell|terminal|exec|run/i.test(name);
+  if (isCommandish && cmdMatch) {
+    const words = cmdMatch[1].trim().split(/\s+/).filter(Boolean);
+    const head = words.slice(0, words[0] === "git" || words[0] === "cargo" || words[0] === "npm" ? 2 : 1);
+    if (head.length) return `${name}(${head.join(" ")} *)`;
+  }
+  return `${name}(*)`;
+}
+
 /** Mark an approval card resolved and refresh it if visible. */
 function resolveApprovalEntry(sessionId, requestId, resolution) {
   if (!sessionId || !requestId) return;
@@ -948,6 +964,18 @@ function renderTranscript() {
   data-option-id="${escapeHtml(String(o.id))}"${m.resolved ? " disabled" : ""}>${escapeHtml(o.label || o.kind || o.id)}</button>`
             )
             .join("");
+          // "Always allow this" — our own session rule, so it works even for
+          // agents that don't offer an allow_always option. The pattern is
+          // shown on the button so it's never a surprise.
+          const alwaysPattern = m.allowPattern;
+          const alwaysBtn =
+            !m.resolved && alwaysPattern
+              ? `<button class="approval-btn kind-always"
+  data-sid="${escapeHtml(String(m.sid || sid))}"
+  data-request-id="${escapeHtml(String(m.requestId || ""))}"
+  data-pattern="${escapeHtml(alwaysPattern)}"
+  title="Auto-approve anything matching this for the rest of the session">✓ Always allow ${escapeHtml(alwaysPattern)}</button>`
+              : "";
           const deny = m.resolved
             ? ""
             : `<button class="approval-btn kind-cancel"
@@ -978,7 +1006,7 @@ function renderTranscript() {
           const foot = m.resolved
             ? `${explain}<div class="approval-resolved">resolved · ${escapeHtml(String(m.resolved))}</div>`
             : isLive
-              ? `${explain}<div class="approval-actions">${buttons}${deny}</div>${codeWith}`
+              ? `${explain}<div class="approval-actions">${buttons}${deny}${alwaysBtn}</div>${codeWith}`
               : `${explain}<div class="approval-resolved">from a previous session — see the rows below for how it resolved</div>`;
           return `<div class="t-block approval${m.resolved || !isLive ? "" : " pending"}">
   <div class="t-role"><span class="t-ts">${escapeHtml(shortTime(e.at || ""))}</span>${bombHtml("wait", "xs")}<span>${label}</span></div>
@@ -1739,11 +1767,14 @@ function handleControlEvent(ev) {
       return;
     }
     endAgentStream(sid);
+    const planApproval = !!(ev.plan_approval ?? ev.planApproval);
     appendTranscript(sid, "approval", ev.summary || `${ev.tool || "tool"} requests permission`, nowIso(), {
       meta: {
         requestId: ev.request_id || ev.requestId || "",
         options: ev.options || [],
-        planApproval: !!(ev.plan_approval ?? ev.planApproval),
+        planApproval,
+        // Plans are one-offs — never offer "always allow" for them.
+        allowPattern: planApproval ? null : allowPatternFor(ev.tool, ev.summary),
         sid,
       },
     });
@@ -2594,32 +2625,40 @@ function setMode(id, on) {
   el.setAttribute("aria-pressed", String(on));
 }
 
+/** Approval stance: plan | auto | yolo | ask (= no pill lit). */
+function currentApprovalMode() {
+  if (modeOn("plan-mode")) return "plan";
+  if (modeOn("auto-mode")) return "auto";
+  if (modeOn("always-approve")) return "yolo";
+  return "ask";
+}
+
+function setApprovalMode(mode) {
+  setMode("plan-mode", mode === "plan");
+  setMode("auto-mode", mode === "auto");
+  setMode("always-approve", mode === "yolo");
+}
+
 function wireModeButtons() {
-  // Push a toggle change into the live selected session (best-effort —
-  // saved threads pick the values up on next send instead).
-  const applyLive = async (cmd, enabled) => {
+  // The three pills are mutually exclusive; clicking the lit one turns it off
+  // (→ "ask", where every request is confirmed).
+  const pick = async (mode) => {
+    const next = currentApprovalMode() === mode ? "ask" : mode;
+    setApprovalMode(next);
     const sess = state.sessions.find((s) => s.id === state.selectedSession);
     if (!sess || sess.live === false) return;
     try {
-      await invoke(cmd, { id: state.selectedSession, enabled });
-      pushEvent(`${cmd === "set_plan_mode" ? "plan" : "yolo"} ${enabled ? "on" : "off"} · ${shortId(state.selectedSession)}`, "ok", null, { force: true });
+      await invoke("set_approval_mode", { id: state.selectedSession, mode: next });
+      pushEvent(`approvals → ${next} · ${shortId(state.selectedSession)}`, "ok", null, {
+        force: true,
+      });
     } catch (e) {
       pushEvent(`mode change failed: ${e?.message || e}`, "err", "error", { force: true });
     }
   };
-  $("plan-mode")?.addEventListener("click", () => {
-    const next = !modeOn("plan-mode");
-    setMode("plan-mode", next);
-    if (next) setMode("always-approve", false);
-    applyLive("set_plan_mode", next);
-    if (next) applyLive("set_always_approve", false);
-  });
-  $("always-approve")?.addEventListener("click", () => {
-    const next = !modeOn("always-approve");
-    setMode("always-approve", next);
-    if (next) setMode("plan-mode", false);
-    applyLive("set_always_approve", next);
-  });
+  $("plan-mode")?.addEventListener("click", () => pick("plan"));
+  $("auto-mode")?.addEventListener("click", () => pick("auto"));
+  $("always-approve")?.addEventListener("click", () => pick("yolo"));
   // Worktree isolation applies at thread START only (no live toggle).
   $("worktree-mode")?.addEventListener("click", () => {
     setMode("worktree-mode", !modeOn("worktree-mode"));
@@ -2773,6 +2812,8 @@ async function startAcp() {
       mode: "acp",
       backend,
       model,
+      approvalMode: currentApprovalMode(),
+      // Legacy booleans kept in step for older backends / persisted records.
       planMode: modeOn("plan-mode"),
       alwaysApprove: modeOn("always-approve"),
       isolateWorktree: modeOn("worktree-mode"),
@@ -2880,6 +2921,7 @@ async function sendPrompt() {
       prompt,
       backend: currentBackend(),
       model: currentModel(),
+      approvalMode: currentApprovalMode(),
       planMode: modeOn("plan-mode"),
       alwaysApprove: modeOn("always-approve"),
     });
@@ -4190,14 +4232,22 @@ async function loadSettingsCard() {
     if (el) el.checked = !!val;
   };
   set("cfg-worktree", g("worktree_isolation_default", "worktreeIsolationDefault"));
-  set("cfg-plan", g("plan_mode_default", "planModeDefault"));
-  set("cfg-yolo", g("always_approve_default", "alwaysApproveDefault"));
   set("cfg-explainer", g("explainer_enabled", "explainerEnabled"));
+  // Approval default: explicit mode wins, else derive from the legacy booleans.
+  const mode =
+    g("approval_mode_default", "approvalModeDefault") ||
+    (g("always_approve_default", "alwaysApproveDefault")
+      ? "yolo"
+      : g("plan_mode_default", "planModeDefault")
+        ? "plan"
+        : "ask");
+  if ($("cfg-approval")) $("cfg-approval").value = mode;
   if ($("cfg-max-sessions"))
     $("cfg-max-sessions").value = g("max_concurrent_sessions", "maxConcurrentSessions") ?? 10;
   if ($("cfg-sandbox")) $("cfg-sandbox").value = g("sandbox_profile", "sandboxProfile") || "workspace";
   const perms = c.permissions || {};
   if ($("cfg-deny")) $("cfg-deny").value = (perms.deny || []).join("\n");
+  if ($("cfg-allow")) $("cfg-allow").value = (perms.allow || []).join("\n");
 }
 
 $("btn-cfg-save") &&
@@ -4212,20 +4262,24 @@ $("btn-cfg-save") &&
       else c[snake] = val;
     };
     put("worktree_isolation_default", "worktreeIsolationDefault", !!$("cfg-worktree")?.checked);
-    put("plan_mode_default", "planModeDefault", !!$("cfg-plan")?.checked);
-    put("always_approve_default", "alwaysApproveDefault", !!$("cfg-yolo")?.checked);
     put("explainer_enabled", "explainerEnabled", !!$("cfg-explainer")?.checked);
+    const approval = $("cfg-approval")?.value || "ask";
+    put("approval_mode_default", "approvalModeDefault", approval);
+    // Keep the legacy booleans consistent for anything still reading them.
+    put("plan_mode_default", "planModeDefault", approval === "plan");
+    put("always_approve_default", "alwaysApproveDefault", approval === "yolo");
     put(
       "max_concurrent_sessions",
       "maxConcurrentSessions",
       Math.max(1, Number($("cfg-max-sessions")?.value) || 10)
     );
     put("sandbox_profile", "sandboxProfile", $("cfg-sandbox")?.value || "workspace");
-    const deny = ($("cfg-deny")?.value || "")
-      .split("\n")
-      .map((s) => s.trim())
-      .filter(Boolean);
-    c.permissions = { ...(c.permissions || {}), deny };
+    const lines = (id) =>
+      ($(id)?.value || "")
+        .split("\n")
+        .map((s) => s.trim())
+        .filter(Boolean);
+    c.permissions = { ...(c.permissions || {}), deny: lines("cfg-deny"), allow: lines("cfg-allow") };
     try {
       await invoke("save_config", { config: c });
       cfgCache = c;
@@ -4323,6 +4377,16 @@ function wireExplainer() {
       state.explainerModel = cfg?.explainer_model || cfg?.explainerModel || null;
       const wtDefault = cfg?.worktree_isolation_default ?? cfg?.worktreeIsolationDefault ?? true;
       setMode("worktree-mode", !!wtDefault);
+      // Composer pills start on the configured default stance.
+      const modeDefault =
+        cfg?.approval_mode_default ||
+        cfg?.approvalModeDefault ||
+        ((cfg?.always_approve_default ?? cfg?.alwaysApproveDefault)
+          ? "yolo"
+          : (cfg?.plan_mode_default ?? cfg?.planModeDefault)
+            ? "plan"
+            : "ask");
+      setApprovalMode(modeDefault);
       applyToggle();
       renderExplainFeed();
     })
@@ -4420,6 +4484,29 @@ $("transcript")?.addEventListener("click", async (e) => {
     if (backend && model) {
       goBtn.disabled = true;
       codeWithModel(goBtn.dataset.sid, goBtn.dataset.requestId, backend, model);
+    }
+    return;
+  }
+  // "Always allow X": install the session rule, then approve this request.
+  const alwaysBtn = e.target.closest?.(".kind-always");
+  if (alwaysBtn && !alwaysBtn.disabled) {
+    e.stopPropagation();
+    const actions = alwaysBtn.closest(".approval-actions");
+    actions?.querySelectorAll("button").forEach((b) => (b.disabled = true));
+    const { sid: aSid, requestId, pattern } = alwaysBtn.dataset;
+    try {
+      await invoke("add_session_allow_rule", { id: aSid, pattern });
+      // Approve the request that prompted it (allow-once option).
+      const card = alwaysBtn.closest(".t-block");
+      const allowOnce =
+        card?.querySelector(".approval-btn.kind-allow_once") ||
+        card?.querySelector(".approval-btn[data-option-id]:not([data-option-id=''])");
+      const optionId = allowOnce?.dataset.optionId || null;
+      await invoke("respond_approval", { id: aSid, requestId, optionId });
+      pushEvent(`✓ always allowing ${pattern}`, "ok", "boom", { force: true, milestone: true });
+    } catch (err) {
+      toastError(err);
+      actions?.querySelectorAll("button").forEach((b) => (b.disabled = false));
     }
     return;
   }

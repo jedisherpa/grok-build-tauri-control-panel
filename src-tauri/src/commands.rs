@@ -668,6 +668,7 @@ pub async fn send_prompt(
     prompt: String,
     backend: Option<String>,
     model: Option<String>,
+    approval_mode: Option<String>,
     plan_mode: Option<bool>,
     always_approve: Option<bool>,
 ) -> Result<(), String> {
@@ -705,6 +706,7 @@ pub async fn send_prompt(
                 id,
                 want_backend,
                 want_model.clone(),
+                approval_mode.clone(),
                 plan_mode,
                 always_approve,
             )
@@ -715,8 +717,16 @@ pub async fn send_prompt(
     // Saved threads after reboot have history in SQLite but no live ACP process.
     // Auto-resume so "Send" picks up the same thread id + transcript.
     if !state.registry.is_live(id) {
-        resume_saved_session(&state, id, want_backend, want_model, plan_mode, always_approve)
-            .await?;
+        resume_saved_session(
+            &state,
+            id,
+            want_backend,
+            want_model,
+            approval_mode.clone(),
+            plan_mode,
+            always_approve,
+        )
+        .await?;
     }
 
     // Smart thread naming on the FIRST prompt: instant word-slug, then an
@@ -795,6 +805,7 @@ async fn resume_saved_session(
     id: Uuid,
     override_backend: Option<grok_config::Backend>,
     override_model: Option<String>,
+    approval_mode: Option<String>,
     plan_mode: Option<bool>,
     always_approve: Option<bool>,
 ) -> Result<(), String> {
@@ -836,7 +847,15 @@ async fn resume_saved_session(
     opts.isolate_worktree = false;
     opts.project_root = extract_meta_string(&rec.metadata_json, "projectRoot")
         .or_else(|| extract_meta_string(&rec.metadata_json, "project_root"));
-    // Honor the caller's current mode toggles; default to safe (plan on, yolo off).
+    // Honor the caller's current stance. An explicit approval_mode wins;
+    // otherwise fall back to the legacy booleans (default: plan on, yolo off).
+    opts.approval_mode = approval_mode.as_deref().and_then(|m| match m {
+        "plan" => Some(grok_control_core::ApprovalMode::Plan),
+        "auto" => Some(grok_control_core::ApprovalMode::Auto),
+        "yolo" | "always_approve" => Some(grok_control_core::ApprovalMode::Yolo),
+        "ask" | "default" => Some(grok_control_core::ApprovalMode::Ask),
+        _ => None,
+    });
     opts.always_approve = always_approve.unwrap_or(false);
     opts.plan_mode = if opts.always_approve {
         false
@@ -1108,6 +1127,57 @@ pub async fn set_explainer_enabled(
         cfg.save(&state.paths.config_file).map_err(err)?;
     }
     Ok(state.explainer.enabled())
+}
+
+/// Set a live session's approval stance: plan | ask | auto | yolo.
+#[tauri::command]
+pub async fn set_approval_mode(
+    state: State<'_, AppState>,
+    id: String,
+    mode: String,
+) -> Result<(), String> {
+    let id = Uuid::parse_str(&id).map_err(err)?;
+    let mode = match mode.to_lowercase().as_str() {
+        "plan" => grok_control_core::ApprovalMode::Plan,
+        "auto" => grok_control_core::ApprovalMode::Auto,
+        "yolo" | "always_approve" => grok_control_core::ApprovalMode::Yolo,
+        "ask" | "default" => grok_control_core::ApprovalMode::Ask,
+        other => return Err(format!("unknown approval mode: {other}")),
+    };
+    state
+        .registry
+        .set_approval_mode(id, mode)
+        .await
+        .map_err(err)?;
+    persist_session(&state, id).await;
+    Ok(())
+}
+
+/// "Always allow this" from an approval card — auto-approves matching
+/// requests for the rest of the session.
+#[tauri::command]
+pub async fn add_session_allow_rule(
+    state: State<'_, AppState>,
+    id: String,
+    pattern: String,
+) -> Result<(), String> {
+    let id = Uuid::parse_str(&id).map_err(err)?;
+    let pattern = pattern.trim().to_string();
+    if pattern.is_empty() {
+        return Err("empty rule".into());
+    }
+    state
+        .registry
+        .add_session_allow_rule(id, pattern.clone())
+        .await
+        .map_err(err)?;
+    let _ = state.persistence.append_message(
+        id,
+        "system",
+        format!("✓ always allowing `{pattern}` for the rest of this session"),
+        Utc::now(),
+    );
+    Ok(())
 }
 
 #[tauri::command]
