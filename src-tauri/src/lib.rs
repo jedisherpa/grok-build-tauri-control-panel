@@ -130,6 +130,7 @@ pub fn run() {
             commands::list_mcp_catalog,
             commands::set_mcp_credential,
             commands::list_mcp_credentials,
+            commands::remove_mcp_credential,
             commands::suggest_mcp_for_project,
             commands::preview_session_mcp,
             commands::add_skill,

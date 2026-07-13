@@ -697,6 +697,50 @@ body {
 /* (LIVE hint bar removed — the turn dock below the transcript is the single
    source of live turn status.) */
 
+/* MCP card manager */
+.mcp-cards { display: flex; flex-direction: column; gap: 8px; overflow: auto; min-height: 0; flex: 1; }
+.mcp-card { border: 1px solid var(--border); border-radius: 10px; padding: 8px 10px; }
+.mcp-card.disabled { opacity: 0.55; }
+.mcp-card-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.mcp-name { font-family: var(--font); font-size: 12px; color: var(--text); cursor: pointer; }
+.mcp-card-actions { margin-left: auto; display: flex; gap: 6px; align-items: center; }
+.mcp-card-actions .btn { font-size: 10px; padding: 2px 8px; }
+.mcp-toggle { display: flex; align-items: center; gap: 4px; font-size: 10px; color: var(--muted); cursor: pointer; }
+.mcp-toggle input { accent-color: var(--ok); margin: 0; }
+.mcp-dot {
+  width: 10px; height: 10px; border-radius: 50%; border: none; cursor: pointer; padding: 0;
+  background: var(--dim); flex-shrink: 0;
+}
+.mcp-dot.ok { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+.mcp-dot.warn { background: var(--warn); }
+.mcp-dot.error { background: var(--err); }
+.mcp-desc { font-size: 10px; margin-top: 3px; }
+.mcp-inline-cred { display: flex; gap: 6px; margin-top: 6px; }
+.mcp-inline-cred input { flex: 1; font-size: 11px; }
+.mcp-inline-cred .btn { font-size: 10px; }
+.mcp-edit-form { display: flex; flex-direction: column; gap: 5px; margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border); font-size: 10px; color: var(--muted); }
+.mcp-edit-form label { display: flex; align-items: center; gap: 6px; }
+.mcp-edit-form input[type="text"], .mcp-edit-form input[type="number"] { flex: 1; font-size: 11px; }
+.mcp-edit-form .btn { align-self: flex-start; }
+.mcp-doctor-detail { margin-top: 6px; font-size: 10px; white-space: pre-wrap; color: var(--muted); }
+.mcp-cred-section { margin-top: 10px; border-top: 1px dashed var(--border); padding-top: 4px; }
+.cred-list { display: flex; flex-direction: column; gap: 3px; margin-bottom: 6px; }
+.cred-row { display: flex; align-items: center; gap: 10px; font-size: 11px; }
+.cred-key { font-family: var(--font); color: var(--text); }
+.cred-row .btn { margin-left: auto; font-size: 10px; padding: 0 6px; }
+
+/* Composer MCP attach chips */
+.mcp-chips-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 6px; font-size: 10px; }
+.mcp-chip {
+  font-family: var(--font); font-size: 10px; padding: 1px 8px; border-radius: 999px;
+  background: transparent; color: var(--muted); border: 1px solid var(--border); cursor: pointer;
+}
+.mcp-chip.on {
+  color: var(--ok); border-color: color-mix(in srgb, var(--ok) 45%, var(--border));
+  background: color-mix(in srgb, var(--ok) 8%, transparent);
+}
+.mcp-preview { font-size: 9px; }
+
 /* Worktrees view */
 .wt-list { display: flex; flex-direction: column; gap: 10px; overflow: auto; min-height: 0; flex: 1; }
 .wt-repo { border: 1px solid var(--border); border-radius: 10px; padding: 6px 10px 8px; }

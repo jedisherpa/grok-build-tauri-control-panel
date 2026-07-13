@@ -1604,6 +1604,14 @@ pub async fn list_mcp_credentials(
 }
 
 #[tauri::command]
+pub async fn remove_mcp_credential(
+    state: State<'_, AppState>,
+    key: String,
+) -> Result<(), String> {
+    state.mcp.credentials().remove(&key).map_err(err)
+}
+
+#[tauri::command]
 pub async fn suggest_mcp_for_project(
     state: State<'_, AppState>,
     git_remote: Option<String>,

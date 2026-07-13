@@ -550,6 +550,7 @@ function activateView(name) {
   if (view) view.classList.add("active");
   // Per-view refresh hooks: data views load themselves on entry.
   if (name === "worktrees") refreshWorktrees();
+  if (name === "mcp") refreshMcpView();
 }
 
 document.querySelectorAll(".nav-item").forEach((btn) => {
@@ -2715,9 +2716,9 @@ async function startAcp() {
     const cwd = $("cwd").value.trim();
     if (!cwd) throw new Error("Set project cwd (absolute path)");
     const model = currentModel();
-    const mcpNames = parseCsv($("mcp-attach-session")?.value || "");
-    // Typing a server name into the attach box IS the user's approval —
-    // the backend still gates unknown/auto servers on its high-risk policy.
+    // Checked chips are the user's attach selection AND their high-risk
+    // approval; auto-attach servers ride along via includeAutoMcp.
+    const mcpNames = [...(state.mcpAttach || [])];
     const highRisk = [...mcpNames];
     const opts = {
       mode: "acp",
@@ -2729,7 +2730,7 @@ async function startAcp() {
       projectRoot: null,
       mcpServerNames: mcpNames,
       approvedHighRiskMcp: highRisk,
-      includeAutoMcp: false,
+      includeAutoMcp: true,
       mcpServers: [],
       rules: [],
       permissionAllow: [],
@@ -3240,42 +3241,251 @@ async function loadMcpCatalog() {
   }
 }
 
-$("btn-mcp-list").onclick = async () => {
+// ── MCP card manager ──────────────────────────────────────────────────────
+const mcpView = {
+  servers: [],
+  credentials: [],
+  doctor: new Map(), // name → DoctorReport
+};
+
+function credentialKeysFor(server) {
+  return server.credentialKeys || server.credential_keys || [];
+}
+
+function credentialPresent(key) {
+  return mcpView.credentials.some((c) => c.key === key && c.present);
+}
+
+async function refreshMcpView() {
+  const root = $("mcp-cards");
+  if (!root) return;
   try {
-    $("mcp-out").textContent = JSON.stringify(await invoke("list_mcp_servers"), null, 2);
+    [mcpView.servers, mcpView.credentials] = await Promise.all([
+      invoke("list_mcp_servers"),
+      invoke("list_mcp_credentials").catch(() => []),
+    ]);
+  } catch (e) {
+    root.innerHTML = `<div class="empty-hint">Failed to load servers: ${escapeHtml(String(e))}</div>`;
+    return;
+  }
+  renderMcpCards();
+  renderCredList();
+  renderMcpChips();
+}
+
+function doctorDot(name) {
+  const rep = mcpView.doctor.get(name);
+  const cls = !rep ? "unknown" : rep.status === "ok" ? "ok" : rep.status === "warn" ? "warn" : "error";
+  const title = rep ? rep.messages?.join("\n") || rep.status : "not checked — click to run";
+  return `<button class="mcp-dot ${cls}" data-name="${escapeHtml(name)}" title="${escapeHtml(title)}"></button>`;
+}
+
+function renderMcpCards() {
+  const root = $("mcp-cards");
+  if (!root) return;
+  if (!mcpView.servers.length) {
+    root.innerHTML = `<div class="empty-hint">No servers configured — add one from the catalog below.</div>`;
+    return;
+  }
+  root.innerHTML = mcpView.servers
+    .map((s) => {
+      const creds = credentialKeysFor(s);
+      const missing = creds.filter((k) => !credentialPresent(k));
+      const badges = [
+        s.highRisk || s.high_risk ? `<span class="badge needs-sync">high-risk</span>` : "",
+        s.requiresApproval || s.requires_approval
+          ? `<span class="badge">needs approval</span>`
+          : "",
+        (s.autoAttach ?? s.auto_attach)
+          ? `<span class="badge branch">auto-attach</span>`
+          : "",
+        missing.length
+          ? `<span class="badge failed" title="Set below to make this server usable">needs ${escapeHtml(missing.join(", "))}</span>`
+          : "",
+      ].join("");
+      const rep = mcpView.doctor.get(s.name);
+      const detail = rep
+        ? `<div class="mcp-doctor-detail" style="display:none">${escapeHtml(
+            (rep.messages || []).join("\n")
+          )}</div>`
+        : "";
+      const enabled = !!s.enabled;
+      return `<div class="mcp-card${enabled ? "" : " disabled"}" data-name="${escapeHtml(s.name)}">
+  <div class="mcp-card-head">
+    ${doctorDot(s.name)}
+    <span class="mcp-name">${escapeHtml(s.name)}</span>
+    <span class="muted">${escapeHtml(s.kind || "")} · ${escapeHtml(String(s.transport || ""))}</span>
+    ${badges}
+    <span class="mcp-card-actions">
+      <label class="mcp-toggle" title="${enabled ? "Enabled — attachable to threads" : "Disabled — never loads"}">
+        <input type="checkbox" class="mcp-enable" data-name="${escapeHtml(s.name)}" ${enabled ? "checked" : ""} />
+        <span>${enabled ? "on" : "off"}</span>
+      </label>
+      <button class="btn ghost mcp-edit" data-name="${escapeHtml(s.name)}">Edit</button>
+      <button class="btn ghost danger mcp-del" data-name="${escapeHtml(s.name)}">Remove</button>
+    </span>
+  </div>
+  ${s.description ? `<div class="mcp-desc muted">${escapeHtml(s.description)}</div>` : ""}
+  ${
+    missing.length
+      ? `<div class="mcp-inline-cred">
+          <input type="password" class="mcp-cred-val" placeholder="${escapeHtml(missing[0])} value" />
+          <button class="btn mcp-cred-save" data-key="${escapeHtml(missing[0])}">Set ${escapeHtml(missing[0])}</button>
+        </div>`
+      : ""
+  }
+  <div class="mcp-edit-form" style="display:none">
+    <label>allowed paths <input type="text" class="mcp-f-paths" value="${escapeHtml((s.allowedPaths || s.allowed_paths || []).join(", "))}" /></label>
+    <label>startup timeout <input type="number" class="mcp-f-startup" value="${Number(s.startupTimeoutSec ?? s.startup_timeout_sec ?? 60)}" /></label>
+    <label>tool timeout <input type="number" class="mcp-f-tool" value="${Number(s.toolTimeoutSec ?? s.tool_timeout_sec ?? 120)}" /></label>
+    <label><input type="checkbox" class="mcp-f-auto" ${(s.autoAttach ?? s.auto_attach) ? "checked" : ""} /> auto-attach to new threads</label>
+    <label><input type="checkbox" class="mcp-f-approval" ${(s.requiresApproval ?? s.requires_approval) ? "checked" : ""} /> requires approval</label>
+    <button class="btn primary mcp-f-save" data-name="${escapeHtml(s.name)}">Save</button>
+  </div>
+  ${detail}
+</div>`;
+    })
+    .join("");
+  wireMcpCards(root);
+}
+
+function wireMcpCards(root) {
+  root.querySelectorAll(".mcp-enable").forEach((el) => {
+    el.onchange = async () => {
+      try {
+        await invoke("toggle_mcp", { name: el.dataset.name, enabled: el.checked });
+        pushEvent(`mcp ${el.dataset.name} ${el.checked ? "enabled" : "disabled"}`, "ok", null, { force: true });
+        refreshMcpView();
+      } catch (e) {
+        toastError(e);
+        refreshMcpView();
+      }
+    };
+  });
+  root.querySelectorAll(".mcp-dot").forEach((el) => {
+    el.onclick = () => runMcpDoctor(el.dataset.name);
+  });
+  root.querySelectorAll(".mcp-card-head .mcp-name").forEach((el) => {
+    el.onclick = () => {
+      const detail = el.closest(".mcp-card")?.querySelector(".mcp-doctor-detail");
+      if (detail) detail.style.display = detail.style.display === "none" ? "" : "none";
+    };
+  });
+  root.querySelectorAll(".mcp-edit").forEach((el) => {
+    el.onclick = () => {
+      const form = el.closest(".mcp-card")?.querySelector(".mcp-edit-form");
+      if (form) form.style.display = form.style.display === "none" ? "" : "none";
+    };
+  });
+  root.querySelectorAll(".mcp-f-save").forEach((el) => {
+    el.onclick = async () => {
+      const card = el.closest(".mcp-card");
+      try {
+        await invoke("update_mcp_server", {
+          request: {
+            name: el.dataset.name,
+            enabled: null,
+            args: null,
+            url: null,
+            env: null,
+            allowedPaths: parseCsv(card.querySelector(".mcp-f-paths")?.value || "") || null,
+            readOnly: null,
+            autoAttach: !!card.querySelector(".mcp-f-auto")?.checked,
+            description: null,
+            headers: null,
+            startupTimeoutSec: Number(card.querySelector(".mcp-f-startup")?.value) || null,
+            toolTimeoutSec: Number(card.querySelector(".mcp-f-tool")?.value) || null,
+            rateLimitPerMin: null,
+          },
+        });
+        pushEvent(`mcp ${el.dataset.name} updated`, "ok", null, { force: true });
+        refreshMcpView();
+      } catch (e) {
+        toastError(e);
+      }
+    };
+  });
+  root.querySelectorAll(".mcp-del").forEach((el) => {
+    el.onclick = async () => {
+      const ok = await askConfirm(`Remove MCP server "${el.dataset.name}"?`, {
+        title: "Remove MCP server",
+      });
+      if (!ok) return;
+      try {
+        await invoke("remove_mcp_server", { name: el.dataset.name });
+        refreshMcpView();
+      } catch (e) {
+        toastError(e);
+      }
+    };
+  });
+  root.querySelectorAll(".mcp-cred-save").forEach((el) => {
+    el.onclick = async () => {
+      const val = el.closest(".mcp-inline-cred")?.querySelector(".mcp-cred-val")?.value;
+      if (!val) return;
+      try {
+        await invoke("set_mcp_credential", { key: el.dataset.key, value: val });
+        pushEvent(`credential ${el.dataset.key} saved`, "ok", null, { force: true });
+        refreshMcpView();
+      } catch (e) {
+        toastError(e);
+      }
+    };
+  });
+}
+
+async function runMcpDoctor(name) {
+  try {
+    const reports = await invoke("doctor_mcp_server", { name: name || null });
+    for (const r of reports || []) mcpView.doctor.set(r.name, r);
+    renderMcpCards();
   } catch (e) {
     toastError(e);
   }
-};
-$("btn-mcp-catalog").onclick = async () => {
-  try {
-    $("mcp-out").textContent = JSON.stringify(await invoke("list_mcp_catalog"), null, 2);
-  } catch (e) {
-    toastError(e);
+}
+
+function renderCredList() {
+  const root = $("cred-list");
+  if (!root) return;
+  if (!mcpView.credentials.length) {
+    root.innerHTML = `<div class="empty-hint">No secrets stored</div>`;
+    return;
   }
-};
-$("btn-mcp-doctor").onclick = async () => {
-  try {
-    $("mcp-out").textContent = JSON.stringify(
-      await invoke("doctor_mcp_server", { name: null }),
-      null,
-      2
-    );
-  } catch (e) {
-    toastError(e);
-  }
-};
-$("btn-mcp-tools").onclick = async () => {
-  try {
-    $("mcp-out").textContent = JSON.stringify(
-      await invoke("list_mcp_tools", { name: null }),
-      null,
-      2
-    );
-  } catch (e) {
-    toastError(e);
-  }
-};
+  root.innerHTML = mcpView.credentials
+    .map(
+      (c) => `<div class="cred-row">
+  <span class="cred-key">${escapeHtml(c.key)}</span>
+  <span class="muted">${escapeHtml(c.masked || "••••")}</span>
+  <button class="btn ghost danger cred-del" data-key="${escapeHtml(c.key)}">✕</button>
+</div>`
+    )
+    .join("");
+  root.querySelectorAll(".cred-del").forEach((el) => {
+    el.onclick = async () => {
+      const ok = await askConfirm(`Delete stored secret ${el.dataset.key}?`, {
+        title: "Delete credential",
+      });
+      if (!ok) return;
+      try {
+        await invoke("remove_mcp_credential", { key: el.dataset.key });
+        refreshMcpView();
+      } catch (e) {
+        toastError(e);
+      }
+    };
+  });
+}
+
+$("btn-mcp-refresh") && ($("btn-mcp-refresh").onclick = refreshMcpView);
+$("btn-mcp-doctor-all") && ($("btn-mcp-doctor-all").onclick = () => runMcpDoctor(null));
+// Paths input only applies to filesystem servers — hide it otherwise.
+$("mcp-catalog") &&
+  ($("mcp-catalog").onchange = () => {
+    const isFs = $("mcp-catalog").value === "filesystem";
+    const paths = $("mcp-paths");
+    if (paths) paths.style.display = isFs ? "" : "none";
+  });
+
 $("btn-mcp-add").onclick = async () => {
   try {
     const fromCatalog = $("mcp-catalog").value;
@@ -3303,19 +3513,10 @@ $("btn-mcp-add").onclick = async () => {
       rateLimitPerMin: fromCatalog === "grok_build" ? 10 : null,
       credentialKeys: null,
     };
-    $("mcp-out").textContent = JSON.stringify(
-      await invoke("add_mcp_server", { request }),
-      null,
-      2
-    );
-  } catch (e) {
-    toastError(e);
-  }
-};
-$("btn-mcp-remove").onclick = async () => {
-  try {
-    await invoke("remove_mcp_server", { name: $("mcp-name").value });
-    $("mcp-out").textContent = JSON.stringify(await invoke("list_mcp_servers"), null, 2);
+    await invoke("add_mcp_server", { request });
+    $("mcp-name").value = "";
+    pushEvent(`mcp ${name} added`, "ok", null, { force: true });
+    refreshMcpView();
   } catch (e) {
     toastError(e);
   }
@@ -3327,11 +3528,74 @@ $("btn-cred-set").onclick = async () => {
       value: $("cred-value").value,
     });
     $("cred-value").value = "";
-    $("mcp-out").textContent = JSON.stringify(await invoke("list_mcp_credentials"), null, 2);
+    $("cred-key").value = "";
+    refreshMcpView();
   } catch (e) {
     toastError(e);
   }
 };
+
+// ── Composer MCP attach chips ─────────────────────────────────────────────
+// Which enabled servers ride along on the NEXT new thread; checking a
+// high-risk chip counts as explicit approval (same semantics the CSV had).
+function renderMcpChips() {
+  const row = $("mcp-chips-row");
+  const box = $("mcp-chips");
+  if (!row || !box) return;
+  const enabled = (mcpView.servers || []).filter((s) => s.enabled);
+  if (!enabled.length) {
+    row.style.display = "none";
+    return;
+  }
+  row.style.display = "";
+  if (!state.mcpAttach) state.mcpAttach = new Set();
+  box.innerHTML = enabled
+    .map((s) => {
+      const on = state.mcpAttach.has(s.name);
+      const risky = s.highRisk || s.high_risk || s.requiresApproval || s.requires_approval;
+      return `<button class="mcp-chip${on ? " on" : ""}" data-name="${escapeHtml(s.name)}"
+        title="${risky ? "High-risk — checking counts as approval. " : ""}Attach ${escapeHtml(s.name)} to the next new thread">${risky ? "⚠ " : ""}${escapeHtml(s.name)}</button>`;
+    })
+    .join("");
+  box.querySelectorAll(".mcp-chip").forEach((el) => {
+    el.onclick = () => {
+      const n = el.dataset.name;
+      if (state.mcpAttach.has(n)) state.mcpAttach.delete(n);
+      else state.mcpAttach.add(n);
+      renderMcpChips();
+      updateMcpPreview();
+    };
+  });
+  updateMcpPreview();
+}
+
+let mcpPreviewTimer = null;
+function updateMcpPreview() {
+  const el = $("mcp-preview");
+  if (!el) return;
+  clearTimeout(mcpPreviewTimer);
+  mcpPreviewTimer = setTimeout(async () => {
+    const names = [...(state.mcpAttach || [])];
+    if (!names.length) {
+      el.textContent = "";
+      return;
+    }
+    try {
+      const res = await invoke("preview_session_mcp", {
+        names,
+        approvedHighRisk: names,
+        includeAuto: true,
+      });
+      const attached = res.attached || [];
+      const skipped = (res.skipped || []).map((s) => `${s.name} (${s.reason})`);
+      el.textContent =
+        `will attach: ${attached.join(", ") || "none"}` +
+        (skipped.length ? ` · skipped: ${skipped.join("; ")}` : "");
+    } catch (_) {
+      el.textContent = "";
+    }
+  }, 250);
+}
 
 // Worktrees
 // ── Worktrees view: auto-listed per known project ────────────────────────
@@ -3981,6 +4245,7 @@ async function boot() {
   await refreshStatus().catch(toastError);
   await loadBackends().catch(toastError);
   await loadMcpCatalog().catch(() => {});
+  await refreshMcpView().catch(() => {});
   await loadProjects();
   await refreshSessions().catch(toastError);
   await refreshDevStatus().catch(() => {});

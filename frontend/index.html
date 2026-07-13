@@ -199,30 +199,41 @@
                   title="Isolate new threads in their own git worktree (parallel threads can't overwrite each other)">🌱</button>
               </div>
             </div>
+            <div id="mcp-chips-row" class="mcp-chips-row" style="display:none">
+              <span class="muted">mcp:</span>
+              <span id="mcp-chips" class="mcp-chips"></span>
+              <span id="mcp-preview" class="mcp-preview muted"></span>
+            </div>
           </footer>
         </section>
 
         <section id="view-mcp" class="view">
           <div class="pane-pad">
             <div class="toolbar">
-              <button id="btn-mcp-list" class="btn">List</button>
-              <button id="btn-mcp-catalog" class="btn">Catalog</button>
-              <button id="btn-mcp-doctor" class="btn">Doctor</button>
-              <button id="btn-mcp-tools" class="btn">Tools</button>
+              <button id="btn-mcp-refresh" class="btn">↻ Refresh</button>
+              <button id="btn-mcp-doctor-all" class="btn" title="Run health checks on every server">Check all</button>
+              <span class="muted">Servers attach to threads via the chips next to Send.</span>
             </div>
-            <div class="toolbar">
-              <select id="mcp-catalog"></select>
-              <input id="mcp-name" type="text" placeholder="name" />
-              <input id="mcp-paths" type="text" placeholder="paths (filesystem)" class="grow" />
+            <div id="mcp-cards" class="mcp-cards">
+              <div class="empty-hint">Loading servers…</div>
+            </div>
+            <div class="toolbar mcp-add-row">
+              <span class="muted">Add from catalog:</span>
+              <select id="mcp-catalog" title="Template"></select>
+              <input id="mcp-name" type="text" placeholder="instance name (optional)" title="Defaults to the template id" />
+              <input id="mcp-paths" type="text" placeholder="allowed paths, comma-separated" class="grow" style="display:none" />
               <button id="btn-mcp-add" class="btn primary">Add</button>
-              <button id="btn-mcp-remove" class="btn danger ghost">Remove</button>
             </div>
-            <div class="toolbar">
-              <input id="cred-key" type="text" placeholder="GITHUB_TOKEN" />
-              <input id="cred-value" type="password" placeholder="secret" class="grow" />
-              <button id="btn-cred-set" class="btn">Save secret</button>
+            <div class="mcp-cred-section">
+              <div class="section-label"><span>Credentials</span></div>
+              <div id="cred-list" class="cred-list"><div class="empty-hint">No secrets stored</div></div>
+              <div class="toolbar">
+                <input id="cred-key" type="text" placeholder="KEY (e.g. GITHUB_TOKEN)" />
+                <input id="cred-value" type="password" placeholder="secret value" class="grow" />
+                <button id="btn-cred-set" class="btn">Save secret</button>
+              </div>
             </div>
-            <pre id="mcp-out" class="mono-pane"></pre>
+            <pre id="mcp-out" class="mono-pane" style="display:none"></pre>
           </div>
         </section>
 
@@ -266,10 +277,6 @@
               <button id="btn-config" class="btn">Config</button>
               <button id="btn-haven" class="btn">Haven</button>
               <button id="btn-shutdown" class="btn danger ghost">Shutdown all</button>
-            </div>
-            <div class="toolbar">
-              <input id="model" type="text" placeholder="legacy model override (header selector wins)" />
-              <input id="mcp-attach-session" type="text" placeholder="MCP attach: github, docs-fs" class="grow" />
             </div>
 
             <div class="settings-card" id="haven-card">
