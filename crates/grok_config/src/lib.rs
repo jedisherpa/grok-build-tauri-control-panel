@@ -89,8 +89,8 @@ impl Default for GrokConfig {
             max_concurrent_sessions: 10,
             session_timeout_secs: 3600,
             always_approve_default: false,
-            plan_mode_default: true,
-            approval_mode_default: None,
+            plan_mode_default: false,
+            approval_mode_default: Some("ask".into()),
             sandbox_profile: SandboxProfile::Workspace,
             worktrees_root: None,
             worktree_isolation_default: true,
@@ -394,8 +394,12 @@ mod tests {
         let back: GrokConfig = toml::from_str(&s).unwrap();
         assert_eq!(cfg.default_model, back.default_model);
         assert_eq!(cfg.max_concurrent_sessions, back.max_concurrent_sessions);
+        // No stance is pre-selected: new threads confirm every request until
+        // the user picks plan/auto/yolo.
         assert!(!cfg.always_approve_default);
-        assert!(cfg.plan_mode_default);
+        assert!(!cfg.plan_mode_default);
+        assert_eq!(cfg.approval_mode_default.as_deref(), Some("ask"));
+        assert_eq!(back.approval_mode_default.as_deref(), Some("ask"));
     }
 
     #[test]

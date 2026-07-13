@@ -860,7 +860,7 @@ async fn resume_saved_session(
     opts.plan_mode = if opts.always_approve {
         false
     } else {
-        plan_mode.unwrap_or(true)
+        plan_mode.unwrap_or(false)
     };
     opts.mcp_server_names = extract_mcp_from_meta(&rec.metadata_json);
     // Re-apply the high-risk approvals granted when the thread was created —
@@ -2042,6 +2042,12 @@ fn build_thread_list(state: &AppState) -> Vec<ThreadDto> {
             worktree: m.worktree,
             mcp_servers: m.mcp_servers,
             label: m.label,
+            approval_mode: Some(
+                serde_json::to_value(m.approval_mode)
+                    .ok()
+                    .and_then(|v| v.as_str().map(String::from))
+                    .unwrap_or_else(|| "ask".into()),
+            ),
             project_root: m.project_root,
             brain_mode: Some(m.brain_mode.as_str().into()),
         });
@@ -2076,6 +2082,8 @@ fn build_thread_list(state: &AppState) -> Vec<ThreadDto> {
                 worktree: rec.worktree,
                 mcp_servers: mcp,
                 label,
+                approval_mode: extract_meta_string(&rec.metadata_json, "approvalMode")
+                    .or_else(|| extract_meta_string(&rec.metadata_json, "approval_mode")),
                 project_root,
                 brain_mode: None,
             });

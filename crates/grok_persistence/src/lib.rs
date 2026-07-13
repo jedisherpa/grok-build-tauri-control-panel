@@ -84,6 +84,9 @@ pub struct ThreadDto {
     pub worktree: Option<String>,
     pub mcp_servers: Vec<String>,
     pub label: Option<String>,
+    /// Approval stance this thread runs with (plan | ask | auto | yolo).
+    #[serde(default)]
+    pub approval_mode: Option<String>,
     /// Original project folder when cwd is an isolated thread worktree.
     #[serde(default)]
     pub project_root: Option<String>,

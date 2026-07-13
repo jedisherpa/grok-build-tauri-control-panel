@@ -2637,6 +2637,32 @@ function setApprovalMode(mode) {
   setMode("plan-mode", mode === "plan");
   setMode("auto-mode", mode === "auto");
   setMode("always-approve", mode === "yolo");
+  localStorage.setItem("bomb.approvalMode", mode);
+}
+
+const APPROVAL_CYCLE = ["ask", "plan", "auto", "yolo"];
+const APPROVAL_LABEL = {
+  ask: "ask — confirm everything",
+  plan: "plan — propose first, change nothing",
+  auto: "auto — reads/edits/safe commands run; risky ones ask",
+  yolo: "yolo — approve everything",
+};
+
+/** Shift+Tab cycles the stance (ask → plan → auto → yolo → …), like the CLIs. */
+async function cycleApprovalMode() {
+  const cur = currentApprovalMode();
+  const next = APPROVAL_CYCLE[(APPROVAL_CYCLE.indexOf(cur) + 1) % APPROVAL_CYCLE.length];
+  setApprovalMode(next);
+  pushEvent(`approvals → ${APPROVAL_LABEL[next]}`, next === "yolo" ? "err" : "ok", null, {
+    force: true,
+  });
+  const sess = state.sessions.find((s) => s.id === state.selectedSession);
+  if (!sess || sess.live === false) return;
+  try {
+    await invoke("set_approval_mode", { id: state.selectedSession, mode: next });
+  } catch (e) {
+    pushEvent(`mode change failed: ${e?.message || e}`, "err", "error", { force: true });
+  }
 }
 
 function wireModeButtons() {
@@ -2705,6 +2731,9 @@ function populateModelSelect(backendInfo) {
 /// later selector change is an explicit "switch this thread" intent.
 function syncSelectorsToSession(sess) {
   if (!sess) return;
+  // Each thread remembers the stance it was last run with.
+  const mode = sess.approvalMode || sess.approval_mode;
+  if (mode) setApprovalMode(mode);
   const backendSel = $("agent-backend");
   const modelSel = $("agent-model");
   if (!backendSel || !modelSel || !state.backends?.length) return;
@@ -3310,6 +3339,20 @@ $("prompt").addEventListener("keydown", (e) => {
     e.preventDefault();
     sendPrompt();
   }
+});
+
+// Shift+Tab cycles the approval stance from anywhere (including the prompt
+// box, where Tab would otherwise move focus).
+document.addEventListener("keydown", (e) => {
+  if (e.key !== "Tab" || !e.shiftKey || e.metaKey || e.ctrlKey || e.altKey) return;
+  const el = document.activeElement;
+  const typing =
+    el && (el.tagName === "INPUT" || el.tagName === "SELECT" || el.tagName === "TEXTAREA");
+  // Allow normal reverse-tabbing through form fields — except the prompt box,
+  // which is where you actually want the shortcut.
+  if (typing && el.id !== "prompt") return;
+  e.preventDefault();
+  cycleApprovalMode();
 });
 
 // MCP view
@@ -4377,15 +4420,13 @@ function wireExplainer() {
       state.explainerModel = cfg?.explainer_model || cfg?.explainerModel || null;
       const wtDefault = cfg?.worktree_isolation_default ?? cfg?.worktreeIsolationDefault ?? true;
       setMode("worktree-mode", !!wtDefault);
-      // Composer pills start on the configured default stance.
+      // Composer pills: last-used stance wins, else the configured default.
+      // Nothing is pre-selected unless it was chosen before ("ask").
       const modeDefault =
+        localStorage.getItem("bomb.approvalMode") ||
         cfg?.approval_mode_default ||
         cfg?.approvalModeDefault ||
-        ((cfg?.always_approve_default ?? cfg?.alwaysApproveDefault)
-          ? "yolo"
-          : (cfg?.plan_mode_default ?? cfg?.planModeDefault)
-            ? "plan"
-            : "ask");
+        "ask";
       setApprovalMode(modeDefault);
       applyToggle();
       renderExplainFeed();

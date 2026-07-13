@@ -59,7 +59,9 @@ impl Default for SpawnOptions {
             rules: Vec::new(),
             approval_mode: None,
             always_approve: false,
-            plan_mode: true,
+            // No stance by default — every request is confirmed until the user
+            // picks plan/auto/yolo.
+            plan_mode: false,
             sandbox_profile: Some("workspace".into()),
             mcp_servers: Vec::new(),
             mcp_server_names: Vec::new(),
