@@ -13,10 +13,12 @@ use tokio::process::{Child, Command};
 use tracing::{debug, warn};
 
 pub mod auth;
+pub mod backend_auth;
 pub mod inspect;
 pub mod spawn_opts;
 
 pub use auth::{AuthStatus, LoginManager, LoginPhase, LoginResult, LoginSessionState};
+pub use backend_auth::{AuthKind, BackendAuth};
 pub use inspect::{GrokInspect, InspectReport};
 pub use spawn_opts::HeadlessSpawnOptions;
 

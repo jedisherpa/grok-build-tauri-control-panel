@@ -1890,37 +1890,135 @@ function handleControlEvent(ev) {
   }
 }
 
-// ── API actions ─────────────────────────────────────────────────────────
+// ── Services (per-backend sign-in) ──────────────────────────────────────
+// Each CLI owns its own credentials; we only report what it says about itself
+// and hand sign-in back to it. The grok row can log in inside the panel (device
+// code); claude/codex need a TTY + browser, so those go out to a terminal.
+
+/// The grok row's button, which the device-code flow drives directly.
+function grokLoginBtn() {
+  return document.querySelector('#services .svc-btn[data-backend="grok"]');
+}
+
+function serviceFor(backend) {
+  return (state.services || []).find((s) => s.backend === backend) || null;
+}
+
+function renderServices(list) {
+  const host = $("services");
+  if (!host) return;
+  host.innerHTML = "";
+  for (const s of list) {
+    const envKey = s.kind === "api_key";
+    const row = document.createElement("div");
+    row.className = `svc-row ${
+      !s.installed ? "missing" : s.loggedIn ? "on" : "off"
+    }`;
+
+    const dot = document.createElement("span");
+    dot.className = "svc-dot";
+    dot.title = s.message;
+
+    const text = document.createElement("div");
+    text.className = "svc-text";
+    const name = document.createElement("div");
+    name.className = "svc-name";
+    name.textContent = s.displayName;
+    const meta = document.createElement("div");
+    meta.className = "svc-meta";
+    meta.textContent = !s.installed
+      ? s.installHint || "not installed"
+      : s.loggedIn
+        ? [s.account, s.plan].filter(Boolean).join(" · ") || "signed in"
+        : "not signed in";
+    meta.title = !s.installed ? `Install with: ${s.installHint || "—"}` : s.message;
+    text.append(name, meta);
+
+    row.append(dot, text);
+
+    // An env API key is not a session — there is nothing to sign in or out of.
+    if (s.installed && !envKey) {
+      const btn = document.createElement("button");
+      btn.className = "btn ghost svc-btn";
+      btn.dataset.backend = s.backend;
+      btn.dataset.act = s.loggedIn ? "logout" : "login";
+      btn.textContent = s.loggedIn ? "Sign out" : "Sign in";
+      btn.title = s.loggedIn
+        ? `Runs \`${s.backend === "grok" ? "grok logout" : s.backend + " logout"}\``
+        : s.inAppLogin
+          ? "Sign in here — you'll confirm a code in the browser"
+          : `Opens a Terminal running \`${s.loginCommand}\``;
+      if (s.backend === "grok" && state.loggingIn) {
+        btn.disabled = true;
+        btn.textContent = "Signing in…";
+      }
+      row.append(btn);
+    }
+    host.append(row);
+  }
+}
+
+async function refreshServices() {
+  try {
+    const list = await invoke("backend_auth_status");
+    state.services = list;
+    renderServices(list);
+    // startAcp()'s grok gate still reads state.auth; keep it in step.
+    const g = list.find((s) => s.backend === "grok");
+    if (g) {
+      state.auth = {
+        loggedIn: g.loggedIn,
+        email: g.account,
+        authMode: g.plan,
+        message: g.message,
+      };
+    }
+    return list;
+  } catch (e) {
+    const host = $("services");
+    if (host) host.innerHTML = `<div class="empty-hint">Auth check failed: ${escapeHtml(String(e.message || e))}</div>`;
+    return [];
+  }
+}
+
+// Terminal sign-ins finish outside the app, so watch for the flip.
+let servicesPollTimer = null;
+function startServicesPoll(ms = 2000, forMs = 180_000) {
+  if (servicesPollTimer) clearInterval(servicesPollTimer);
+  const deadline = Date.now() + forMs;
+  const before = JSON.stringify((state.services || []).map((s) => s.loggedIn));
+  servicesPollTimer = setInterval(async () => {
+    const list = await refreshServices();
+    const now = JSON.stringify(list.map((s) => s.loggedIn));
+    if (now !== before || Date.now() > deadline) {
+      clearInterval(servicesPollTimer);
+      servicesPollTimer = null;
+      if (now !== before) {
+        await refreshStatus().catch(() => {});
+        pushEvent("Sign-in status updated", "ok");
+      }
+    }
+  }, ms);
+}
+
+/// Legacy shim: the grok device-code flow reports through here.
 function renderAuth(auth) {
   state.auth = auth;
-  const label = $("auth-label");
-  const loginBtn = $("btn-login");
-  const logoutBtn = $("btn-logout");
+  const svc = serviceFor("grok");
+  if (svc && auth) {
+    svc.loggedIn = !!auth.loggedIn;
+    svc.account = auth.email || svc.account;
+    svc.plan = auth.authMode || svc.plan;
+    svc.message = auth.message || svc.message;
+    svc.kind = auth.loggedIn ? "subscription" : "none";
+    renderServices(state.services);
+  }
   const hint = $("auth-hint");
   const panel = $("auth-code-panel");
-  if (!auth) {
-    label.textContent = "Auth unknown";
-    return;
-  }
-  if (auth.loggedIn) {
-    const name = auth.email || auth.firstName || "Grok user";
-    label.textContent = name;
-    label.title = auth.message || name;
-    loginBtn.style.display = "none";
-    logoutBtn.style.display = "block";
-    if (panel) panel.style.display = "none";
-    hint.textContent = auth.authMode ? `via ${auth.authMode}` : "Signed in";
+  if (auth?.loggedIn) {
     state.loggingIn = false;
-  } else {
-    label.textContent = "Not signed in";
-    loginBtn.style.display = "block";
-    logoutBtn.style.display = "none";
-    loginBtn.disabled = !!state.loggingIn;
-    loginBtn.textContent = state.loggingIn ? "Login in progress…" : "Log in with Grok";
-    if (!state.loggingIn) {
-      hint.textContent = "Opens Grok / xAI sign-in. You’ll confirm a code in the browser.";
-      if (panel) panel.style.display = "none";
-    }
+    if (panel) panel.style.display = "none";
+    if (hint) hint.textContent = "";
   }
 }
 
@@ -1929,7 +2027,7 @@ function renderLoginSession(st) {
   const panel = $("auth-code-panel");
   const codeEl = $("auth-confirm-code");
   const hint = $("auth-hint");
-  const loginBtn = $("btn-login");
+  const loginBtn = grokLoginBtn();
 
   if (st.status?.loggedIn || st.phase === "completed") {
     state.loggingIn = false;
@@ -1941,16 +2039,20 @@ function renderLoginSession(st) {
 
   if (st.phase === "failed" && !st.active) {
     state.loggingIn = false;
-    loginBtn.disabled = false;
-    loginBtn.textContent = "Log in with Grok";
+    if (loginBtn) {
+      loginBtn.disabled = false;
+      loginBtn.textContent = "Sign in";
+    }
     if (panel) panel.style.display = "none";
     hint.textContent = st.instructions || "Login failed — try again.";
     return;
   }
 
   state.loggingIn = true;
-  loginBtn.disabled = true;
-  loginBtn.textContent = "Login in progress…";
+  if (loginBtn) {
+    loginBtn.disabled = true;
+    loginBtn.textContent = "Signing in…";
+  }
   if (panel) panel.style.display = "flex";
   if (st.confirmCode) {
     codeEl.textContent = st.confirmCode;
@@ -1991,20 +2093,6 @@ function startLoginPoll() {
   }, 1000);
 }
 
-async function refreshAuth() {
-  try {
-    const auth = await invoke("get_auth_status");
-    renderAuth(auth);
-    return auth;
-  } catch (e) {
-    renderAuth({
-      loggedIn: false,
-      message: String(e.message || e),
-    });
-    throw e;
-  }
-}
-
 async function refreshStatus() {
   const s = await invoke("get_runtime_status");
   state.ready = !!s.ready;
@@ -2014,7 +2102,7 @@ async function refreshStatus() {
     if ($("repo")) $("repo").value = s.defaultCwd;
   }
   if ($("sys-out")) $("sys-out").textContent = JSON.stringify(s, null, 2);
-  await refreshAuth().catch(() => {});
+  await refreshServices();
   return s;
 }
 
@@ -2045,8 +2133,7 @@ async function loginWithGrok() {
     state.loggingIn = false;
     toastError(e);
     $("auth-hint").textContent = String(e.message || e);
-    $("btn-login").disabled = false;
-    $("btn-login").textContent = "Log in with Grok";
+    renderServices(state.services || []);
   }
 }
 
@@ -2086,10 +2173,8 @@ async function cancelLogin() {
   state.loggingIn = false;
   $("auth-code-panel").style.display = "none";
   $("auth-paste-code").value = "";
-  $("btn-login").disabled = false;
-  $("btn-login").textContent = "Log in with Grok";
   $("auth-hint").textContent = "Login cancelled.";
-  await refreshAuth().catch(() => {});
+  await refreshServices();
 }
 
 async function logoutGrok() {
@@ -2807,27 +2892,45 @@ async function startAcp() {
   if (startBtn) startBtn.disabled = true;
   try {
     const backend = currentBackend();
-    // Grok login gate only applies to the grok backend; claude/codex ride
-    // their own CLI logins (or env API keys).
-    const auth =
-      backend === "grok" ? state.auth || (await refreshAuth().catch(() => null)) : null;
-    if (auth && !auth.loggedIn) {
-      const go = await askConfirm("Not signed in with Grok. Log in now?", {
+    // Each backend rides its own CLI login, so gate on that backend's status.
+    if (!state.services?.length) await refreshServices();
+    const svc = serviceFor(backend);
+    if (svc && !svc.installed) {
+      throw new Error(
+        `${svc.displayName} is not installed. Install it with: ${svc.installHint || "—"}`,
+      );
+    }
+    if (svc && !svc.loggedIn) {
+      const go = await askConfirm(`Not signed in to ${svc.displayName}. Sign in now?`, {
         title: "Sign in",
         kind: "info",
       });
-      if (go) {
+      if (!go) throw new Error(`Sign in to ${svc.displayName} first`);
+
+      if (svc.inAppLogin) {
         await loginWithGrok();
-        // The device-code flow finishes in the browser — wait for the poll
-        // to land instead of failing instantly.
+        // The device-code flow finishes in the browser — wait for the poll to
+        // land instead of failing instantly.
         const deadline = Date.now() + 120_000;
         while (state.loggingIn && Date.now() < deadline) {
           await new Promise((r) => setTimeout(r, 1000));
         }
-        await refreshAuth().catch(() => null);
-        if (!state.auth?.loggedIn) throw new Error("Login required before starting a session");
+        await refreshServices();
       } else {
-        throw new Error("Sign in with Grok first");
+        // claude/codex need a TTY: hand off and wait for the terminal to finish.
+        await invoke("open_backend_login", { backend, logout: false });
+        pushEvent(`Finish \`${svc.loginCommand}\` in the Terminal window`, "ok", null, {
+          force: true,
+        });
+        const deadline = Date.now() + 180_000;
+        while (Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 2000));
+          const list = await refreshServices();
+          if (list.find((s) => s.backend === backend)?.loggedIn) break;
+        }
+      }
+      if (!serviceFor(backend)?.loggedIn) {
+        throw new Error(`Sign in to ${svc.displayName} before starting a thread`);
       }
     }
     const cwd = $("cwd").value.trim();
@@ -3004,8 +3107,37 @@ $("btn-new-project") &&
       toastError(e);
     }
   });
-$("btn-login").onclick = loginWithGrok;
-$("btn-logout").onclick = logoutGrok;
+// Service rows are re-rendered on every status change, so delegate.
+$("services") &&
+  ($("services").onclick = async (e) => {
+    const btn = e.target.closest(".svc-btn");
+    if (!btn || btn.disabled) return;
+    const backend = btn.dataset.backend;
+    const logout = btn.dataset.act === "logout";
+
+    // Grok is the one backend whose device-code flow we can drive in-panel.
+    if (backend === "grok") return logout ? logoutGrok() : loginWithGrok();
+
+    const svc = serviceFor(backend);
+    btn.disabled = true;
+    btn.textContent = "In Terminal…";
+    try {
+      await invoke("open_backend_login", { backend, logout });
+      pushEvent(
+        `${svc?.displayName || backend}: finish \`${
+          logout ? "sign-out" : svc?.loginCommand || "sign-in"
+        }\` in the Terminal window`,
+        "ok",
+        null,
+        { force: true },
+      );
+      startServicesPoll(); // notice when it lands
+    } catch (err) {
+      toastError(err);
+      renderServices(state.services || []);
+    }
+  });
+$("btn-refresh-services") && ($("btn-refresh-services").onclick = () => refreshServices());
 
 // ── New project folder (top bar) ────────────────────────────────────────
 const MYSTIC_NAMES = [

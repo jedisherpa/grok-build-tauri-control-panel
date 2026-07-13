@@ -130,6 +130,60 @@ pub async fn get_auth_status() -> Result<grok_cli_wrapper::AuthStatus, String> {
     Ok(grok_cli_wrapper::GrokCli::auth_status())
 }
 
+/// Sign-in state for every backend: which services can actually run right now.
+#[tauri::command]
+pub async fn backend_auth_status() -> Result<Vec<grok_cli_wrapper::BackendAuth>, String> {
+    Ok(grok_cli_wrapper::backend_auth::all().await)
+}
+
+/// Hand a backend's sign-in (or sign-out) off to a real terminal window.
+///
+/// `claude auth login` and `codex login` drive a browser flow and expect a TTY,
+/// so we cannot run them headless the way we drive grok's device-code flow.
+/// The panel polls `backend_auth_status` afterwards to notice the result.
+#[tauri::command]
+pub async fn open_backend_login(backend: String, logout: bool) -> Result<(), String> {
+    let cmd = if logout {
+        grok_cli_wrapper::backend_auth::logout_command(&backend)
+    } else {
+        grok_cli_wrapper::backend_auth::login_command(&backend)
+    }
+    .ok_or_else(|| format!("no login command for backend {backend}"))?;
+
+    spawn_in_terminal(cmd).map_err(|e| format!("could not open a terminal: {e}"))
+}
+
+/// Open `cmd` in the platform's terminal. The command string is a fixed literal
+/// from `backend_auth`, never user input.
+fn spawn_in_terminal(cmd: &str) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        // `osascript` keeps the window open and focused so the user can see the
+        // browser prompt and any error the CLI prints.
+        let script = format!(
+            r#"tell application "Terminal"
+                 activate
+                 do script "{cmd}"
+               end tell"#
+        );
+        std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?;
+        return Ok(());
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = cmd;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "terminal hand-off is only wired up for macOS; run the command yourself",
+        ))
+    }
+}
+
 /// Start interactive login (device-code). Returns immediately with URL + confirm code.
 #[tauri::command]
 pub async fn start_grok_login(

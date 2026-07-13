@@ -81,6 +81,8 @@ pub fn run() {
             commands::set_last_cwd,
             commands::create_project_folder,
             commands::get_auth_status,
+            commands::backend_auth_status,
+            commands::open_backend_login,
             commands::start_grok_login,
             commands::start_grok_login_oauth,
             commands::grok_login_status,

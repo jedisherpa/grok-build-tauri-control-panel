@@ -266,6 +266,51 @@ body {
 }
 .auth-actions { display: flex; flex-direction: column; gap: 4px; }
 .auth-actions .btn { width: 100%; font-size: 12px; }
+
+/* Services: one row per agent backend — installed? signed in? as who? */
+.services-label { margin-bottom: 6px; }
+.services { display: flex; flex-direction: column; gap: 2px; }
+.svc-row {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 4px 2px;
+  border-radius: 6px;
+}
+.svc-row:hover { background: var(--bg-hover, rgba(255, 255, 255, 0.04)); }
+.svc-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 7px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.svc-row.on .svc-dot { background: var(--ok, #3fb950); box-shadow: 0 0 6px var(--ok, #3fb950); }
+.svc-row.off .svc-dot { background: var(--warn, #d29922); }
+.svc-row.missing .svc-dot { background: var(--border); }
+.svc-text { flex: 1 1 auto; min-width: 0; }
+.svc-name { font-size: 11px; line-height: 1.2; }
+.svc-row.missing .svc-name { color: var(--muted); }
+.svc-meta {
+  font-size: 10px;
+  color: var(--muted);
+  line-height: 1.25;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.svc-btn {
+  flex: 0 0 auto;
+  font-size: 10px;
+  padding: 2px 7px;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+/* Keep the affordance quiet until it is wanted — except when action is due. */
+.svc-row:hover .svc-btn,
+.svc-row.off .svc-btn,
+.svc-btn:focus-visible,
+.svc-btn:disabled { opacity: 1; }
 .auth-hint { font-size: 10px; margin-top: 6px; line-height: 1.35; word-break: break-word; white-space: pre-wrap; }
 .auth-code-panel {
   margin-top: 8px;

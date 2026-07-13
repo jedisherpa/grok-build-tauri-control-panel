@@ -52,10 +52,12 @@
 
         <div class="col-footer">
           <div id="auth-box" class="auth-box">
-            <div id="auth-label" class="auth-label muted">Checking login…</div>
-            <div class="auth-actions">
-              <button id="btn-login" class="btn primary" title="Sign in with Grok (browser)">Log in with Grok</button>
-              <button id="btn-logout" class="btn ghost danger" title="Sign out" style="display:none">Log out</button>
+            <div class="section-label services-label">
+              <span>Services</span>
+              <button id="btn-refresh-services" class="icon-btn" title="Re-check sign-in status">⟳</button>
+            </div>
+            <div id="services" class="services">
+              <div class="empty-hint">Checking…</div>
             </div>
             <div id="auth-code-panel" class="auth-code-panel" style="display:none">
               <div class="auth-code-label muted">Confirm this code in browser</div>
