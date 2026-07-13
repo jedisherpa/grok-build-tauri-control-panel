@@ -548,6 +548,8 @@ function activateView(name) {
   document.querySelectorAll(".view").forEach((v) => v.classList.remove("active"));
   const view = $(`view-${name}`);
   if (view) view.classList.add("active");
+  // Per-view refresh hooks: data views load themselves on entry.
+  if (name === "worktrees") refreshWorktrees();
 }
 
 document.querySelectorAll(".nav-item").forEach((btn) => {
@@ -3332,9 +3334,133 @@ $("btn-cred-set").onclick = async () => {
 };
 
 // Worktrees
+// ── Worktrees view: auto-listed per known project ────────────────────────
+function worktreeRepos() {
+  const repos = new Set(state.projects || []);
+  for (const s of state.sessions || []) {
+    const root = s.projectRoot || s.project_root;
+    if (root) repos.add(root);
+  }
+  return [...repos];
+}
+
+/** Thread that owns a managed worktree path/name, if any. */
+function threadForWorktree(wt) {
+  return (state.sessions || []).find(
+    (s) => s.worktree && (wt.name.startsWith(s.worktree) || wt.path === s.cwd)
+  );
+}
+
+async function refreshWorktrees() {
+  const root = $("wt-list");
+  if (!root) return;
+  const repos = worktreeRepos();
+  if (!repos.length) {
+    root.innerHTML = `<div class="empty-hint">No projects yet — add one from the sidebar.</div>`;
+    return;
+  }
+  root.innerHTML = `<div class="empty-hint">Scanning ${repos.length} project${repos.length === 1 ? "" : "s"}…</div>`;
+  const sections = [];
+  for (const repo of repos) {
+    let rows = [];
+    try {
+      rows = await invoke("list_worktrees", { repo });
+    } catch (_) {
+      continue; // not a git repo / gone — skip silently
+    }
+    const name = repo.split("/").filter(Boolean).pop() || repo;
+    const items = (rows || [])
+      .map((w) => {
+        const isThread = String(w.branch || "").startsWith("thread/");
+        const isPrimary = w.path === repo || String(w.path) === repo;
+        const owner = isThread ? threadForWorktree(w) : null;
+        const ownerTag = owner
+          ? `<button class="wt-open-thread" data-id="${escapeHtml(owner.id)}" title="Open the owning thread">↗ ${escapeHtml(owner.label || shortId(owner.id))}</button>`
+          : "";
+        const badges = [
+          isPrimary ? `<span class="badge">primary</span>` : "",
+          isThread ? `<span class="badge branch">🌱 thread</span>` : "",
+          w.locked ? `<span class="badge needs-sync">locked</span>` : "",
+        ].join("");
+        const actions = isPrimary
+          ? ""
+          : `<button class="btn ghost wt-diff" data-path="${escapeHtml(String(w.path))}">Diff</button>
+             <button class="btn ghost danger wt-remove" data-repo="${escapeHtml(repo)}" data-path="${escapeHtml(String(w.path))}">Remove</button>`;
+        return `<div class="wt-row">
+  <div class="wt-row-main">
+    <span class="wt-branch">${escapeHtml(w.branch || "(detached)")}</span>
+    ${badges} ${ownerTag}
+    <span class="wt-actions">${actions}</span>
+  </div>
+  <div class="wt-path muted">${escapeHtml(String(w.path))} · ${escapeHtml(String(w.head || "").slice(0, 8))}</div>
+  <pre class="wt-diff-out mono-pane" style="display:none"></pre>
+</div>`;
+      })
+      .join("");
+    sections.push(`<div class="wt-repo">
+  <div class="section-label"><span>${escapeHtml(name)}</span>
+    <button class="btn ghost wt-prune" data-repo="${escapeHtml(repo)}" title="git worktree prune — clean up stale registrations">prune</button>
+  </div>
+  ${items || `<div class="empty-hint">no worktrees</div>`}
+</div>`);
+  }
+  root.innerHTML = sections.join("") || `<div class="empty-hint">No git projects found.</div>`;
+
+  root.querySelectorAll(".wt-open-thread").forEach((el) => {
+    el.onclick = () => selectSession(el.dataset.id);
+  });
+  root.querySelectorAll(".wt-diff").forEach((el) => {
+    el.onclick = async () => {
+      const out = el.closest(".wt-row")?.querySelector(".wt-diff-out");
+      if (!out) return;
+      if (out.style.display !== "none") {
+        out.style.display = "none";
+        return;
+      }
+      try {
+        const diff = await invoke("worktree_diff", { path: el.dataset.path });
+        out.textContent = diff.trim() || "(no uncommitted changes)";
+        out.style.display = "";
+      } catch (e) {
+        toastError(e);
+      }
+    };
+  });
+  root.querySelectorAll(".wt-remove").forEach((el) => {
+    el.onclick = async () => {
+      const ok = await askConfirm(
+        `Remove worktree at\n${el.dataset.path}?\n\nUncommitted changes there are lost.`,
+        { title: "Remove worktree" }
+      );
+      if (!ok) return;
+      try {
+        await invoke("remove_worktree", { repo: el.dataset.repo, name: el.dataset.path, force: true });
+        pushEvent("worktree removed", "ok", null, { force: true });
+        refreshWorktrees();
+      } catch (e) {
+        toastError(e);
+      }
+    };
+  });
+  root.querySelectorAll(".wt-prune").forEach((el) => {
+    el.onclick = async () => {
+      try {
+        const out = await invoke("prune_worktrees", { repo: el.dataset.repo });
+        pushEvent(`pruned · ${out.trim() || "nothing stale"}`, "ok", null, { force: true });
+        refreshWorktrees();
+      } catch (e) {
+        toastError(e);
+      }
+    };
+  });
+}
+
+$("btn-wt-refresh") && ($("btn-wt-refresh").onclick = refreshWorktrees);
 $("btn-wt-list").onclick = async () => {
   try {
-    $("wt-out").textContent = JSON.stringify(
+    const out = $("wt-out");
+    out.style.display = "";
+    out.textContent = JSON.stringify(
       await invoke("list_worktrees", { repo: $("repo").value }),
       null,
       2

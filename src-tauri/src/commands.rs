@@ -1385,7 +1385,9 @@ pub async fn create_worktree(
             CreateWorktreeRequest {
                 name,
                 base_ref,
-                prefer_grok_cli: true,
+                // Pure git, same as thread isolation — one layout for all
+                // managed worktrees (the CLI path used its own location).
+                prefer_grok_cli: false,
             },
         )
         .await
@@ -1402,6 +1404,18 @@ pub async fn remove_worktree(
     state
         .worktrees
         .remove(PathBuf::from(repo).as_path(), &name, force)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn prune_worktrees(
+    state: State<'_, AppState>,
+    repo: String,
+) -> Result<String, String> {
+    state
+        .worktrees
+        .prune(PathBuf::from(repo).as_path())
         .await
         .map_err(err)
 }

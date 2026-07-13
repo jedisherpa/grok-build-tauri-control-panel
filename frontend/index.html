@@ -229,12 +229,19 @@
         <section id="view-worktrees" class="view">
           <div class="pane-pad">
             <div class="toolbar">
-              <input id="repo" type="text" placeholder="git repo path" class="grow" />
+              <button id="btn-wt-refresh" class="btn">↻ Refresh</button>
+              <span class="muted">Worktrees across your projects — 🌱 rows belong to threads.</span>
+            </div>
+            <div id="wt-list" class="wt-list">
+              <div class="empty-hint">No projects yet — add one from the sidebar.</div>
+            </div>
+            <div class="toolbar wt-manual">
+              <input id="repo" type="text" placeholder="other repo path…" class="grow" />
               <input id="wt-name" type="text" placeholder="worktree name" />
               <button id="btn-wt-create" class="btn primary">Create</button>
-              <button id="btn-wt-list" class="btn">List</button>
+              <button id="btn-wt-list" class="btn">List repo</button>
             </div>
-            <pre id="wt-out" class="mono-pane"></pre>
+            <pre id="wt-out" class="mono-pane" style="display:none"></pre>
           </div>
         </section>
 

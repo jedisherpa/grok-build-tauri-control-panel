@@ -697,6 +697,24 @@ body {
 /* (LIVE hint bar removed — the turn dock below the transcript is the single
    source of live turn status.) */
 
+/* Worktrees view */
+.wt-list { display: flex; flex-direction: column; gap: 10px; overflow: auto; min-height: 0; flex: 1; }
+.wt-repo { border: 1px solid var(--border); border-radius: 10px; padding: 6px 10px 8px; }
+.wt-row { padding: 6px 4px; border-top: 1px solid color-mix(in srgb, var(--border) 55%, transparent); }
+.wt-row:first-of-type { border-top: none; }
+.wt-row-main { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.wt-branch { font-family: var(--font); font-size: 12px; color: var(--text); }
+.wt-path { font-size: 10px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.wt-actions { margin-left: auto; display: flex; gap: 6px; }
+.wt-actions .btn { font-size: 10px; padding: 2px 8px; }
+.wt-open-thread {
+  background: transparent; border: 1px dashed color-mix(in srgb, var(--accent) 40%, var(--border));
+  color: var(--accent); border-radius: 999px; font-size: 9px; padding: 1px 7px; cursor: pointer;
+}
+.wt-diff-out { max-height: 260px; margin-top: 6px; }
+.wt-manual { margin-top: 10px; border-top: 1px dashed var(--border); padding-top: 10px; }
+.wt-prune { font-size: 9px; padding: 1px 8px; }
+
 /* View settings (right sidebar) */
 .view-settings { padding: 4px 2px 6px; }
 .view-setting {

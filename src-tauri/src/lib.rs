@@ -113,6 +113,7 @@ pub fn run() {
             commands::create_worktree,
             commands::remove_worktree,
             commands::worktree_diff,
+            commands::prune_worktrees,
             commands::list_permission_presets,
             commands::evaluate_permission,
             commands::list_extensions,
