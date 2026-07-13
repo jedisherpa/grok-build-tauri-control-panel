@@ -132,8 +132,11 @@ pub async fn get_auth_status() -> Result<grok_cli_wrapper::AuthStatus, String> {
 
 /// Sign-in state for every backend: which services can actually run right now.
 #[tauri::command]
-pub async fn backend_auth_status() -> Result<Vec<grok_cli_wrapper::BackendAuth>, String> {
-    Ok(grok_cli_wrapper::backend_auth::all().await)
+pub async fn backend_auth_status(
+    state: State<'_, AppState>,
+) -> Result<Vec<grok_cli_wrapper::BackendAuth>, String> {
+    let cfg = state.config.read().await.clone();
+    Ok(grok_cli_wrapper::backend_auth::all(&cfg).await)
 }
 
 /// Hand a backend's sign-in (or sign-out) off to a real terminal window.
@@ -148,13 +151,13 @@ pub async fn open_backend_login(backend: String, logout: bool) -> Result<(), Str
     } else {
         grok_cli_wrapper::backend_auth::login_command(&backend)
     }
-    .ok_or_else(|| format!("no login command for backend {backend}"))?;
+    .ok_or_else(|| format!("no way to sign in to {backend}: install its CLI, or npx"))?;
 
-    spawn_in_terminal(cmd).map_err(|e| format!("could not open a terminal: {e}"))
+    spawn_in_terminal(&cmd).map_err(|e| format!("could not open a terminal: {e}"))
 }
 
-/// Open `cmd` in the platform's terminal. The command string is a fixed literal
-/// from `backend_auth`, never user input.
+/// Open `cmd` in the platform's terminal. The command string is built by
+/// `backend_auth` from a fixed table, never from user input.
 fn spawn_in_terminal(cmd: &str) -> std::io::Result<()> {
     #[cfg(target_os = "macos")]
     {

@@ -1910,10 +1910,10 @@ function renderServices(list) {
   host.innerHTML = "";
   for (const s of list) {
     const envKey = s.kind === "api_key";
+    // Usable = we can launch the adapter AND it has credentials. Those are
+    // separate: claude/codex run via `npx` with no CLI installed at all.
     const row = document.createElement("div");
-    row.className = `svc-row ${
-      !s.installed ? "missing" : s.loggedIn ? "on" : "off"
-    }`;
+    row.className = `svc-row ${!s.runnable ? "missing" : s.loggedIn ? "on" : "off"}`;
 
     const dot = document.createElement("span");
     dot.className = "svc-dot";
@@ -1926,28 +1926,26 @@ function renderServices(list) {
     name.textContent = s.displayName;
     const meta = document.createElement("div");
     meta.className = "svc-meta";
-    meta.textContent = !s.installed
-      ? s.installHint || "not installed"
+    meta.textContent = !s.runnable
+      ? "can't launch"
       : s.loggedIn
         ? [s.account, s.plan].filter(Boolean).join(" · ") || "signed in"
         : "not signed in";
-    meta.title = !s.installed ? `Install with: ${s.installHint || "—"}` : s.message;
+    meta.title = [s.message, s.launch && `runs: ${s.launch}`].filter(Boolean).join("\n");
     text.append(name, meta);
 
     row.append(dot, text);
 
     // An env API key is not a session — there is nothing to sign in or out of.
-    if (s.installed && !envKey) {
+    if (s.runnable && !envKey && s.loginCommand) {
       const btn = document.createElement("button");
       btn.className = "btn ghost svc-btn";
       btn.dataset.backend = s.backend;
       btn.dataset.act = s.loggedIn ? "logout" : "login";
       btn.textContent = s.loggedIn ? "Sign out" : "Sign in";
-      btn.title = s.loggedIn
-        ? `Runs \`${s.backend === "grok" ? "grok logout" : s.backend + " logout"}\``
-        : s.inAppLogin
-          ? "Sign in here — you'll confirm a code in the browser"
-          : `Opens a Terminal running \`${s.loginCommand}\``;
+      btn.title = s.inAppLogin
+        ? "Sign in here — you'll confirm a code in the browser"
+        : `Opens a Terminal running \`${s.loginCommand}\``;
       if (s.backend === "grok" && state.loggingIn) {
         btn.disabled = true;
         btn.textContent = "Signing in…";
@@ -2895,11 +2893,7 @@ async function startAcp() {
     // Each backend rides its own CLI login, so gate on that backend's status.
     if (!state.services?.length) await refreshServices();
     const svc = serviceFor(backend);
-    if (svc && !svc.installed) {
-      throw new Error(
-        `${svc.displayName} is not installed. Install it with: ${svc.installHint || "—"}`,
-      );
-    }
+    if (svc && !svc.runnable) throw new Error(svc.message);
     if (svc && !svc.loggedIn) {
       const go = await askConfirm(`Not signed in to ${svc.displayName}. Sign in now?`, {
         title: "Sign in",

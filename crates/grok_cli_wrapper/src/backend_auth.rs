@@ -1,16 +1,25 @@
 //! Which agent services are actually usable right now.
 //!
-//! Each backend owns its own credentials — we never store any. This module only
-//! *asks*: is the CLI installed, and does it consider itself signed in?
+//! Two independent questions, which are easy to conflate:
 //!
-//! - grok:   `~/.grok/auth.json` (see [`crate::auth`]) or `XAI_API_KEY`
-//! - claude: `claude auth status --json` or `ANTHROPIC_API_KEY`
-//! - codex:  `codex login status` / `$CODEX_HOME/auth.json` or `OPENAI_API_KEY`
+//! 1. **Runnable** — can we launch the backend's ACP adapter? For claude and
+//!    codex the adapter is normally *not* installed: `resolve_backend` falls
+//!    back to `npx --yes <pkg>`, which fetches it on demand. So a backend can
+//!    be perfectly runnable with no CLI on PATH at all.
+//! 2. **Signed in** — are there credentials for it? Those belong to the vendor
+//!    CLI, not the adapter, and we never store any ourselves:
+//!    - grok:   `~/.grok/auth.json` or `XAI_API_KEY`
+//!    - claude: `claude auth status --json` / macOS Keychain, or `ANTHROPIC_API_KEY`
+//!    - codex:  `$CODEX_HOME/auth.json` or `OPENAI_API_KEY`
+//!
+//! A backend is only usable when both hold.
 
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::time::Duration;
 
+use grok_config::backends::{descriptor, resolve_backend, Backend, LaunchVia};
+use grok_config::GrokConfig;
 use serde::{Deserialize, Serialize};
 use tokio::process::Command;
 
@@ -32,41 +41,26 @@ pub struct BackendAuth {
     /// "grok" | "claude" | "codex"
     pub backend: String,
     pub display_name: String,
-    /// The CLI that owns the credentials is on PATH.
-    pub installed: bool,
+    /// We can launch this backend's ACP adapter (installed binary, or npx).
+    pub runnable: bool,
+    /// How we would launch it, for the tooltip: a path, or "npx <pkg>".
+    pub launch: Option<String>,
+    /// The credential-owning vendor CLI is on PATH. Not needed to *run* the
+    /// backend — only to sign in from here without npx.
+    pub cli_installed: bool,
     pub logged_in: bool,
     pub kind: AuthKind,
     /// Signed-in identity, when the CLI reports one.
     pub account: Option<String>,
     /// Plan / auth-method detail, e.g. "max" or "claude.ai".
     pub plan: Option<String>,
-    /// One line for the UI: who you are, or why you cannot use this backend.
+    /// One line for the UI: who you are, or why this backend is unusable.
     pub message: String,
-    /// Shell command that signs in, when a CLI is installed to run it.
+    /// Shell command that signs in. Uses `npx` when the CLI is absent.
     pub login_command: Option<String>,
-    /// The panel can drive this login itself (device flow); otherwise we hand
-    /// off to a terminal because the CLI needs a TTY + browser.
+    /// The panel drives this login itself (device code); otherwise the CLI
+    /// needs a TTY + browser and we hand off to a terminal.
     pub in_app_login: bool,
-    /// How to get the CLI when it is missing.
-    pub install_hint: Option<String>,
-}
-
-impl BackendAuth {
-    fn missing(backend: &str, display: &str, install: &str) -> Self {
-        Self {
-            backend: backend.into(),
-            display_name: display.into(),
-            installed: false,
-            logged_in: false,
-            kind: AuthKind::None,
-            account: None,
-            plan: None,
-            message: format!("{display} CLI not installed"),
-            login_command: None,
-            in_app_login: false,
-            install_hint: Some(install.into()),
-        }
-    }
 }
 
 fn which(bin: &str) -> Option<PathBuf> {
@@ -77,8 +71,22 @@ fn env_key(name: &str) -> bool {
     std::env::var(name).is_ok_and(|v| !v.trim().is_empty())
 }
 
-/// Run a CLI's own status probe. Backends are slow to boot, so we cap the wait;
-/// a timeout is reported as "unknown", never as "signed out".
+/// Can we launch this backend, and how?
+fn launchability(b: Backend, cfg: &GrokConfig) -> (bool, Option<String>) {
+    match resolve_backend(b, cfg) {
+        Ok(r) => {
+            let how = match r.via {
+                LaunchVia::Npx => format!("npx {}", r.args.last().cloned().unwrap_or_default()),
+                LaunchVia::Binary => r.program.display().to_string(),
+            };
+            (true, Some(how))
+        }
+        Err(_) => (false, None),
+    }
+}
+
+/// Run a CLI's own status probe. A timeout is reported as "unknown", never as
+/// "signed out" — we must not tell the user to re-auth on a slow disk.
 async fn probe(bin: &PathBuf, args: &[&str]) -> Option<String> {
     let fut = Command::new(bin)
         .args(args)
@@ -93,153 +101,237 @@ async fn probe(bin: &PathBuf, args: &[&str]) -> Option<String> {
     String::from_utf8(out.stdout).ok()
 }
 
+/// Sign-in command, preferring an installed CLI and falling back to npx so the
+/// user can authenticate without a global install.
+fn auth_command(backend: Backend, verb: &str) -> Option<String> {
+    let (cli, npx_pkg, sub) = match backend {
+        // grok has no npx package: without the binary there is no way in.
+        Backend::Grok => ("grok", None, verb.to_string()),
+        Backend::Claude => (
+            "claude",
+            Some("@anthropic-ai/claude-code"),
+            format!("auth {verb}"),
+        ),
+        Backend::Codex => ("codex", Some("@openai/codex"), verb.to_string()),
+    };
+    if which(cli).is_some() {
+        return Some(format!("{cli} {sub}"));
+    }
+    let pkg = npx_pkg?;
+    which("npx")?;
+    Some(format!("npx -y {pkg} {sub}"))
+}
+
 /// Status for all three backends, probed concurrently.
-pub async fn all() -> Vec<BackendAuth> {
-    let (grok, claude, codex) = tokio::join!(grok(), claude(), codex());
+pub async fn all(cfg: &GrokConfig) -> Vec<BackendAuth> {
+    let (grok, claude, codex) = tokio::join!(grok(cfg), claude(cfg), codex(cfg));
     vec![grok, claude, codex]
 }
 
-pub async fn grok() -> BackendAuth {
-    let installed = which("grok").is_some() || GrokCli::auth_file_path().exists();
-    if !installed {
-        return BackendAuth::missing("grok", "Grok", "curl -fsSL https://grok.com/install.sh | sh");
+pub async fn grok(cfg: &GrokConfig) -> BackendAuth {
+    let (runnable, launch) = launchability(Backend::Grok, cfg);
+    let cli_installed = which("grok").is_some();
+    let base = BackendAuth {
+        backend: "grok".into(),
+        display_name: descriptor(Backend::Grok).display_name.into(),
+        runnable,
+        launch,
+        cli_installed,
+        logged_in: false,
+        kind: AuthKind::None,
+        account: None,
+        plan: None,
+        message: String::new(),
+        login_command: auth_command(Backend::Grok, "login"),
+        in_app_login: true, // device-code flow, driven by the panel
+    };
+
+    if !runnable {
+        return BackendAuth {
+            message: "Grok CLI not found — install it to use this backend".into(),
+            in_app_login: false,
+            ..base
+        };
     }
     // The grok backend accepts a raw xAI key with no login at all.
     if env_key("XAI_API_KEY") {
         return BackendAuth {
-            backend: "grok".into(),
-            display_name: "Grok".into(),
-            installed: true,
             logged_in: true,
             kind: AuthKind::ApiKey,
-            account: None,
             plan: Some("XAI_API_KEY".into()),
             message: "Using XAI_API_KEY from the environment".into(),
             login_command: None,
             in_app_login: false,
-            install_hint: None,
+            ..base
         };
     }
 
     let st = GrokCli::auth_status();
     BackendAuth {
-        backend: "grok".into(),
-        display_name: "Grok".into(),
-        installed: true,
         logged_in: st.logged_in,
         kind: if st.logged_in { AuthKind::Subscription } else { AuthKind::None },
         account: st.email.clone(),
         plan: st.auth_mode.clone(),
         message: if st.logged_in {
-            st.email.clone().unwrap_or_else(|| "Signed in".into())
+            st.email.unwrap_or_else(|| "Signed in".into())
         } else {
             "Not signed in".into()
         },
-        login_command: Some("grok login".into()),
-        in_app_login: true, // device-code flow, driven by the panel
-        install_hint: None,
+        ..base
     }
 }
 
-pub async fn claude() -> BackendAuth {
-    let Some(bin) = which("claude") else {
-        return BackendAuth::missing(
-            "claude",
-            "Claude Code",
-            "npm i -g @anthropic-ai/claude-code",
-        );
+pub async fn claude(cfg: &GrokConfig) -> BackendAuth {
+    let (runnable, launch) = launchability(Backend::Claude, cfg);
+    let cli = which("claude");
+    let base = BackendAuth {
+        backend: "claude".into(),
+        display_name: descriptor(Backend::Claude).display_name.into(),
+        runnable,
+        launch,
+        cli_installed: cli.is_some(),
+        logged_in: false,
+        kind: AuthKind::None,
+        account: None,
+        plan: None,
+        message: String::new(),
+        login_command: auth_command(Backend::Claude, "login"),
+        in_app_login: false, // needs a TTY + browser: hand off to a terminal
     };
+
+    if !runnable {
+        return BackendAuth {
+            message: "No adapter and no npx — cannot launch Claude Code".into(),
+            ..base
+        };
+    }
     if env_key("ANTHROPIC_API_KEY") {
         return BackendAuth {
-            backend: "claude".into(),
-            display_name: "Claude Code".into(),
-            installed: true,
             logged_in: true,
             kind: AuthKind::ApiKey,
-            account: None,
             plan: Some("ANTHROPIC_API_KEY".into()),
             message: "Using ANTHROPIC_API_KEY from the environment".into(),
             login_command: None,
-            in_app_login: false,
-            install_hint: None,
+            ..base
         };
     }
 
-    // `claude auth status --json` is the CLI's own answer; on macOS the token
-    // lives in the Keychain, so there is no file we could read instead.
+    // `claude auth status --json` is the CLI's own answer. On macOS the token
+    // lives in the Keychain, so when the CLI is absent we can only check for
+    // the credentials file other platforms use.
+    let Some(bin) = cli else {
+        let creds = claude_credentials_file().is_some_and(|p| p.exists());
+        return BackendAuth {
+            logged_in: creds,
+            kind: if creds { AuthKind::Subscription } else { AuthKind::None },
+            message: if creds {
+                "Signed in".into()
+            } else {
+                "Sign-in unknown — install the Claude CLI to check".into()
+            },
+            ..base
+        };
+    };
+
     let raw = probe(&bin, &["auth", "status", "--json"]).await;
     let v: Option<serde_json::Value> = raw.as_deref().and_then(|s| serde_json::from_str(s).ok());
+    let field = |k: &str| {
+        v.as_ref()
+            .and_then(|v| v.get(k))
+            .and_then(|v| v.as_str())
+            .map(str::to_string)
+    };
     let logged_in = v
         .as_ref()
         .and_then(|v| v.get("loggedIn"))
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
-    let account = v
-        .as_ref()
-        .and_then(|v| v.get("email"))
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
-    let plan = v
-        .as_ref()
-        .and_then(|v| v.get("subscriptionType").or_else(|| v.get("authMethod")))
-        .and_then(|v| v.as_str())
-        .map(str::to_string);
+    let account = field("email");
 
     BackendAuth {
-        backend: "claude".into(),
-        display_name: "Claude Code".into(),
-        installed: true,
         logged_in,
         kind: if logged_in { AuthKind::Subscription } else { AuthKind::None },
         account: account.clone(),
-        plan,
+        plan: field("subscriptionType").or_else(|| field("authMethod")),
         message: if logged_in {
             account.unwrap_or_else(|| "Signed in".into())
         } else {
             "Not signed in".into()
         },
-        login_command: Some("claude auth login".into()),
-        in_app_login: false, // needs a TTY + browser: hand off to a terminal
-        install_hint: None,
+        ..base
     }
 }
 
-pub async fn codex() -> BackendAuth {
-    let Some(bin) = which("codex") else {
-        return BackendAuth::missing("codex", "Codex", "npm i -g @openai/codex");
+pub async fn codex(cfg: &GrokConfig) -> BackendAuth {
+    let (runnable, launch) = launchability(Backend::Codex, cfg);
+    let cli = which("codex");
+    let base = BackendAuth {
+        backend: "codex".into(),
+        display_name: descriptor(Backend::Codex).display_name.into(),
+        runnable,
+        launch,
+        cli_installed: cli.is_some(),
+        logged_in: false,
+        kind: AuthKind::None,
+        account: None,
+        plan: None,
+        message: String::new(),
+        login_command: auth_command(Backend::Codex, "login"),
+        in_app_login: false,
     };
+
+    if !runnable {
+        return BackendAuth {
+            message: "No adapter and no npx — cannot launch Codex".into(),
+            ..base
+        };
+    }
     if env_key("OPENAI_API_KEY") {
         return BackendAuth {
-            backend: "codex".into(),
-            display_name: "Codex".into(),
-            installed: true,
             logged_in: true,
             kind: AuthKind::ApiKey,
-            account: None,
             plan: Some("OPENAI_API_KEY".into()),
             message: "Using OPENAI_API_KEY from the environment".into(),
             login_command: None,
-            in_app_login: false,
-            install_hint: None,
+            ..base
         };
     }
 
-    // `codex login status` prints a human line ("Logged in using ChatGPT" /
-    // "Not logged in"); the auth file is the durable fallback.
-    let raw = probe(&bin, &["login", "status"]).await.unwrap_or_default();
-    let low = raw.to_lowercase();
-    let said_yes = low.contains("logged in") && !low.contains("not logged in");
-    let logged_in = said_yes || codex_auth_file().is_some_and(|p| p.exists());
+    // The adapter reads $CODEX_HOME/auth.json, so that file — not the CLI — is
+    // the ground truth. The CLI's own probe is a nicety when it happens to be
+    // installed (it also knows the account).
+    let auth_file = codex_auth_file();
+    let has_file = auth_file.as_ref().is_some_and(|p| p.exists());
+    let mut account = auth_file
+        .as_ref()
+        .filter(|p| p.exists())
+        .and_then(|p| std::fs::read_to_string(p).ok())
+        .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+        .and_then(|v| {
+            v.pointer("/tokens/id_token/email")
+                .or_else(|| v.pointer("/tokens/email"))
+                .or_else(|| v.get("email"))
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        });
 
-    let account = raw
-        .split_whitespace()
-        .find(|w| w.contains('@') && w.contains('.'))
-        .map(|w| w.trim_matches(|c: char| !c.is_ascii_graphic() || c == ',').to_string());
+    let mut logged_in = has_file;
+    if let Some(bin) = cli {
+        let raw = probe(&bin, &["login", "status"]).await.unwrap_or_default();
+        let low = raw.to_lowercase();
+        if low.contains("not logged in") {
+            logged_in = false;
+        } else if low.contains("logged in") {
+            logged_in = true;
+            account = account.or_else(|| {
+                raw.split_whitespace()
+                    .find(|w| w.contains('@') && w.contains('.'))
+                    .map(|w| w.trim_matches(|c: char| !c.is_ascii_graphic()).to_string())
+            });
+        }
+    }
 
     BackendAuth {
-        backend: "codex".into(),
-        display_name: "Codex".into(),
-        installed: true,
         logged_in,
         kind: if logged_in { AuthKind::Subscription } else { AuthKind::None },
         account: account.clone(),
@@ -249,9 +341,7 @@ pub async fn codex() -> BackendAuth {
         } else {
             "Not signed in".into()
         },
-        login_command: Some("codex login".into()),
-        in_app_login: false,
-        install_hint: None,
+        ..base
     }
 }
 
@@ -262,24 +352,21 @@ fn codex_auth_file() -> Option<PathBuf> {
     Some(home.join("auth.json"))
 }
 
-/// The sign-in command for a backend, or `None` if it has no CLI login (env-key
-/// backends, or a CLI that is not installed).
-pub fn login_command(backend: &str) -> Option<&'static str> {
-    match backend {
-        "grok" => Some("grok login"),
-        "claude" => Some("claude auth login"),
-        "codex" => Some("codex login"),
-        _ => None,
-    }
+fn claude_credentials_file() -> Option<PathBuf> {
+    let dir = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".claude")))?;
+    Some(dir.join(".credentials.json"))
 }
 
-pub fn logout_command(backend: &str) -> Option<&'static str> {
-    match backend {
-        "grok" => Some("grok logout"),
-        "claude" => Some("claude auth logout"),
-        "codex" => Some("codex logout"),
-        _ => None,
-    }
+/// The sign-in / sign-out command for a backend, resolved the same way the
+/// status rows resolve it (installed CLI first, then npx).
+pub fn login_command(backend: &str) -> Option<String> {
+    auth_command(Backend::from_key(backend)?, "login")
+}
+
+pub fn logout_command(backend: &str) -> Option<String> {
+    auth_command(Backend::from_key(backend)?, "logout")
 }
 
 #[cfg(test)]
@@ -287,20 +374,40 @@ mod tests {
     use super::*;
 
     #[test]
-    fn missing_backend_reports_install_hint() {
-        let b = BackendAuth::missing("codex", "Codex", "npm i -g @openai/codex");
-        assert!(!b.installed && !b.logged_in);
-        assert_eq!(b.kind, AuthKind::None);
-        assert!(b.install_hint.is_some());
-        assert!(b.login_command.is_none(), "cannot log in without the CLI");
+    fn auth_commands_cover_every_backend() {
+        for b in ["grok", "claude", "codex"] {
+            // Each backend can produce a command as long as *some* route exists
+            // (the CLI, or npx). At minimum the mapping must know the backend.
+            assert!(Backend::from_key(b).is_some());
+        }
+        assert!(login_command("nope").is_none());
+        assert!(logout_command("nope").is_none());
     }
 
     #[test]
-    fn login_commands_cover_every_backend() {
-        for b in ["grok", "claude", "codex"] {
-            assert!(login_command(b).is_some(), "{b} has no login command");
-            assert!(logout_command(b).is_some(), "{b} has no logout command");
+    fn claude_login_uses_auth_subcommand() {
+        // `claude login` is not a thing; it is `claude auth login`. Guard the
+        // shape of whichever route we take.
+        if let Some(cmd) = login_command("claude") {
+            assert!(cmd.contains("auth login"), "unexpected claude login: {cmd}");
         }
-        assert!(login_command("nope").is_none());
+        if let Some(cmd) = login_command("codex") {
+            assert!(cmd.ends_with("login"), "unexpected codex login: {cmd}");
+            assert!(!cmd.contains("auth"), "codex has no auth subcommand: {cmd}");
+        }
+    }
+
+    #[tokio::test]
+    async fn npx_backends_are_runnable_without_their_cli() {
+        // The whole point of the npx fallback: claude/codex run with no adapter
+        // and no vendor CLI installed. If npx is missing we cannot assert this.
+        if which("npx").is_none() {
+            return;
+        }
+        let cfg = GrokConfig::default();
+        for s in [claude(&cfg).await, codex(&cfg).await] {
+            assert!(s.runnable, "{} should be runnable via npx", s.backend);
+            assert!(s.launch.is_some());
+        }
     }
 }
