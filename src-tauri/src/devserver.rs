@@ -61,20 +61,37 @@ impl Pm {
     }
 }
 
+/// Does the project's own script already pin a port (`vite dev --port 3000`)?
+/// If so we must not append ours: the flags would fight, the server would pick
+/// one, and we would be left talking about the other.
+fn script_pins_port(script: &str) -> bool {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| Regex::new(r"(--port|-p)[= ]\s*\d+").expect("static regex"));
+    re.is_match(script)
+}
+
 /// Pull a local dev URL out of a line of server output — vite prints
 /// "  ➜  Local:   http://localhost:5173/", next "- Local: http://localhost:3000".
 ///
 /// This is how we learn the *real* port: frameworks silently move to another
 /// one when ours is busy, so anything we guessed up front may be a lie.
+/// Keeps the host the server named. Vite binds `localhost`, which resolves to
+/// IPv6 `::1` first on macOS — rewriting that to 127.0.0.1 would point at an
+/// address nothing is listening on. Only 0.0.0.0 (a wildcard, not reachable as
+/// itself) is translated.
 fn extract_local_url(line: &str) -> Option<String> {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| {
         // A port is required: a bare "http://localhost" tells us nothing.
-        Regex::new(r"https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(\d{2,5})")
-            .expect("static regex")
+        Regex::new(r"https?://(localhost|127\.0\.0\.1|0\.0\.0\.0):(\d{2,5})").expect("static regex")
     });
-    let port: u16 = re.captures(line)?.get(1)?.as_str().parse().ok()?;
-    Some(format!("http://127.0.0.1:{port}"))
+    let caps = re.captures(line)?;
+    let host = match caps.get(1)?.as_str() {
+        "0.0.0.0" => "localhost",
+        h => h,
+    };
+    let port: u16 = caps.get(2)?.as_str().parse().ok()?;
+    Some(format!("http://{host}:{port}"))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -192,6 +209,13 @@ impl DevServerManager {
     pub async fn stop(&self) -> DevServerStatus {
         let mut guard = self.inner.lock().await;
         if let Some(mut running) = guard.take() {
+            // Kill the whole process group, not just the shell we spawned. The
+            // server itself is a grandchild (sh -> npm -> node); killing only
+            // the child orphans it, still holding the port. That is how ports
+            // 3000..3006 ended up squatted by week-old node processes.
+            if let Some(pid) = running.child.id() {
+                kill_process_group(pid).await;
+            }
             let _ = running.child.kill().await;
             let _ = running.child.wait().await;
             info!(cwd = %running.cwd.display(), "dev server stopped");
@@ -220,27 +244,36 @@ impl DevServerManager {
                     let scripts = v.get("scripts").cloned().unwrap_or_default();
                     let deps = merge_deps(&v);
                     let pm = Pm::detect(cwd);
+                    let dev_script = scripts.get("dev").and_then(|v| v.as_str()).unwrap_or("");
                     let has_dev = scripts.get("dev").is_some();
+                    // A script that pins its own port owns that decision.
+                    let pinned = script_pins_port(dev_script);
 
                     // Framework defaults. We ask for a port we have confirmed is
                     // free, but the server still gets the last word — start()
                     // reads the URL it actually prints.
                     if has_dep(&deps, "next") || (has_dev && raw.contains("next")) {
-                        let port = free_port(3000);
+                        let port = if pinned { 0 } else { free_port(3000) };
+                        let args = if pinned { String::new() } else { format!("--port {port}") };
                         return Ok(DetectedProject {
                             cwd: cwd.display().to_string(),
                             kind: DevServerKind::Npm,
-                            command: shell_cmd(&pm.run("dev", &format!("--port {port}"))),
+                            command: shell_cmd(&pm.run("dev", &args)),
                             suggested_port: port,
                             label: format!("Next.js · {} run dev", pm.label()),
                         });
                     }
                     if has_dep(&deps, "vite") || (has_dev && raw.contains("vite")) {
-                        let port = free_port(5173);
+                        let port = if pinned { 0 } else { free_port(5173) };
+                        let args = if pinned {
+                            String::new()
+                        } else {
+                            format!("--port {port} --host")
+                        };
                         return Ok(DetectedProject {
                             cwd: cwd.display().to_string(),
                             kind: DevServerKind::Npm,
-                            command: shell_cmd(&pm.run("dev", &format!("--port {port} --host"))),
+                            command: shell_cmd(&pm.run("dev", &args)),
                             suggested_port: port,
                             label: format!("Vite · {} run dev", pm.label()),
                         });
@@ -351,6 +384,10 @@ impl DevServerManager {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        // Own process group, so stop() can take down the real server (a
+        // grandchild: sh -> npm -> node) and not just the shell.
+        #[cfg(unix)]
+        cmd.process_group(0);
 
         // GUI PATH
         let path = std::env::var("PATH").unwrap_or_default();
@@ -428,12 +465,16 @@ impl DevServerManager {
         }
         if url.is_none() && port != 0 && port_is_bound(port) {
             warn!(port, "dev server printed no URL; falling back to the requested port");
-            url = Some(format!("http://127.0.0.1:{port}"));
+            url = Some(format!("http://localhost:{port}"));
         }
 
         let logs = log_tail.lock().await.clone();
         let Some(url) = url else {
-            // Do not report a URL we cannot stand behind.
+            // Do not report a URL we cannot stand behind — and do not leave the
+            // half-started server running behind our back.
+            if let Some(pid) = child.id() {
+                kill_process_group(pid).await;
+            }
             let _ = child.kill().await;
             return Err(format!(
                 "`{cmd_display}` started but never served a URL — is it a dev server?\n{}",
@@ -545,12 +586,45 @@ fn has_dep(deps: &serde_json::Map<String, serde_json::Value>, name: &str) -> boo
     deps.contains_key(name)
 }
 
+/// Terminate a whole process group by its leader's pid. `kill -TERM -<pid>` —
+/// the negative pid is the group. SIGTERM first so dev servers can clean up,
+/// then SIGKILL for anything that ignores it.
+#[cfg(unix)]
+async fn kill_process_group(pid: u32) {
+    for (sig, wait) in [("-TERM", 400u64), ("-KILL", 0)] {
+        let _ = Command::new("/bin/kill")
+            .arg(sig)
+            .arg(format!("-{pid}"))
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .await;
+        if wait > 0 {
+            tokio::time::sleep(Duration::from_millis(wait)).await;
+        }
+    }
+}
+
+#[cfg(not(unix))]
+async fn kill_process_group(_pid: u32) {}
+
+/// Is anything serving this port on loopback? Tries every address `localhost`
+/// resolves to, because a dev server may be on ::1, 127.0.0.1, or both.
 fn port_is_bound(port: u16) -> bool {
-    std::net::TcpStream::connect_timeout(
-        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
-        Duration::from_millis(200),
-    )
-    .is_ok()
+    use std::net::ToSocketAddrs;
+    ("localhost", port)
+        .to_socket_addrs()
+        .map(|addrs| {
+            addrs
+                .into_iter()
+                .any(|a| std::net::TcpStream::connect_timeout(&a, Duration::from_millis(200)).is_ok())
+        })
+        .unwrap_or(false)
+        || std::net::TcpStream::connect_timeout(
+            &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+            Duration::from_millis(200),
+        )
+        .is_ok()
 }
 
 /// stdout and stderr differ in type but not in how we read them; frameworks are
@@ -660,26 +734,23 @@ mod tests {
 
     #[test]
     fn reads_the_url_the_server_prints() {
-        // The formats we actually have to survive, ANSI colour and all.
-        let cases = [
-            ("  ➜  Local:   http://localhost:5173/", 5173),
-            ("- Local:        http://localhost:3001", 3001),
-            ("\x1b[32m  ➜\x1b[39m  \x1b[1mLocal\x1b[22m:   \x1b[36mhttp://localhost:4321/\x1b[39m", 4321),
-            ("Serving HTTP on 127.0.0.1:8765 ...", 0), // no scheme: not a URL
-            ("VITE ready in 300 ms", 0),
-            ("listening on http://0.0.0.0:8080", 8080),
+        // The formats we actually have to survive, ANSI colour and all. The host
+        // is preserved: vite's "localhost" may only be listening on ::1.
+        let cases: [(&str, Option<&str>); 7] = [
+            ("  ➜  Local:   http://localhost:5173/", Some("http://localhost:5173")),
+            ("- Local:        http://localhost:3001", Some("http://localhost:3001")),
+            (
+                "\x1b[32m  ➜\x1b[39m  \x1b[1mLocal\x1b[22m:   \x1b[36mhttp://localhost:4321/\x1b[39m",
+                Some("http://localhost:4321"),
+            ),
+            ("running at http://127.0.0.1:8765/", Some("http://127.0.0.1:8765")),
+            // 0.0.0.0 is a wildcard bind, not an address to browse to.
+            ("listening on http://0.0.0.0:8080", Some("http://localhost:8080")),
+            ("Serving HTTP on 127.0.0.1:8765 ...", None), // no scheme: not a URL
+            ("VITE ready in 300 ms", None),
         ];
         for (line, want) in cases {
-            let got = extract_local_url(line);
-            if want == 0 {
-                assert!(got.is_none(), "{line:?} should not yield a URL, got {got:?}");
-            } else {
-                assert_eq!(
-                    got.as_deref(),
-                    Some(format!("http://127.0.0.1:{want}").as_str()),
-                    "line: {line:?}"
-                );
-            }
+            assert_eq!(extract_local_url(line).as_deref(), want, "line: {line:?}");
         }
     }
 
@@ -711,6 +782,57 @@ mod tests {
 
         mgr.stop().await;
         drop(squat);
+    }
+
+    #[test]
+    fn a_script_that_pins_its_own_port_keeps_it() {
+        // Real case: the cohort game's script is `vite dev --port 3000`. Adding
+        // our own --port made vite choose between two, and we watched the wrong.
+        let dir = std::env::temp_dir().join(format!("bomb-code-pinned-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("package.json"),
+            r#"{"scripts":{"dev":"vite dev --port 3000"},"dependencies":{"vite":"^6"}}"#,
+        )
+        .unwrap();
+
+        let d = DevServerManager::detect(&dir).unwrap();
+        let cmd = d.command.join(" ");
+        // We add no port at all: the script already carries `--port 3000`.
+        assert_eq!(cmd.matches("--port").count(), 0, "we must add no port: {cmd}");
+        assert!(cmd.ends_with("npm run dev"), "got {cmd}");
+        assert_eq!(d.suggested_port, 0, "the script decides; we read the URL");
+        let _ = fs::remove_dir_all(&dir);
+
+        assert!(script_pins_port("vite dev --port 3000"));
+        assert!(script_pins_port("next dev -p 4000"));
+        assert!(script_pins_port("vite --port=8080"));
+        assert!(!script_pins_port("vite dev"));
+        assert!(!script_pins_port("next dev --turbo"));
+    }
+
+    /// stop() must free the port. The server is a grandchild (sh -> npm -> node),
+    /// so killing only our direct child orphans it — that is how week-old node
+    /// processes ended up squatting 3000..3006.
+    #[tokio::test]
+    #[ignore = "needs a real npm project; set BOMB_DEVSERVER_FIXTURE"]
+    async fn stop_frees_the_port_it_took() {
+        let Ok(dir) = std::env::var("BOMB_DEVSERVER_FIXTURE") else {
+            panic!("set BOMB_DEVSERVER_FIXTURE to a vite project");
+        };
+        let mgr = DevServerManager::new();
+        let st = mgr.start(Path::new(&dir), false).await.expect("start");
+        let port = st.port.expect("a port");
+        assert!(port_is_bound(port), "server should be up on {port}");
+
+        mgr.stop().await;
+        // Give the group a moment to actually die.
+        tokio::time::sleep(Duration::from_millis(800)).await;
+        assert!(
+            !port_is_bound(port),
+            "port {port} still held after stop() — the server was orphaned"
+        );
     }
 
     #[test]
