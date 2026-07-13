@@ -280,12 +280,65 @@
 
         <section id="view-settings" class="view">
           <div class="pane-pad">
-            <div class="toolbar">
-              <button id="btn-status" class="btn primary">Status</button>
-              <button id="btn-baseline" class="btn">Baseline</button>
-              <button id="btn-config" class="btn">Config</button>
-              <button id="btn-haven" class="btn">Haven</button>
-              <button id="btn-shutdown" class="btn danger ghost">Shutdown all</button>
+            <div class="settings-card" id="runtime-card">
+              <div class="settings-card-head">
+                <span class="settings-card-title">Runtime</span>
+                <span id="rt-state" class="badge saved">checking…</span>
+                <button id="btn-status" class="btn ghost" title="Re-check">↻</button>
+              </div>
+              <div id="rt-grid" class="rt-grid"></div>
+              <details class="rt-raw">
+                <summary class="muted">Diagnostics</summary>
+                <div class="toolbar">
+                  <button id="btn-baseline" class="btn">Baseline</button>
+                  <button id="btn-config" class="btn">Raw config</button>
+                  <button id="btn-haven" class="btn">Haven status</button>
+                </div>
+                <pre id="sys-out" class="mono-pane"></pre>
+              </details>
+            </div>
+
+            <div class="settings-card" id="config-card">
+              <div class="settings-card-head">
+                <span class="settings-card-title">Settings</span>
+                <span id="cfg-saved" class="badge saved" style="display:none">saved</span>
+              </div>
+              <div class="settings-grid">
+                <label class="toggle" title="New threads in a git project get their own worktree + branch">
+                  <input id="cfg-worktree" type="checkbox" /> <span>isolate new threads in worktrees</span>
+                </label>
+                <label class="toggle" title="Plan pill starts on for new threads">
+                  <input id="cfg-plan" type="checkbox" /> <span>plan mode by default</span>
+                </label>
+                <label class="toggle" title="⚠ Auto-approves every tool call — approvals never shown">
+                  <input id="cfg-yolo" type="checkbox" /> <span>yolo (always approve) by default</span>
+                </label>
+                <label class="toggle" title="Plain-English narrator in the right panel">
+                  <input id="cfg-explainer" type="checkbox" /> <span>explainer narration</span>
+                </label>
+              </div>
+              <div class="settings-grid">
+                <label class="settings-field">
+                  <span>Max concurrent sessions</span>
+                  <input id="cfg-max-sessions" type="number" min="1" max="50" />
+                </label>
+                <label class="settings-field">
+                  <span>Sandbox profile</span>
+                  <select id="cfg-sandbox">
+                    <option value="read_only">read_only</option>
+                    <option value="workspace">workspace</option>
+                    <option value="unrestricted">unrestricted</option>
+                  </select>
+                </label>
+              </div>
+              <label class="settings-field grow">
+                <span>Denied commands — one rule per line, blocked before any approval (e.g. <code>Bash(sudo *)</code>)</span>
+                <textarea id="cfg-deny" rows="4" spellcheck="false"></textarea>
+              </label>
+              <div class="toolbar">
+                <button id="btn-cfg-save" class="btn primary">Save settings</button>
+                <span class="muted">Applies to new threads; deny rules apply immediately.</span>
+              </div>
             </div>
 
             <div class="settings-card" id="haven-card">
@@ -332,7 +385,15 @@
               <pre id="haven-out" class="mono-pane" style="display:none"></pre>
             </div>
 
-            <pre id="sys-out" class="mono-pane"></pre>
+            <div class="settings-card danger-zone">
+              <div class="settings-card-head">
+                <span class="settings-card-title">Danger zone</span>
+              </div>
+              <div class="toolbar">
+                <button id="btn-checkpoint" class="btn" title="Flush the thread database to disk now">Checkpoint database</button>
+                <button id="btn-shutdown" class="btn danger ghost" title="Kill every running agent process">Shut down all agents</button>
+              </div>
+            </div>
           </div>
         </section>
       </main>

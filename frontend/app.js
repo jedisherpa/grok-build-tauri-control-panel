@@ -552,6 +552,10 @@ function activateView(name) {
   if (name === "worktrees") refreshWorktrees();
   if (name === "mcp") refreshMcpView();
   if (name === "memory") refreshMemoryView();
+  if (name === "settings") {
+    refreshRuntimeCard();
+    loadSettingsCard();
+  }
 }
 
 document.querySelectorAll(".nav-item").forEach((btn) => {
@@ -3875,7 +3879,10 @@ $("btn-mem-export") &&
   });
 
 // System
-$("btn-status").onclick = () => refreshStatus().catch(toastError);
+$("btn-status").onclick = () => {
+  refreshStatus().catch(toastError);
+  refreshRuntimeCard();
+};
 $("btn-haven").onclick = async () => {
   try {
     const st = await invoke("haven_status");
@@ -4087,15 +4094,128 @@ $("btn-config").onclick = async () => {
   }
 };
 $("btn-shutdown").onclick = async () => {
+  const ok = await askConfirm(
+    "Shut down all running agents?\n\nThreads are kept (they resume on your next message), but any in-flight work is stopped.",
+    { title: "Shut down all agents" }
+  );
+  if (!ok) return;
   try {
     await invoke("shutdown_all");
     state.selectedSession = null;
     await refreshSessions();
-    pushEvent("shutdown all", "ok");
+    pushEvent("all agents shut down", "ok", null, { force: true });
   } catch (e) {
     toastError(e);
   }
 };
+$("btn-checkpoint") &&
+  ($("btn-checkpoint").onclick = async () => {
+    try {
+      await invoke("persistence_checkpoint");
+      pushEvent("database checkpointed", "ok", null, { force: true });
+    } catch (e) {
+      toastError(e);
+    }
+  });
+
+// ── System: runtime card + settings editor ───────────────────────────────
+async function refreshRuntimeCard() {
+  const grid = $("rt-grid");
+  const state_ = $("rt-state");
+  if (!grid) return;
+  try {
+    const st = await invoke("get_runtime_status");
+    if (state_) {
+      state_.textContent = st.ready ? "ready" : "not ready";
+      state_.className = `badge ${st.ready ? "running" : "failed"}`;
+      state_.title = st.message || "";
+    }
+    const rows = [
+      ["Status", st.message || (st.ready ? "ready" : "not ready")],
+      ["Grok binary", `${st.grokBinary || "?"}${st.grokVersion ? ` · ${st.grokVersion}` : ""}`],
+      ["Live sessions", String(st.sessionCount ?? 0)],
+      ["MCP servers", String(st.mcpCount ?? 0)],
+      ["Default folder", st.defaultCwd || "—"],
+      ["Config file", st.configPath || "—"],
+      ["Worktrees", st.worktreesDir || "—"],
+    ];
+    grid.innerHTML = rows
+      .map(
+        ([k, v]) =>
+          `<div class="rt-k muted">${escapeHtml(k)}</div><div class="rt-v">${escapeHtml(String(v))}</div>`
+      )
+      .join("");
+  } catch (e) {
+    grid.innerHTML = `<div class="empty-hint">${escapeHtml(String(e))}</div>`;
+  }
+}
+
+let cfgCache = null;
+async function loadSettingsCard() {
+  try {
+    cfgCache = await invoke("get_config");
+  } catch (e) {
+    return;
+  }
+  const c = cfgCache;
+  const g = (a, b) => c[a] ?? c[b];
+  const set = (id, val) => {
+    const el = $(id);
+    if (el) el.checked = !!val;
+  };
+  set("cfg-worktree", g("worktree_isolation_default", "worktreeIsolationDefault"));
+  set("cfg-plan", g("plan_mode_default", "planModeDefault"));
+  set("cfg-yolo", g("always_approve_default", "alwaysApproveDefault"));
+  set("cfg-explainer", g("explainer_enabled", "explainerEnabled"));
+  if ($("cfg-max-sessions"))
+    $("cfg-max-sessions").value = g("max_concurrent_sessions", "maxConcurrentSessions") ?? 10;
+  if ($("cfg-sandbox")) $("cfg-sandbox").value = g("sandbox_profile", "sandboxProfile") || "workspace";
+  const perms = c.permissions || {};
+  if ($("cfg-deny")) $("cfg-deny").value = (perms.deny || []).join("\n");
+}
+
+$("btn-cfg-save") &&
+  ($("btn-cfg-save").onclick = async () => {
+    if (!cfgCache) await loadSettingsCard();
+    if (!cfgCache) return;
+    // Read-modify-write the full config so unknown fields survive.
+    const c = JSON.parse(JSON.stringify(cfgCache));
+    const put = (snake, camel, val) => {
+      if (snake in c) c[snake] = val;
+      else if (camel in c) c[camel] = val;
+      else c[snake] = val;
+    };
+    put("worktree_isolation_default", "worktreeIsolationDefault", !!$("cfg-worktree")?.checked);
+    put("plan_mode_default", "planModeDefault", !!$("cfg-plan")?.checked);
+    put("always_approve_default", "alwaysApproveDefault", !!$("cfg-yolo")?.checked);
+    put("explainer_enabled", "explainerEnabled", !!$("cfg-explainer")?.checked);
+    put(
+      "max_concurrent_sessions",
+      "maxConcurrentSessions",
+      Math.max(1, Number($("cfg-max-sessions")?.value) || 10)
+    );
+    put("sandbox_profile", "sandboxProfile", $("cfg-sandbox")?.value || "workspace");
+    const deny = ($("cfg-deny")?.value || "")
+      .split("\n")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    c.permissions = { ...(c.permissions || {}), deny };
+    try {
+      await invoke("save_config", { config: c });
+      cfgCache = c;
+      // Keep the live explainer + composer pills in sync with the saved defaults.
+      state.explainerEnabled = !!$("cfg-explainer")?.checked;
+      await invoke("set_explainer_enabled", { enabled: state.explainerEnabled }).catch(() => {});
+      const saved = $("cfg-saved");
+      if (saved) {
+        saved.style.display = "";
+        setTimeout(() => (saved.style.display = "none"), 1800);
+      }
+      pushEvent("settings saved", "ok", null, { force: true });
+    } catch (e) {
+      toastError(e);
+    }
+  });
 
 // Explainer toggle + demoted Log accordion.
 function wireExplainer() {
