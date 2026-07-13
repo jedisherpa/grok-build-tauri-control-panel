@@ -3,14 +3,79 @@
 use std::net::TcpListener;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
+use regex::Regex;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::Mutex;
 use tracing::{info, warn};
+
+/// Package manager to drive, chosen by lockfile.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Pm {
+    Npm,
+    Pnpm,
+    Yarn,
+    Bun,
+}
+
+impl Pm {
+    fn detect(cwd: &Path) -> Pm {
+        if cwd.join("pnpm-lock.yaml").is_file() {
+            Pm::Pnpm
+        } else if cwd.join("yarn.lock").is_file() {
+            Pm::Yarn
+        } else if cwd.join("bun.lockb").is_file() || cwd.join("bun.lock").is_file() {
+            Pm::Bun
+        } else {
+            Pm::Npm
+        }
+    }
+
+    /// Run a package.json script, with optional extra args for the script itself.
+    /// Only npm needs `--` to stop swallowing the flags.
+    fn run(&self, script: &str, args: &str) -> String {
+        let (base, sep) = match self {
+            Pm::Npm => ("npm run", " --"),
+            Pm::Pnpm => ("pnpm", ""),
+            Pm::Yarn => ("yarn", ""),
+            Pm::Bun => ("bun run", ""),
+        };
+        if args.is_empty() {
+            format!("{base} {script}")
+        } else {
+            format!("{base} {script}{sep} {args}")
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            Pm::Npm => "npm",
+            Pm::Pnpm => "pnpm",
+            Pm::Yarn => "yarn",
+            Pm::Bun => "bun",
+        }
+    }
+}
+
+/// Pull a local dev URL out of a line of server output — vite prints
+/// "  ➜  Local:   http://localhost:5173/", next "- Local: http://localhost:3000".
+///
+/// This is how we learn the *real* port: frameworks silently move to another
+/// one when ours is busy, so anything we guessed up front may be a lie.
+fn extract_local_url(line: &str) -> Option<String> {
+    static RE: OnceLock<Regex> = OnceLock::new();
+    let re = RE.get_or_init(|| {
+        // A port is required: a bare "http://localhost" tells us nothing.
+        Regex::new(r"https?://(?:localhost|127\.0\.0\.1|0\.0\.0\.0):(\d{2,5})")
+            .expect("static regex")
+    });
+    let port: u16 = re.captures(line)?.get(1)?.as_str().parse().ok()?;
+    Some(format!("http://127.0.0.1:{port}"))
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -154,46 +219,51 @@ impl DevServerManager {
                 if let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) {
                     let scripts = v.get("scripts").cloned().unwrap_or_default();
                     let deps = merge_deps(&v);
-                    // Prefer framework defaults
-                    if has_dep(&deps, "next")
-                        || (scripts.get("dev").is_some() && raw.contains("next"))
-                    {
+                    let pm = Pm::detect(cwd);
+                    let has_dev = scripts.get("dev").is_some();
+
+                    // Framework defaults. We ask for a port we have confirmed is
+                    // free, but the server still gets the last word — start()
+                    // reads the URL it actually prints.
+                    if has_dep(&deps, "next") || (has_dev && raw.contains("next")) {
+                        let port = free_port(3000);
                         return Ok(DetectedProject {
                             cwd: cwd.display().to_string(),
                             kind: DevServerKind::Npm,
-                            command: shell_cmd("npm run dev -- --port 3000"),
-                            suggested_port: 3000,
-                            label: "Next.js / npm run dev".into(),
-                        });
-                    }
-                    if has_dep(&deps, "vite")
-                        || (scripts.get("dev").is_some() && raw.contains("vite"))
-                    {
-                        return Ok(DetectedProject {
-                            cwd: cwd.display().to_string(),
-                            kind: DevServerKind::Npm,
-                            command: shell_cmd("npm run dev -- --port 5173 --host"),
-                            suggested_port: 5173,
-                            label: "Vite / npm run dev".into(),
-                        });
-                    }
-                    if scripts.get("dev").is_some() {
-                        let port = guess_port_from_package(&raw).unwrap_or(5173);
-                        return Ok(DetectedProject {
-                            cwd: cwd.display().to_string(),
-                            kind: DevServerKind::Npm,
-                            command: shell_cmd("npm run dev"),
+                            command: shell_cmd(&pm.run("dev", &format!("--port {port}"))),
                             suggested_port: port,
-                            label: "npm run dev".into(),
+                            label: format!("Next.js · {} run dev", pm.label()),
+                        });
+                    }
+                    if has_dep(&deps, "vite") || (has_dev && raw.contains("vite")) {
+                        let port = free_port(5173);
+                        return Ok(DetectedProject {
+                            cwd: cwd.display().to_string(),
+                            kind: DevServerKind::Npm,
+                            command: shell_cmd(&pm.run("dev", &format!("--port {port} --host"))),
+                            suggested_port: port,
+                            label: format!("Vite · {} run dev", pm.label()),
+                        });
+                    }
+                    // Unknown framework: run its script untouched and let it pick
+                    // the port. Guessing one from the text of package.json was
+                    // never better than a coin flip.
+                    if has_dev {
+                        return Ok(DetectedProject {
+                            cwd: cwd.display().to_string(),
+                            kind: DevServerKind::Npm,
+                            command: shell_cmd(&pm.run("dev", "")),
+                            suggested_port: 0, // unknown until it tells us
+                            label: format!("{} run dev", pm.label()),
                         });
                     }
                     if scripts.get("start").is_some() {
                         return Ok(DetectedProject {
                             cwd: cwd.display().to_string(),
                             kind: DevServerKind::Npm,
-                            command: shell_cmd("npm start"),
-                            suggested_port: 3000,
-                            label: "npm start".into(),
+                            command: shell_cmd(&pm.run("start", "")),
+                            suggested_port: 0,
+                            label: format!("{} start", pm.label()),
                         });
                     }
                 }
@@ -269,7 +339,6 @@ impl DevServerManager {
 
         let detected = Self::detect(cwd)?;
         let port = detected.suggested_port;
-        let url = format!("http://127.0.0.1:{port}");
         let work_dir = PathBuf::from(&detected.cwd);
 
         let (program, args) = split_command(&detected.command)?;
@@ -295,34 +364,39 @@ impl DevServerManager {
         if !home.is_empty() {
             cmd.env("HOME", &home);
         }
-        cmd.env("BROWSER", "none"); // don't auto-open second browser from vite/next
-        cmd.env("PORT", port.to_string());
+        cmd.env("BROWSER", "none"); // don't let vite/next open a browser of their own
+        if port != 0 {
+            cmd.env("PORT", port.to_string());
+        }
 
-        info!(?program, ?args, cwd = %work_dir.display(), %url, "starting dev server");
+        info!(?program, ?args, cwd = %work_dir.display(), port, "starting dev server");
         let mut child = cmd
             .spawn()
             .map_err(|e| format!("failed to start `{cmd_display}`: {e}"))?;
 
+        // Both pipes feed the same ring buffer, and both watch for the URL the
+        // server prints — that announcement is the only trustworthy source of
+        // the port, since a framework will quietly move off a busy one.
         let log_tail = Arc::new(Mutex::new(Vec::new()));
-        if let Some(stdout) = child.stdout.take() {
+        let found_url: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        for pipe in [
+            child.stdout.take().map(PipeOut::Stdout),
+            child.stderr.take().map(PipeOut::Stderr),
+        ]
+        .into_iter()
+        .flatten()
+        {
             let logs = log_tail.clone();
+            let url_slot = found_url.clone();
             tokio::spawn(async move {
-                let mut lines = BufReader::new(stdout).lines();
+                let mut lines = pipe.lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    let mut g = logs.lock().await;
-                    g.push(line);
-                    if g.len() > 80 {
-                        let drain = g.len() - 80;
-                        g.drain(0..drain);
+                    if let Some(u) = extract_local_url(&line) {
+                        let mut slot = url_slot.lock().await;
+                        if slot.is_none() {
+                            *slot = Some(u);
+                        }
                     }
-                }
-            });
-        }
-        if let Some(stderr) = child.stderr.take() {
-            let logs = log_tail.clone();
-            tokio::spawn(async move {
-                let mut lines = BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
                     let mut g = logs.lock().await;
                     g.push(line);
                     if g.len() > 80 {
@@ -333,11 +407,12 @@ impl DevServerManager {
             });
         }
 
-        // Poll for the port to actually bind (up to ~12s) instead of a fixed
-        // 900ms sleep declaring success before the server exists. Frameworks
-        // that auto-increment a busy port are reported as such.
-        let mut bound = false;
-        for _ in 0..40 {
+        // Wait for the server to announce itself (up to ~25s). Probing the port
+        // we asked for is only a fallback: if some *other* process already holds
+        // it, a successful connect would have us pointing at the wrong server.
+        let deadline = std::time::Instant::now() + Duration::from_secs(25);
+        let mut url: Option<String> = None;
+        while std::time::Instant::now() < deadline {
             if let Ok(Some(status)) = child.try_wait() {
                 let logs = log_tail.lock().await.clone();
                 return Err(format!(
@@ -345,21 +420,31 @@ impl DevServerManager {
                     logs.join("\n")
                 ));
             }
-            if std::net::TcpStream::connect_timeout(
-                &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
-                Duration::from_millis(150),
-            )
-            .is_ok()
-            {
-                bound = true;
+            if let Some(u) = found_url.lock().await.clone() {
+                url = Some(u);
                 break;
             }
-            tokio::time::sleep(Duration::from_millis(300)).await;
+            tokio::time::sleep(Duration::from_millis(200)).await;
         }
-        if !bound {
-            let logs = log_tail.lock().await.clone();
-            warn!(port, "dev server has not bound its expected port yet; it may be using another port\n{}", logs.join("\n"));
+        if url.is_none() && port != 0 && port_is_bound(port) {
+            warn!(port, "dev server printed no URL; falling back to the requested port");
+            url = Some(format!("http://127.0.0.1:{port}"));
         }
+
+        let logs = log_tail.lock().await.clone();
+        let Some(url) = url else {
+            // Do not report a URL we cannot stand behind.
+            let _ = child.kill().await;
+            return Err(format!(
+                "`{cmd_display}` started but never served a URL — is it a dev server?\n{}",
+                logs.join("\n")
+            ));
+        };
+        let bound_port = url
+            .rsplit(':')
+            .next()
+            .and_then(|p| p.parse::<u16>().ok())
+            .unwrap_or(port);
 
         {
             let mut guard = self.inner.lock().await;
@@ -368,23 +453,16 @@ impl DevServerManager {
                 kind: detected.kind.clone(),
                 cwd: work_dir,
                 url: url.clone(),
-                port,
-                command: cmd_display.clone(),
+                port: bound_port,
+                command: cmd_display,
                 log_tail: log_tail.clone(),
             });
         }
 
+        // One open, of a URL we have actually seen — no more double-open to
+        // paper over a browser racing a server that was not up yet.
         if open_browser {
             let _ = open_browser_url(&url).await;
-        }
-
-        // Give frameworks a bit longer, then re-open if first open was early
-        if matches!(detected.kind, DevServerKind::Npm) {
-            let url2 = url.clone();
-            tokio::spawn(async move {
-                tokio::time::sleep(Duration::from_secs(2)).await;
-                let _ = open_browser_url(&url2).await;
-            });
         }
 
         Ok(self.status().await)
@@ -467,10 +545,47 @@ fn has_dep(deps: &serde_json::Map<String, serde_json::Value>, name: &str) -> boo
     deps.contains_key(name)
 }
 
-fn guess_port_from_package(raw: &str) -> Option<u16> {
-    [5173u16, 3000, 4173, 8080, 8000, 4200]
-        .into_iter()
-        .find(|&p| raw.contains(&p.to_string()))
+fn port_is_bound(port: u16) -> bool {
+    std::net::TcpStream::connect_timeout(
+        &std::net::SocketAddr::from(([127, 0, 0, 1], port)),
+        Duration::from_millis(200),
+    )
+    .is_ok()
+}
+
+/// stdout and stderr differ in type but not in how we read them; frameworks are
+/// inconsistent about which one they announce the URL on.
+enum PipeOut {
+    Stdout(tokio::process::ChildStdout),
+    Stderr(tokio::process::ChildStderr),
+}
+
+impl PipeOut {
+    fn lines(self) -> Box<dyn LineSource> {
+        match self {
+            PipeOut::Stdout(s) => Box::new(BufReader::new(s).lines()),
+            PipeOut::Stderr(s) => Box::new(BufReader::new(s).lines()),
+        }
+    }
+}
+
+/// Object-safe view over `Lines<BufReader<_>>` for the two pipe types.
+trait LineSource: Send {
+    fn next_line(
+        &mut self,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = std::io::Result<Option<String>>> + Send + '_>,
+    >;
+}
+
+impl<R: tokio::io::AsyncBufRead + Unpin + Send> LineSource for tokio::io::Lines<R> {
+    fn next_line(
+        &mut self,
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = std::io::Result<Option<String>>> + Send + '_>,
+    > {
+        Box::pin(tokio::io::Lines::next_line(self))
+    }
 }
 
 async fn open_browser_url(url: &str) -> Result<(), String> {
@@ -518,7 +633,91 @@ mod tests {
         .unwrap();
         let d = DevServerManager::detect(&dir).unwrap();
         assert_eq!(d.kind, DevServerKind::Npm);
-        assert_eq!(d.suggested_port, 5173);
+        // The port must be free, but need not be the canonical one: another
+        // vite may already hold 5173.
+        assert!(d.suggested_port >= 5173, "got {}", d.suggested_port);
+        let cmd = d.command.join(" ");
+        assert!(cmd.contains("npm run dev -- --port"), "got {cmd}");
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lockfile_picks_the_package_manager() {
+        let dir = std::env::temp_dir().join(format!("bomb-code-pnpm-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("package.json"), r#"{"scripts":{"dev":"astro dev"}}"#).unwrap();
+        fs::write(dir.join("pnpm-lock.yaml"), "lockfileVersion: 9").unwrap();
+
+        let d = DevServerManager::detect(&dir).unwrap();
+        let cmd = d.command.join(" ");
+        assert!(cmd.contains("pnpm dev"), "got {cmd}");
+        assert!(!cmd.contains("npm run"), "npm must not be assumed: {cmd}");
+        // An unknown framework gets no invented port — it tells us at runtime.
+        assert_eq!(d.suggested_port, 0);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn reads_the_url_the_server_prints() {
+        // The formats we actually have to survive, ANSI colour and all.
+        let cases = [
+            ("  ➜  Local:   http://localhost:5173/", 5173),
+            ("- Local:        http://localhost:3001", 3001),
+            ("\x1b[32m  ➜\x1b[39m  \x1b[1mLocal\x1b[22m:   \x1b[36mhttp://localhost:4321/\x1b[39m", 4321),
+            ("Serving HTTP on 127.0.0.1:8765 ...", 0), // no scheme: not a URL
+            ("VITE ready in 300 ms", 0),
+            ("listening on http://0.0.0.0:8080", 8080),
+        ];
+        for (line, want) in cases {
+            let got = extract_local_url(line);
+            if want == 0 {
+                assert!(got.is_none(), "{line:?} should not yield a URL, got {got:?}");
+            } else {
+                assert_eq!(
+                    got.as_deref(),
+                    Some(format!("http://127.0.0.1:{want}").as_str()),
+                    "line: {line:?}"
+                );
+            }
+        }
+    }
+
+    /// End-to-end against a real vite server whose preferred port is taken —
+    /// the case that used to report a URL nobody was listening on. Needs npm and
+    /// a prepared project, so it is opt-in:
+    ///   BOMB_DEVSERVER_FIXTURE=/path/to/vite/project \
+    ///     cargo test -p grok-build-control-panel -- --ignored --nocapture
+    #[tokio::test]
+    #[ignore = "needs a real npm project; set BOMB_DEVSERVER_FIXTURE"]
+    async fn reports_the_port_vite_actually_took() {
+        let Ok(dir) = std::env::var("BOMB_DEVSERVER_FIXTURE") else {
+            panic!("set BOMB_DEVSERVER_FIXTURE to a vite project");
+        };
+        let dir = PathBuf::from(dir);
+        // Squat on vite's default so it is forced to move.
+        let squat = TcpListener::bind(("127.0.0.1", 5173)).expect("bind 5173");
+
+        let mgr = DevServerManager::new();
+        let st = mgr.start(&dir, false).await.expect("dev server should start");
+        println!("url={:?} port={:?}", st.url, st.port);
+
+        let url = st.url.clone().expect("a URL");
+        let port = st.port.expect("a port");
+        assert_ne!(port, 5173, "5173 is squatted; vite must have moved");
+        assert!(url.ends_with(&port.to_string()));
+        // The decisive check: something is really listening where we point.
+        assert!(port_is_bound(port), "nothing is serving {url}");
+
+        mgr.stop().await;
+        drop(squat);
+    }
+
+    #[test]
+    fn ignores_a_url_without_a_port() {
+        // "http://localhost" alone cannot tell us where to point the browser.
+        assert!(extract_local_url("open http://localhost to continue").is_none());
+        // ...and a remote host is never our dev server.
+        assert!(extract_local_url("fetching https://registry.npmjs.org:443/x").is_none());
     }
 }
