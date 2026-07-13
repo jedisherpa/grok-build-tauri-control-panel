@@ -552,7 +552,7 @@ body {
 
 .transcript {
   flex: 1; min-height: 0; overflow: auto;
-  padding: 12px 14px 10px;
+  padding: 12px 14px 16px;
   font-family: var(--font);
   font-size: 12.5px;
   line-height: 1.45;

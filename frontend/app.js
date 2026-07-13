@@ -40,6 +40,8 @@ const state = {
   projects: [],
   /** Show raw ACP protocol lines in the transcript (off by default — noise). */
   showAcpLines: localStorage.getItem("bomb.showAcp") === "1",
+  /** Sticky "follow the tail" — disarmed by scrolling up, re-armed at bottom. */
+  followTail: true,
   /** sessionId → ELI12 explainer cards for the right panel. */
   explainBySession: new Map(),
   explainPending: false,
@@ -639,15 +641,15 @@ function appendTranscript(sessionId, role, body, at = nowIso(), opts = {}) {
   }
 }
 
-/** True when the user is following the tail (within a small threshold). */
+/** True when the view sits at (or very near) the tail. Generous threshold:
+ *  a growing tool row or the turn dock appearing must not disarm following. */
 function isNearBottom(root) {
   if (!root) return true;
-  return root.scrollHeight - root.scrollTop - root.clientHeight < 48;
+  return root.scrollHeight - root.scrollTop - root.clientHeight < 120;
 }
 
-/** Fast path: update only the last streaming block. */
-/// Pin the transcript to the bottom reliably: once now, once after layout,
-/// and once more after async content (bomb sprites) settles height.
+/** Pin the transcript to the bottom (now + after layout). Height changes that
+ *  land later are caught by the ResizeObserver below, so no timeout guessing. */
 function scrollTranscriptBottom() {
   const root = $("transcript");
   if (!root) return;
@@ -655,10 +657,30 @@ function scrollTranscriptBottom() {
     root.scrollTop = root.scrollHeight;
   };
   pin();
-  requestAnimationFrame(() => {
-    pin();
-    setTimeout(pin, 60);
+  requestAnimationFrame(pin);
+}
+
+/** Follow state is STICKY, not re-derived from geometry on every render:
+ *  the turn dock stealing height (or a row growing) used to knock the view
+ *  off-bottom, after which nothing ever re-armed and the rest of the turn
+ *  streamed below the fold. The scroll listener disarms on scroll-up and
+ *  re-arms when the user returns to the bottom. */
+function wireTranscriptFollow() {
+  const root = $("transcript");
+  if (!root) return;
+  root.addEventListener("scroll", () => {
+    state.followTail = isNearBottom(root);
   });
+  // Any late height change (markdown/code blocks replacing raw stream text,
+  // images, the composer growing) re-pins while we're following.
+  if (typeof ResizeObserver === "function") {
+    const ro = new ResizeObserver(() => {
+      if (state.followTail) scrollTranscriptBottom();
+    });
+    ro.observe(root);
+    const dock = $("turn-dock");
+    if (dock) ro.observe(dock); // dock appearing steals ~130px of viewport
+  }
 }
 
 function patchLastTranscriptBody(entry) {
@@ -667,7 +689,7 @@ function patchLastTranscriptBody(entry) {
     renderTranscript();
     return;
   }
-  const follow = isNearBottom(root);
+  const follow = state.followTail;
   const blocks = root.querySelectorAll(".t-block");
   const last = blocks[blocks.length - 1];
   if (
@@ -696,7 +718,7 @@ function patchLastTranscriptBody(entry) {
       btn.textContent = `▸ ${lines.length - 1} more line${lines.length > 2 ? "s" : ""}`;
     } else {
       // Structure not built yet (entry just grew past one line).
-      renderTranscript({ keepScroll: true });
+      renderTranscript();
       return;
     }
   } else {
@@ -787,7 +809,7 @@ function handleExplainEvent(sid, payload) {
       const e = entries[i];
       if (e.role === "approval" && e.meta?.requestId === payload.requestId) {
         e.meta.explanation = text;
-        if (sid === state.selectedSession) renderTranscript({ keepScroll: true });
+        if (sid === state.selectedSession) renderTranscript();
         break;
       }
     }
@@ -843,17 +865,18 @@ function resolveApprovalEntry(sessionId, requestId, resolution) {
     }
   }
   if (sessionId === state.selectedSession) {
-    renderTranscript({ keepScroll: true });
+    renderTranscript();
   }
 }
 
-function renderTranscript({ keepScroll = false } = {}) {
-  // Respect the reader: full re-renders only pin to bottom when the user was
-  // already following the tail. Switching threads always starts at the tail.
+function renderTranscript() {
+  // Follow state is sticky (state.followTail) — never re-derived here, since
+  // render-time geometry is exactly what a dock resize corrupts. Switching
+  // threads always starts at the tail.
   const rootEl = $("transcript");
   const switchedSession = renderTranscript._lastSid !== state.selectedSession;
   renderTranscript._lastSid = state.selectedSession;
-  const wasNearBottom = switchedSession || isNearBottom(rootEl);
+  if (switchedSession) state.followTail = true;
   const prevScroll = rootEl?.scrollTop ?? null;
   const root = rootEl;
   const sid = state.selectedSession;
@@ -991,7 +1014,7 @@ function renderTranscript({ keepScroll = false } = {}) {
       const entry = entries[Number(btn.dataset.idx)];
       if (entry) {
         entry.expanded = !entry.expanded;
-        renderTranscript({ keepScroll: true });
+        renderTranscript();
       }
     };
   });
@@ -1027,7 +1050,8 @@ function renderTranscript({ keepScroll = false } = {}) {
     }
     fill();
   });
-  if ((keepScroll || !wasNearBottom) && prevScroll != null) {
+  if (!state.followTail && prevScroll != null) {
+    // The reader scrolled away — hold their position.
     root.scrollTop = prevScroll;
   } else {
     scrollTranscriptBottom();
@@ -1602,7 +1626,7 @@ function handleControlEvent(ev) {
           entry.body = body;
           entry.at = nowIso();
           updated = true;
-          if (sid === state.selectedSession) renderTranscript({ keepScroll: true });
+          if (sid === state.selectedSession) renderTranscript();
           break;
         }
       }
@@ -2794,6 +2818,8 @@ async function sendPrompt() {
   try {
     const prompt = $("prompt").value;
     if (!prompt.trim()) throw new Error("Empty prompt");
+    // Sending means "I want to watch this" — re-arm tail following.
+    state.followTail = true;
     if (state.selectedSession && turnActive()) {
       pushEvent("turn in progress — wait for it to finish or cancel first", "err", "wait", {
         force: true,
@@ -4499,4 +4525,5 @@ wireModeButtons();
 wireProjectChip();
 wireAgentTalk();
 wireExplainer();
+wireTranscriptFollow();
 boot();
