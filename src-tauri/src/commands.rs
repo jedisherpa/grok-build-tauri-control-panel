@@ -2367,10 +2367,28 @@ pub fn persist_control_event(db: &grok_persistence::Persistence, ev: &ControlEve
 // ── Dev server / live preview ────────────────────────────────────────────
 
 fn resolve_preview_cwd(state: &AppState, cwd: Option<String>, session_id: Option<String>) -> Result<PathBuf, String> {
-    if let Some(id) = session_id {
-        let uuid = Uuid::parse_str(&id).map_err(err)?;
-        let snap = state.registry.get_snapshot(uuid).map_err(err)?;
-        return Ok(PathBuf::from(snap.metadata.cwd));
+    // A thread's own directory wins (it may be a worktree). Live threads carry
+    // it in the registry; a saved thread has no live snapshot but its cwd is
+    // still on disk — falling straight through to "session not found" made
+    // preview unusable for any thread whose agent was not currently running.
+    if let Some(id) = session_id.as_deref() {
+        if let Ok(uuid) = Uuid::parse_str(id) {
+            let from_thread = state
+                .registry
+                .get_snapshot(uuid)
+                .map(|snap| snap.metadata.cwd)
+                .ok()
+                .or_else(|| state.persistence.get_session(uuid).map(|rec| rec.cwd).ok());
+            if let Some(dir) = from_thread {
+                let p = PathBuf::from(dir);
+                if p.is_dir() {
+                    return Ok(p);
+                }
+                // A worktree that has since been pruned: fall back to the
+                // project cwd rather than dead-ending.
+                tracing::warn!(path = %p.display(), "thread cwd is gone; falling back to project cwd");
+            }
+        }
     }
     if let Some(c) = cwd {
         let p = PathBuf::from(c);
