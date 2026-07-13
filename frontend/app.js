@@ -245,8 +245,8 @@ function updateBombChrome() {
   if (brand) brand.classList.toggle("live", anyBusy);
   const brandSub = $("brand-sub");
   if (brandSub) {
-    brandSub.textContent =
-      view.active && view.elapsed ? `Live · ${view.elapsed}` : "Grok Build panel";
+    // Blank when idle — this slot exists only for the live turn timer.
+    brandSub.textContent = view.active && view.elapsed ? `Live · ${view.elapsed}` : "";
   }
 
   // Primary turn dock
@@ -2998,6 +2998,7 @@ $("btn-new-project") &&
         pushEvent(`project added · ${String(picked).split("/").filter(Boolean).pop()}`, "ok", null, {
           force: true,
         });
+        await startAcp(); // open a thread in the new project and switch to it
       }
     } catch (e) {
       toastError(e);
