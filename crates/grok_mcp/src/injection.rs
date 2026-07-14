@@ -15,68 +15,59 @@ pub struct McpAttachment {
     pub auto: bool,
 }
 
+/// A server that was requested/eligible but excluded, with the reason why.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkippedMcp {
+    pub name: String,
+    pub reason: String,
+}
+
+/// Result of attachment resolution: what attaches, and what was dropped.
+#[derive(Debug, Clone, Default)]
+pub struct AttachmentResolution {
+    pub attached: Vec<McpServerConfigExt>,
+    pub skipped: Vec<SkippedMcp>,
+}
+
 /// Resolve which servers to attach given requested names + auto_attach flags.
+/// Explicitly requested servers that can't attach are reported in `skipped`
+/// instead of vanishing silently.
 pub fn resolve_attachments(
     available: &[McpServerConfigExt],
     requested_names: &[String],
     approved_high_risk: &[String],
     include_auto: bool,
-) -> Vec<McpServerConfigExt> {
-    let mut out = Vec::new();
+) -> AttachmentResolution {
+    let mut res = AttachmentResolution::default();
     for srv in available {
-        if !srv.enabled {
-            continue;
-        }
         let requested = requested_names.iter().any(|n| n == &srv.name);
         let auto = include_auto && srv.auto_attach;
         if !requested && !auto {
             continue;
         }
-        if srv.requires_approval || srv.high_risk {
-            if !approved_high_risk.iter().any(|n| n == &srv.name) && !requested {
-                // Auto-attach of high-risk requires explicit approval list
-                if auto && !approved_high_risk.iter().any(|n| n == &srv.name) {
-                    continue;
-                }
-            }
-            if srv.requires_approval
-                && !approved_high_risk.iter().any(|n| n == &srv.name)
-                && !requested
-            {
-                continue;
-            }
-            // If explicitly requested, still require approval flag for high-risk
-            if (srv.requires_approval || srv.high_risk)
-                && !approved_high_risk.iter().any(|n| n == &srv.name)
-            {
-                // Explicit request without approval: skip with safety
-                if requested && !approved_high_risk.iter().any(|n| n == &srv.name) {
-                    continue;
-                }
-            }
-        }
-        out.push(srv.clone());
-    }
-
-    // Simpler pass: if name is requested AND (not high-risk OR approved), include
-    // Re-do with clearer logic:
-    out.clear();
-    for srv in available {
         if !srv.enabled {
-            continue;
-        }
-        let requested = requested_names.iter().any(|n| n == &srv.name);
-        let auto = include_auto && srv.auto_attach;
-        if !requested && !auto {
+            if requested {
+                res.skipped.push(SkippedMcp {
+                    name: srv.name.clone(),
+                    reason: "disabled in panel config".into(),
+                });
+            }
             continue;
         }
         let approved = approved_high_risk.iter().any(|n| n == &srv.name);
         if (srv.high_risk || srv.requires_approval) && !approved {
+            if requested {
+                res.skipped.push(SkippedMcp {
+                    name: srv.name.clone(),
+                    reason: "requires approval (high-risk) and was not approved".into(),
+                });
+            }
             continue;
         }
-        out.push(srv.clone());
+        res.attached.push(srv.clone());
     }
-    out
+    res
 }
 
 /// Build ACP `mcpServers` JSON array for session/new.
@@ -119,22 +110,35 @@ mod tests {
     #[test]
     fn skips_high_risk_without_approval() {
         let servers = vec![sample("playwright", true, false), sample("github", false, true)];
-        let attached = resolve_attachments(&servers, &["playwright".into()], &[], true);
-        assert!(attached.iter().all(|s| s.name != "playwright"));
-        let attached = resolve_attachments(
+        let res = resolve_attachments(&servers, &["playwright".into()], &[], true);
+        assert!(res.attached.iter().all(|s| s.name != "playwright"));
+        // Explicit request without approval is reported, not silent.
+        assert!(res.skipped.iter().any(|s| s.name == "playwright"));
+        let res = resolve_attachments(
             &servers,
             &["playwright".into()],
             &["playwright".into()],
             true,
         );
-        assert!(attached.iter().any(|s| s.name == "playwright"));
+        assert!(res.attached.iter().any(|s| s.name == "playwright"));
     }
 
     #[test]
     fn auto_attach_safe() {
         let servers = vec![sample("github", false, true)];
-        let attached = resolve_attachments(&servers, &[], &[], true);
-        assert_eq!(attached.len(), 1);
+        let res = resolve_attachments(&servers, &[], &[], true);
+        assert_eq!(res.attached.len(), 1);
+        assert!(res.skipped.is_empty());
+    }
+
+    #[test]
+    fn disabled_requested_is_reported() {
+        let mut srv = sample("github", false, false);
+        srv.enabled = false;
+        let res = resolve_attachments(&[srv], &["github".into()], &[], true);
+        assert!(res.attached.is_empty());
+        assert_eq!(res.skipped.len(), 1);
+        assert!(res.skipped[0].reason.contains("disabled"));
     }
 
     #[test]

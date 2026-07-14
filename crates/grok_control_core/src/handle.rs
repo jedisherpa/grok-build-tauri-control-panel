@@ -7,6 +7,7 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use grok_acp::{AcpClient, BrainMode};
+use grok_config::Backend;
 use grok_events::SessionStatus;
 
 use crate::options::AgentMode;
@@ -18,14 +19,28 @@ pub struct SessionMetadata {
     pub acp_session_id: Option<String>,
     pub cwd: String,
     pub worktree: Option<String>,
+    /// Original project folder when cwd is a thread worktree.
+    #[serde(default)]
+    pub project_root: Option<String>,
     pub model: String,
+    /// Agent backend this session runs on; old records default to grok.
+    #[serde(default)]
+    pub backend: Backend,
     pub mode: AgentMode,
     pub status: SessionStatus,
+    /// Approval stance for this session (plan | ask | auto | yolo).
+    /// The booleans below are kept for back-compat with older records.
+    #[serde(default)]
+    pub approval_mode: grok_acp::ApprovalMode,
     pub plan_mode: bool,
     pub always_approve: bool,
     pub sandbox_profile: Option<String>,
     /// MCP server names attached at spawn time.
     pub mcp_servers: Vec<String>,
+    /// High-risk MCP approvals granted for this session (persisted so resume
+    /// doesn't silently drop approved servers).
+    #[serde(default)]
+    pub approved_high_risk_mcp: Vec<String>,
     pub created_at: DateTime<Utc>,
     pub last_activity: DateTime<Utc>,
     pub label: Option<String>,

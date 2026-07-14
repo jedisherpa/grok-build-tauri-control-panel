@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -130,15 +130,25 @@ impl LoginManager {
             };
         };
 
-        // Detect process exit
+        // Detect process exit. Don't sleep while holding the shared lock —
+        // it blocks every concurrent grok_login_status/submit_code call.
         if let Ok(Some(status)) = active.child.try_wait() {
-            let mut s = active.shared.lock().await;
-            if !s.done {
-                s.done = true;
-                s.output
-                    .push_str(&format!("\n[login process exited: {status}]\n"));
+            let first_observer = {
+                let mut s = active.shared.lock().await;
+                if s.done {
+                    false
+                } else {
+                    s.done = true;
+                    s.output
+                        .push_str(&format!("\n[login process exited: {status}]\n"));
+                    true
+                }
+            };
+            if first_observer {
+                // Give the CLI a beat to flush its credential cache.
                 tokio::time::sleep(Duration::from_millis(250)).await;
                 let auth = GrokCli::auth_status();
+                let mut s = active.shared.lock().await;
                 s.phase = if auth.logged_in {
                     LoginPhase::Completed
                 } else {
@@ -250,6 +260,7 @@ impl LoginManager {
                 let mut s = shared_out.lock().await;
                 s.output.push_str(&l);
                 s.output.push('\n');
+                cap_output(&mut s.output);
                 apply_line(&l, &mut s);
                 if s.login_url.is_some() {
                     s.phase = LoginPhase::AwaitingBrowser;
@@ -269,6 +280,7 @@ impl LoginManager {
                     let mut s = shared_err.lock().await;
                     s.output.push_str(&l);
                     s.output.push('\n');
+                    cap_output(&mut s.output);
                     apply_line(&l, &mut s);
                     if s.login_url.is_some() {
                         s.phase = LoginPhase::AwaitingBrowser;
@@ -479,62 +491,6 @@ impl GrokCli {
         }
     }
 
-    pub async fn login_oauth(&self, timeout: Duration) -> Result<LoginResult> {
-        let mgr = LoginManager::new(self.grok_path.clone());
-        let started = mgr.start_oauth_login().await?;
-        let end = Instant::now() + timeout;
-        loop {
-            let st = mgr.state().await;
-            if st.phase == LoginPhase::Completed || st.phase == LoginPhase::Failed {
-                return Ok(LoginResult {
-                    status: st.status,
-                    login_url: st.login_url,
-                    user_code: st.confirm_code,
-                    method: "oauth".into(),
-                    output: st.output_tail,
-                });
-            }
-            if Instant::now() > end {
-                return Ok(LoginResult {
-                    status: st.status,
-                    login_url: st.login_url.or(started.login_url),
-                    user_code: st.confirm_code.or(started.confirm_code),
-                    method: "oauth".into(),
-                    output: st.output_tail,
-                });
-            }
-            tokio::time::sleep(Duration::from_millis(400)).await;
-        }
-    }
-
-    pub async fn login_device(&self, timeout: Duration) -> Result<LoginResult> {
-        let mgr = LoginManager::new(self.grok_path.clone());
-        let started = mgr.start_device_login().await?;
-        let end = Instant::now() + timeout;
-        loop {
-            let st = mgr.state().await;
-            if st.phase == LoginPhase::Completed || st.phase == LoginPhase::Failed {
-                return Ok(LoginResult {
-                    status: st.status,
-                    login_url: st.login_url,
-                    user_code: st.confirm_code,
-                    method: "device".into(),
-                    output: st.output_tail,
-                });
-            }
-            if Instant::now() > end {
-                return Ok(LoginResult {
-                    status: st.status,
-                    login_url: st.login_url.or(started.login_url),
-                    user_code: st.confirm_code.or(started.confirm_code),
-                    method: "device".into(),
-                    output: st.output_tail,
-                });
-            }
-            tokio::time::sleep(Duration::from_millis(400)).await;
-        }
-    }
-
     pub async fn logout(&self) -> Result<AuthStatus> {
         if !self.grok_path.exists() {
             return Err(CliError::BinaryNotFound(
@@ -559,6 +515,21 @@ impl GrokCli {
             Err(_) => warn!("grok logout timed out"),
         }
         Ok(Self::auth_status())
+    }
+}
+
+/// Keep the captured login output bounded — a chatty CLI must not grow
+/// this buffer without limit for the lifetime of the login session.
+fn cap_output(out: &mut String) {
+    const MAX: usize = 64 * 1024;
+    if out.len() > MAX {
+        let keep = out.len() - MAX / 2;
+        let cut = out
+            .char_indices()
+            .map(|(i, _)| i)
+            .find(|&i| i >= keep)
+            .unwrap_or(0);
+        out.replace_range(..cut, "[…truncated…]\n");
     }
 }
 

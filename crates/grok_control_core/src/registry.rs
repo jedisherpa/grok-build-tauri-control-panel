@@ -9,9 +9,9 @@ use serde_json::json;
 use tracing::{info, warn};
 use uuid::Uuid;
 
-use grok_acp::{AcpClient, AcpClientConfig, AcpSpawnOptions, BrainMode, ConnectOpts};
+use grok_acp::{AcpClient, AcpClientConfig, AcpSpawnOptions, ApprovalMode, BrainMode, ConnectOpts};
 use grok_cli_wrapper::{GrokCli, HeadlessSpawnOptions};
-use grok_config::GrokConfig;
+use grok_config::{Backend, GrokConfig, ResolvedBackend, descriptor, resolve_backend};
 use grok_events::{EventBus, SessionStatus};
 
 use crate::error::{CoreError, Result};
@@ -19,10 +19,62 @@ use crate::handle::{AgentHandle, AgentHandleSnapshot, SessionMetadata};
 use crate::options::{AgentMode, SpawnOptions};
 
 pub struct SessionRegistry {
-    sessions: DashMap<Uuid, AgentHandle>,
+    sessions: Arc<DashMap<Uuid, AgentHandle>>,
     event_bus: Arc<EventBus>,
     config: Arc<tokio::sync::RwLock<GrokConfig>>,
     grok_cli: Arc<GrokCli>,
+}
+
+/// Everything the deferred ACP connect needs, detached from `&self` so it can
+/// run in a background task while the UI already shows the thread.
+struct PendingConnect {
+    client_cfg: AcpClientConfig,
+    acp_opts: AcpSpawnOptions,
+    connect_opts: ConnectOpts,
+}
+
+/// Run the ACP handshake and fill in (or fail) the placeholder session entry.
+async fn connect_and_fill(
+    sessions: Arc<DashMap<Uuid, AgentHandle>>,
+    event_bus: Arc<EventBus>,
+    id: Uuid,
+    pending: PendingConnect,
+) -> Result<()> {
+    match AcpClient::connect_with(
+        pending.client_cfg,
+        &pending.acp_opts,
+        Some(event_bus.clone()),
+        id,
+        pending.connect_opts,
+    )
+    .await
+    {
+        Ok(client) => {
+            let acp_session_id = client.session_id().await;
+            let brain_mode = client.brain_mode().await;
+            // Never hold a DashMap guard across an await.
+            if let Some(mut entry) = sessions.get_mut(&id) {
+                entry.metadata.acp_session_id = acp_session_id;
+                entry.metadata.brain_mode = brain_mode;
+                entry.metadata.status = SessionStatus::Idle;
+                entry.acp_client = Some(client);
+                entry.touch();
+            } else {
+                // Session was removed while starting — kill the orphan.
+                let _ = client.shutdown().await;
+            }
+            Ok(())
+        }
+        Err(e) => {
+            if let Some(mut entry) = sessions.get_mut(&id) {
+                entry.metadata.status = SessionStatus::Failed;
+                entry.touch();
+            }
+            event_bus.emit_error(Some(id), format!("session start failed: {e}"));
+            event_bus.emit_status(id, SessionStatus::Failed).await;
+            Err(e.into())
+        }
+    }
 }
 
 impl SessionRegistry {
@@ -31,19 +83,74 @@ impl SessionRegistry {
         config: Arc<tokio::sync::RwLock<GrokConfig>>,
         grok_cli: Arc<GrokCli>,
     ) -> Arc<Self> {
-        Arc::new(Self {
-            sessions: DashMap::new(),
-            event_bus,
+        let registry = Arc::new(Self {
+            sessions: Arc::new(DashMap::new()),
+            event_bus: event_bus.clone(),
             config,
             grok_cli,
-        })
+        });
+        // Mirror status events into live metadata. The ACP client reports
+        // turn completion (Idle) only on the event bus; without this the
+        // thread list — which reads metadata — shows "running" forever
+        // after the first prompt.
+        if tokio::runtime::Handle::try_current().is_ok() {
+            let sessions = registry.sessions.clone();
+            let mut rx = event_bus.subscribe();
+            tokio::spawn(async move {
+                loop {
+                    match rx.recv().await {
+                        Ok(grok_events::ControlEvent::SessionStatusChanged {
+                            session_id,
+                            status,
+                            ..
+                        }) => {
+                            if let Some(mut entry) = sessions.get_mut(&session_id) {
+                                entry.metadata.status = status;
+                                entry.metadata.last_activity = Utc::now();
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+            });
+        }
+        registry
     }
 
+    /// Start a session. The thread appears (status `Starting`) immediately;
+    /// the ACP handshake completes in the background and flips it to
+    /// `Idle`/`Failed` via status events.
     pub async fn spawn_agent(&self, cwd: &str, opts: SpawnOptions) -> Result<Uuid> {
         let id = Uuid::new_v4();
-        self.spawn_agent_with_id(id, cwd, opts, None, ConnectOpts::default())
+        self.spawn_agent_preallocated(id, cwd, opts, ConnectOpts::default())
             .await?;
         Ok(id)
+    }
+
+    /// Spawn with a caller-chosen id — used when the caller needs the id
+    /// before spawning (e.g. to name the thread's worktree after it).
+    /// `connect_opts` carries first-prompt injections (memory context).
+    pub async fn spawn_agent_preallocated(
+        &self,
+        id: Uuid,
+        cwd: &str,
+        opts: SpawnOptions,
+        connect_opts: ConnectOpts,
+    ) -> Result<()> {
+        self.spawn_agent_with_id(id, cwd, opts, None, connect_opts, true)
+            .await
+    }
+
+    /// Set the display label (smart thread name).
+    pub fn set_label(&self, id: Uuid, label: &str) -> Result<()> {
+        let mut entry = self
+            .sessions
+            .get_mut(&id)
+            .ok_or(CoreError::SessionNotFound(id))?;
+        entry.metadata.label = Some(label.to_string());
+        Ok(())
     }
 
     /// Re-attach a live ACP process to an existing thread id (after reboot / update).
@@ -64,7 +171,9 @@ impl SessionRegistry {
             };
             return Ok(mode);
         }
-        self.spawn_agent_with_id(id, cwd, opts, created_at, connect_opts)
+        // Resume is blocking: the caller sends a prompt right after, so the
+        // client must be live before we return.
+        self.spawn_agent_with_id(id, cwd, opts, created_at, connect_opts, false)
             .await?;
         let mode = self
             .sessions
@@ -87,6 +196,7 @@ impl SessionRegistry {
         opts: SpawnOptions,
         created_at: Option<chrono::DateTime<Utc>>,
         connect_opts: ConnectOpts,
+        background: bool,
     ) -> Result<()> {
         opts.validate().map_err(CoreError::InvalidOptions)?;
 
@@ -108,19 +218,37 @@ impl SessionRegistry {
             return Err(CoreError::MaxSessions(max));
         }
 
-        if cfg.always_approve_default && !opts.plan_mode {
-            warn!("config always_approve_default is true; respecting explicit spawn opts");
-        }
         if opts.always_approve {
             warn!("spawning with always_approve=true — elevated trust mode");
         }
 
+        let backend = opts.backend;
         let model = opts
             .model
             .clone()
-            .unwrap_or_else(|| cfg.default_model.clone());
-        let binary = cfg.resolve_grok_binary()?;
+            .unwrap_or_else(|| cfg.model_for(backend));
+        // Mock threads need no binary; headless resolves via grok_cli.
+        let needs_binary =
+            matches!(opts.mode, AgentMode::Acp) && !model.eq_ignore_ascii_case("mock");
+        let resolved: Option<ResolvedBackend> = if needs_binary {
+            Some(resolve_backend(backend, &cfg)?)
+        } else {
+            None
+        };
+        let backend_env_cfg = cfg
+            .backend_config(backend)
+            .map(|c| c.env.clone())
+            .unwrap_or_default();
+        // Deny rules: global config deny list + per-spawn deny list, enforced
+        // by the ACP client ahead of any approval.
+        let mut deny_patterns = cfg.permissions.deny.clone();
+        deny_patterns.extend(opts.permission_deny.iter().cloned());
+        // Allow rules: auto-approve matching requests in any mode (deny wins).
+        // These were previously built in config and silently dropped here.
+        let mut allow_patterns = cfg.permissions.allow.clone();
+        allow_patterns.extend(opts.permission_allow.iter().cloned());
         drop(cfg);
+        let approval_mode = opts.resolved_mode();
 
         let now = Utc::now();
         let mut metadata = SessionMetadata {
@@ -128,13 +256,17 @@ impl SessionRegistry {
             acp_session_id: None,
             cwd: cwd.to_string(),
             worktree: opts.worktree.clone(),
+            project_root: opts.project_root.clone(),
             model: model.clone(),
+            backend,
             mode: opts.mode,
             status: SessionStatus::Starting,
-            plan_mode: opts.plan_mode && !opts.always_approve,
-            always_approve: opts.always_approve,
+            approval_mode,
+            plan_mode: approval_mode == ApprovalMode::Plan,
+            always_approve: approval_mode == ApprovalMode::Yolo,
             sandbox_profile: opts.sandbox_profile.clone(),
             mcp_servers: opts.mcp_server_names.clone(),
+            approved_high_risk_mcp: opts.approved_high_risk_mcp.clone(),
             created_at: created_at.unwrap_or(now),
             last_activity: now,
             label: None,
@@ -170,27 +302,99 @@ impl SessionRegistry {
                         },
                         mcp_servers: opts.mcp_servers.clone(),
                         plan_mode: metadata.plan_mode,
-                        always_approve: opts.always_approve,
+                        always_approve: metadata.always_approve,
+                        approval_mode,
                         sandbox_profile: opts.sandbox_profile.clone(),
                         extra_env: Vec::new(),
+                        deny_patterns,
+                        allow_patterns,
                     };
-                    let client_cfg = AcpClientConfig::new(&binary, cwd_path);
-                    let client = AcpClient::connect_with(
-                        client_cfg,
-                        &acp_opts,
-                        Some(self.event_bus.clone()),
-                        id,
-                        connect_opts,
-                    )
-                    .await?;
-                    metadata.acp_session_id = client.session_id().await;
-                    metadata.brain_mode = client.brain_mode().await;
-                    metadata.status = SessionStatus::Idle;
-                    AgentHandle {
-                        metadata,
-                        child: None,
-                        acp_client: Some(client),
+                    let resolved = resolved.expect("resolved backend for live ACP spawn");
+                    let desc = descriptor(backend);
+
+                    // Forward backend API-key/env vars from the panel process,
+                    // then apply per-backend config env on top.
+                    let mut env: Vec<(String, String)> = Vec::new();
+                    for key in desc.env_passthrough {
+                        if let Ok(v) = std::env::var(key) {
+                            if !v.is_empty() {
+                                env.push(((*key).to_string(), v));
+                            }
+                        }
                     }
+                    for (k, v) in backend_env_cfg {
+                        env.retain(|(ek, _)| ek != &k);
+                        env.push((k, v));
+                    }
+                    // Some claude adapter versions require the var to be defined;
+                    // empty means "use the CLI login".
+                    if backend == Backend::Claude
+                        && !env.iter().any(|(k, _)| k == "ANTHROPIC_API_KEY")
+                    {
+                        env.push(("ANTHROPIC_API_KEY".into(), String::new()));
+                    }
+
+                    let mut client_cfg = AcpClientConfig::new(&resolved.program, cwd_path);
+                    client_cfg.args = resolved.args.clone();
+                    client_cfg.env = env;
+                    client_cfg.auth_preference = desc
+                        .auth_preference
+                        .iter()
+                        .map(|s| (*s).to_string())
+                        .collect();
+                    client_cfg.skip_auth_when_unadvertised = desc.skip_auth_when_unadvertised;
+                    client_cfg.backend_label = backend.key().to_string();
+
+                    // Insert a placeholder and announce the thread NOW — the
+                    // handshake (spawn + initialize + auth + session/new) can
+                    // take many seconds and the UI must not sit blank. The
+                    // entry API also makes concurrent resume/start of the same
+                    // id spawn exactly one process.
+                    match self.sessions.entry(id) {
+                        dashmap::mapref::entry::Entry::Occupied(_) => {
+                            return Err(CoreError::InvalidOptions(format!(
+                                "session {id} is already starting"
+                            )));
+                        }
+                        dashmap::mapref::entry::Entry::Vacant(v) => {
+                            v.insert(AgentHandle {
+                                metadata: metadata.clone(),
+                                child: None,
+                                acp_client: None,
+                            });
+                        }
+                    }
+                    self.event_bus.emit_session_created(id, cwd, "acp").await;
+                    self.event_bus.emit_status(id, SessionStatus::Starting).await;
+
+                    let pending = PendingConnect {
+                        client_cfg,
+                        acp_opts,
+                        connect_opts,
+                    };
+                    if background {
+                        let sessions = self.sessions.clone();
+                        let bus = self.event_bus.clone();
+                        tokio::spawn(async move {
+                            let _ = connect_and_fill(sessions, bus, id, pending).await;
+                        });
+                    } else {
+                        // Blocking (resume): propagate failure and drop the
+                        // placeholder so callers see a clean error.
+                        if let Err(e) = connect_and_fill(
+                            self.sessions.clone(),
+                            self.event_bus.clone(),
+                            id,
+                            pending,
+                        )
+                        .await
+                        {
+                            self.sessions.remove(&id);
+                            return Err(e);
+                        }
+                    }
+                    info!(%id, cwd, background, "ACP session spawn initiated");
+                    return Ok(());
                 }
             }
             AgentMode::Headless => {
@@ -239,7 +443,7 @@ impl SessionRegistry {
         let mut opts = SpawnOptions::default();
         opts.model = Some("mock".into());
         opts.mode = AgentMode::Acp;
-        self.spawn_agent_with_id(id, cwd, opts, None, ConnectOpts::default())
+        self.spawn_agent_with_id(id, cwd, opts, None, ConnectOpts::default(), false)
             .await?;
         Ok(id)
     }
@@ -273,6 +477,13 @@ impl SessionRegistry {
                 .sessions
                 .get_mut(&id)
                 .ok_or(CoreError::SessionNotFound(id))?;
+            if entry.acp_client.is_none()
+                && matches!(entry.metadata.status, SessionStatus::Starting)
+            {
+                return Err(CoreError::InvalidOptions(
+                    "session is still starting — wait for it to become idle".into(),
+                ));
+            }
             entry.touch();
             entry.metadata.status = SessionStatus::Running;
             entry
@@ -337,7 +548,38 @@ impl SessionRegistry {
         Ok(())
     }
 
-    pub async fn respond_approval(&self, id: Uuid, request_id: &str, approved: bool) -> Result<()> {
+    /// Switch a live session's approval stance (composer pills).
+    pub async fn set_approval_mode(&self, id: Uuid, mode: ApprovalMode) -> Result<()> {
+        let client = {
+            let mut entry = self
+                .sessions
+                .get_mut(&id)
+                .ok_or(CoreError::SessionNotFound(id))?;
+            entry.metadata.approval_mode = mode;
+            entry.metadata.plan_mode = mode == ApprovalMode::Plan;
+            entry.metadata.always_approve = mode == ApprovalMode::Yolo;
+            entry.touch();
+            entry.acp_client.clone()
+        };
+        if let Some(client) = client {
+            // Client-side gating is authoritative; the agent-side mode is
+            // best-effort (most adapters don't advertise an auto mode).
+            client.set_approval_mode(mode).await;
+            let wanted = match mode {
+                ApprovalMode::Plan => "plan",
+                ApprovalMode::Auto => "auto",
+                ApprovalMode::Yolo => "always_approve",
+                ApprovalMode::Ask => "default",
+            };
+            if let Err(e) = client.set_mode(wanted).await {
+                tracing::warn!(error = %e, ?mode, "agent-side mode not applied (client gate still enforces it)");
+            }
+        }
+        Ok(())
+    }
+
+    /// Record an "always allow this" rule for the rest of the session.
+    pub async fn add_session_allow_rule(&self, id: Uuid, pattern: String) -> Result<()> {
         let client = self
             .sessions
             .get(&id)
@@ -345,7 +587,49 @@ impl SessionRegistry {
             .acp_client
             .clone()
             .ok_or(CoreError::NotAcp)?;
-        client.respond_approval(request_id, approved).await?;
+        client.add_session_allow_rule(pattern).await;
+        Ok(())
+    }
+
+    pub async fn set_always_approve(&self, id: Uuid, enabled: bool) -> Result<()> {
+        let client = {
+            let mut entry = self
+                .sessions
+                .get_mut(&id)
+                .ok_or(CoreError::SessionNotFound(id))?;
+            entry.metadata.always_approve = enabled;
+            if enabled {
+                entry.metadata.plan_mode = false;
+            }
+            entry.touch();
+            entry.acp_client.clone()
+        };
+        if let Some(client) = client {
+            // Client-side gating is the real mechanism; agent-side mode is
+            // best-effort (not every agent advertises a bypass mode).
+            client.set_always_approve(enabled);
+            let mode = if enabled { "always_approve" } else { "default" };
+            if let Err(e) = client.set_mode(mode).await {
+                tracing::warn!(error = %e, enabled, "agent-side always-approve mode not applied");
+            }
+        }
+        Ok(())
+    }
+
+    pub async fn respond_approval(
+        &self,
+        id: Uuid,
+        request_id: &str,
+        option_id: Option<&str>,
+    ) -> Result<()> {
+        let client = self
+            .sessions
+            .get(&id)
+            .ok_or(CoreError::SessionNotFound(id))?
+            .acp_client
+            .clone()
+            .ok_or(CoreError::NotAcp)?;
+        client.respond_approval(request_id, option_id).await?;
         if let Some(mut entry) = self.sessions.get_mut(&id) {
             entry.metadata.status = SessionStatus::Running;
             entry.touch();
@@ -355,7 +639,13 @@ impl SessionRegistry {
 
     pub async fn remove_session(&self, id: Uuid) -> Result<()> {
         let _ = self.cancel_session(id).await;
-        self.sessions.remove(&id);
+        // cancel() only sends session/cancel — the grok child (and any MCP
+        // servers it spawned) keeps running unless we kill it.
+        if let Some((_, handle)) = self.sessions.remove(&id) {
+            if let Some(client) = handle.acp_client {
+                let _ = client.shutdown().await;
+            }
+        }
         Ok(())
     }
 
@@ -369,7 +659,11 @@ impl SessionRegistry {
             if let Err(e) = self.cancel_session(id).await {
                 warn!(%id, error = %e, "error cancelling session during shutdown");
             }
-            self.sessions.remove(&id);
+            if let Some((_, handle)) = self.sessions.remove(&id) {
+                if let Some(client) = handle.acp_client {
+                    let _ = client.shutdown().await;
+                }
+            }
         }
     }
 }

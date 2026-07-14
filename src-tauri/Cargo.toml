@@ -27,8 +27,10 @@ grok_scheduler = { path = "../crates/grok_scheduler" }
 grok_worktree = { path = "../crates/grok_worktree" }
 serde.workspace = true
 serde_json.workspace = true
+regex.workspace = true
 tauri = { workspace = true, features = [] }
 tauri-plugin-shell.workspace = true
+tauri-plugin-dialog.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

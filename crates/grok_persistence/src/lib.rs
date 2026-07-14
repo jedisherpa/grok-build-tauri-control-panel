@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::info;
@@ -72,6 +72,9 @@ pub struct ThreadDto {
     pub cwd: String,
     pub mode: String,
     pub model: String,
+    /// Agent backend (grok | claude | codex); old records default to grok.
+    #[serde(default = "default_backend_key")]
+    pub backend: String,
     pub status: String,
     /// True when an ACP/headless process is currently attached in this process.
     pub live: bool,
@@ -81,8 +84,18 @@ pub struct ThreadDto {
     pub worktree: Option<String>,
     pub mcp_servers: Vec<String>,
     pub label: Option<String>,
+    /// Approval stance this thread runs with (plan | ask | auto | yolo).
+    #[serde(default)]
+    pub approval_mode: Option<String>,
+    /// Original project folder when cwd is an isolated thread worktree.
+    #[serde(default)]
+    pub project_root: Option<String>,
     /// full_brain | history_only | fresh | null when not live
     pub brain_mode: Option<String>,
+}
+
+fn default_backend_key() -> String {
+    "grok".into()
 }
 
 pub struct Persistence {
@@ -276,58 +289,42 @@ impl Persistence {
             params![id.to_string()],
         )?;
         conn.execute("DELETE FROM sessions WHERE id=?1", params![id.to_string()])?;
-        Ok(())
-    }
-
-    pub fn next_seq(&self, session_id: Uuid) -> Result<u64> {
-        let conn = self.conn()?;
-        let max: i64 = conn.query_row(
-            "SELECT COALESCE(MAX(seq), 0) FROM transcripts WHERE session_id=?1",
-            params![session_id.to_string()],
-            |r| r.get(0),
-        )?;
-        Ok((max as u64).saturating_add(1))
-    }
-
-    pub fn append_transcript(&self, chunk: &TranscriptChunk) -> Result<()> {
-        let _g = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
-        let conn = self.conn()?;
-        // Ensure parent session row exists so we never orphan history.
-        let exists: i64 = conn.query_row(
-            "SELECT COUNT(1) FROM sessions WHERE id=?1",
-            params![chunk.session_id.to_string()],
-            |r| r.get(0),
-        )?;
-        if exists == 0 {
-            let now = Utc::now().to_rfc3339();
-            conn.execute(
-                r#"
-                INSERT OR IGNORE INTO sessions
-                  (id, cwd, mode, model, status, worktree, acp_session_id, metadata_json, created_at, updated_at)
-                VALUES (?1, '', 'acp', '', 'unknown', NULL, NULL, '{}', ?2, ?2)
-                "#,
-                params![chunk.session_id.to_string(), now],
-            )?;
-        }
+        // Tombstone: late events for this id must not resurrect a ghost row.
         conn.execute(
-            "INSERT OR REPLACE INTO transcripts (session_id, seq, kind, payload, at) VALUES (?1, ?2, ?3, ?4, ?5)",
-            params![
-                chunk.session_id.to_string(),
-                chunk.seq as i64,
-                chunk.kind,
-                chunk.payload,
-                chunk.at.to_rfc3339(),
-            ],
+            "INSERT INTO kv (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+            params![format!("tombstone_{id}"), Utc::now().to_rfc3339()],
         )?;
-        // Touch session
-        let _ = conn.execute(
-            "UPDATE sessions SET updated_at=?1 WHERE id=?2",
-            params![Utc::now().to_rfc3339(), chunk.session_id.to_string()],
-        );
         Ok(())
+    }
+
+    /// Idempotent parent-row creation (caller must hold write_lock).
+    fn ensure_session_row(&self, conn: &Connection, session_id: Uuid) -> Result<bool> {
+        // Deleted sessions stay deleted.
+        let tombstoned: i64 = conn.query_row(
+            "SELECT COUNT(1) FROM kv WHERE key=?1",
+            params![format!("tombstone_{session_id}")],
+            |r| r.get(0),
+        )?;
+        if tombstoned > 0 {
+            return Ok(false);
+        }
+        let now = Utc::now().to_rfc3339();
+        conn.execute(
+            r#"
+            INSERT OR IGNORE INTO sessions
+              (id, cwd, mode, model, status, worktree, acp_session_id, metadata_json, created_at, updated_at)
+            VALUES (?1, '', 'acp', '', 'unknown', NULL, NULL, '{}', ?2, ?2)
+            "#,
+            params![session_id.to_string(), now],
+        )?;
+        Ok(true)
     }
 
     /// Append a transcript line with auto-incrementing seq.
+    ///
+    /// MAX(seq) and the INSERT happen under one write lock/connection — two
+    /// concurrent appenders previously computed the same seq and the second
+    /// silently replaced the first row.
     pub fn append_message(
         &self,
         session_id: Uuid,
@@ -335,15 +332,76 @@ impl Persistence {
         payload: impl Into<String>,
         at: DateTime<Utc>,
     ) -> Result<u64> {
-        let seq = self.next_seq(session_id)?;
-        self.append_transcript(&TranscriptChunk {
-            session_id,
-            seq,
-            kind: kind.to_string(),
-            payload: payload.into(),
-            at,
-        })?;
+        let _g = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let conn = self.conn()?;
+        if !self.ensure_session_row(&conn, session_id)? {
+            return Err(PersistenceError::NotFound(format!(
+                "session {session_id} was deleted"
+            )));
+        }
+        let max: i64 = conn.query_row(
+            "SELECT COALESCE(MAX(seq), 0) FROM transcripts WHERE session_id=?1",
+            params![session_id.to_string()],
+            |r| r.get(0),
+        )?;
+        let seq = (max as u64).saturating_add(1);
+        conn.execute(
+            "INSERT INTO transcripts (session_id, seq, kind, payload, at) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                session_id.to_string(),
+                seq as i64,
+                kind,
+                payload.into(),
+                at.to_rfc3339(),
+            ],
+        )?;
+        let _ = conn.execute(
+            "UPDATE sessions SET updated_at=?1 WHERE id=?2",
+            params![Utc::now().to_rfc3339(), session_id.to_string()],
+        );
         Ok(seq)
+    }
+
+    /// Append a streamed chunk, concatenating onto the previous row when it
+    /// has the same kind and arrived within `window_secs`. Keeps token-level
+    /// streaming deltas from becoming one DB row (and one UI line) each.
+    pub fn append_message_merged(
+        &self,
+        session_id: Uuid,
+        kind: &str,
+        payload: &str,
+        at: DateTime<Utc>,
+        window_secs: i64,
+    ) -> Result<u64> {
+        let merged = {
+            let _g = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+            let conn = self.conn()?;
+            let last: Option<(i64, String, String)> = conn
+                .query_row(
+                    "SELECT seq, kind, at FROM transcripts WHERE session_id=?1 ORDER BY seq DESC LIMIT 1",
+                    params![session_id.to_string()],
+                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                )
+                .optional()?;
+            match last {
+                Some((seq, k, at_s))
+                    if k == kind
+                        && (at - parse_dt(&at_s)).num_seconds().abs() <= window_secs =>
+                {
+                    conn.execute(
+                        "UPDATE transcripts SET payload = payload || ?1, at = ?2 WHERE session_id=?3 AND seq=?4",
+                        params![payload, at.to_rfc3339(), session_id.to_string(), seq],
+                    )?;
+                    Some(seq as u64)
+                }
+                _ => None,
+            }
+        };
+        match merged {
+            Some(seq) => Ok(seq),
+            // New row starts the message; drop leading stream whitespace.
+            None => self.append_message(session_id, kind, payload.trim_start(), at),
+        }
     }
 
     pub fn transcripts(&self, session_id: Uuid) -> Result<Vec<TranscriptChunk>> {
@@ -370,15 +428,48 @@ impl Persistence {
 
     pub fn transcript_entries(&self, session_id: Uuid) -> Result<Vec<TranscriptEntry>> {
         let chunks = self.transcripts(session_id)?;
-        Ok(chunks
-            .into_iter()
-            .map(|c| TranscriptEntry {
-                role: kind_to_role(&c.kind),
+        // Repair sessions recorded before write-side merging: token-level
+        // streaming deltas were stored one row each. Fold consecutive
+        // same-role agent/thought rows within a short window back together.
+        let mut out: Vec<TranscriptEntry> = Vec::new();
+        let mut last_at: Option<DateTime<Utc>> = None;
+        for c in chunks {
+            let role = kind_to_role(&c.kind);
+            let mergeable = matches!(role.as_str(), "agent" | "thought");
+            if mergeable {
+                if let Some(prev) = out.last_mut() {
+                    let close = last_at
+                        .map(|t| (c.at - t).num_seconds().abs() <= 10)
+                        .unwrap_or(false);
+                    if prev.role == role && close {
+                        // Legacy rows lost their leading spaces to trim; add a
+                        // space unless punctuation continues the previous word.
+                        let needs_space = !prev.body.ends_with(char::is_whitespace)
+                            && !c
+                                .payload
+                                .chars()
+                                .next()
+                                .map(|ch| ".,!?;:)]}%'\"".contains(ch) || ch.is_whitespace())
+                                .unwrap_or(true);
+                        if needs_space {
+                            prev.body.push(' ');
+                        }
+                        prev.body.push_str(&c.payload);
+                        prev.at = c.at.to_rfc3339();
+                        last_at = Some(c.at);
+                        continue;
+                    }
+                }
+            }
+            last_at = Some(c.at);
+            out.push(TranscriptEntry {
+                role,
                 body: c.payload,
                 at: c.at.to_rfc3339(),
                 seq: c.seq,
-            })
-            .collect())
+            });
+        }
+        Ok(out)
     }
 
     pub fn export_markdown(&self, session_id: Uuid) -> Result<String> {
@@ -438,20 +529,63 @@ fn kind_to_role(kind: &str) -> String {
         "tool" | "tool_call" => "tool".into(),
         "plan" => "plan".into(),
         "error" => "error".into(),
+        // Raw ACP protocol lines — hidden by default in the UI, revealed by
+        // the View toggle.
+        "term" => "term".into(),
+        // Permission requests render as (inert, post-restart) approval cards.
+        "approval" => "approval".into(),
         _ => "system".into(),
     }
 }
 
 fn parse_dt(s: &str) -> DateTime<Utc> {
+    // Epoch, not now(): a garbage stored timestamp must not float a stale
+    // thread to the top of the recency-sorted list.
     DateTime::parse_from_rfc3339(s)
         .map(|d| d.with_timezone(&Utc))
-        .unwrap_or_else(|_| Utc::now())
+        .unwrap_or(DateTime::<Utc>::UNIX_EPOCH)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn streamed_chunks_merge_into_one_row() {
+        let dir = tempdir().unwrap();
+        let db = Persistence::open(dir.path().join("m.db")).unwrap();
+        let id = Uuid::new_v4();
+        let t = Utc::now();
+        db.append_message(id, "prompt", "hi", t).unwrap();
+        for chunk in ["Sup", " —", " what", " are", " we", " building", "?"] {
+            db.append_message_merged(id, "agent", chunk, t, 10).unwrap();
+        }
+        let entries = db.transcript_entries(id).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[1].role, "agent");
+        assert_eq!(entries[1].body, "Sup — what are we building?");
+        // Different kind starts a new row.
+        db.append_message_merged(id, "thought", "pondering", t, 10).unwrap();
+        assert_eq!(db.transcript_entries(id).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn legacy_fragmented_rows_are_merged_on_read() {
+        let dir = tempdir().unwrap();
+        let db = Persistence::open(dir.path().join("l.db")).unwrap();
+        let id = Uuid::new_v4();
+        let t = Utc::now();
+        // Simulate pre-fix rows: one token per row, leading spaces lost.
+        for tok in ["Sup", "—", "what", "are", "we", "building", "?"] {
+            db.append_message(id, "agent", tok, t).unwrap();
+        }
+        db.append_message(id, "prompt", "next", t).unwrap();
+        let entries = db.transcript_entries(id).unwrap();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].body, "Sup — what are we building?");
+        assert_eq!(entries[1].role, "user");
+    }
 
     #[test]
     fn session_and_transcript_roundtrip() {

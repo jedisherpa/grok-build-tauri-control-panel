@@ -10,10 +10,15 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::{debug, info, warn};
 
+pub mod backends;
 pub mod env_bootstrap;
 pub mod paths;
 pub mod sandbox;
 
+pub use backends::{
+    Backend, BackendConfig, BackendDescriptor, LaunchVia, ResolvedBackend, descriptor,
+    resolve_backend,
+};
 pub use env_bootstrap::{bootstrap_process_env, child_path_env, preferred_grok_candidates};
 pub use paths::{GrokPaths, discover_grok_binary};
 pub use sandbox::SandboxProfile;
@@ -30,6 +35,8 @@ pub enum ConfigError {
     TomlEdit(String),
     #[error("grok binary not found")]
     BinaryNotFound,
+    #[error("{0} backend not found (no binary on PATH and npx unavailable)")]
+    BackendNotFound(&'static str),
     #[error("invalid config: {0}")]
     Invalid(String),
 }
@@ -42,15 +49,28 @@ pub type Result<T> = std::result::Result<T, ConfigError>;
 pub struct GrokConfig {
     pub default_model: String,
     pub default_effort: String,
+    pub default_backend: Backend,
+    /// Per-backend overrides keyed by "grok" | "claude" | "codex".
+    pub backends: HashMap<String, BackendConfig>,
     pub grok_binary: Option<PathBuf>,
     pub max_concurrent_sessions: usize,
     pub session_timeout_secs: u64,
     pub always_approve_default: bool,
     pub plan_mode_default: bool,
+    /// Default approval stance for new threads: ask | plan | auto | yolo.
+    /// Supersedes the two booleans above when set.
+    #[serde(default)]
+    pub approval_mode_default: Option<String>,
     pub sandbox_profile: SandboxProfile,
     pub worktrees_root: Option<PathBuf>,
-    pub memory_enabled: bool,
-    pub scheduler_enabled: bool,
+    /// Give each new thread in a git project its own worktree by default.
+    pub worktree_isolation_default: bool,
+    /// Right-panel ELI12 narrator (side LLM calls on the selected thread).
+    pub explainer_enabled: bool,
+    /// Backend for narrator calls (grok | claude | codex); None → grok.
+    pub explainer_backend: Option<String>,
+    /// Model for narrator calls; None → cheapest known fast model.
+    pub explainer_model: Option<String>,
     pub mcp_servers: HashMap<String, McpServerConfig>,
     pub skills: HashMap<String, SkillConfig>,
     pub plugins: HashMap<String, PluginConfig>,
@@ -63,15 +83,20 @@ impl Default for GrokConfig {
         Self {
             default_model: "grok-4".to_string(),
             default_effort: "high".to_string(),
+            default_backend: Backend::Grok,
+            backends: HashMap::new(),
             grok_binary: None,
             max_concurrent_sessions: 10,
             session_timeout_secs: 3600,
             always_approve_default: false,
-            plan_mode_default: true,
+            plan_mode_default: false,
+            approval_mode_default: Some("ask".into()),
             sandbox_profile: SandboxProfile::Workspace,
             worktrees_root: None,
-            memory_enabled: true,
-            scheduler_enabled: true,
+            worktree_isolation_default: true,
+            explainer_enabled: true,
+            explainer_backend: None,
+            explainer_model: None,
             mcp_servers: HashMap::new(),
             skills: HashMap::new(),
             plugins: HashMap::new(),
@@ -133,6 +158,18 @@ impl Default for PermissionDefaults {
 }
 
 impl GrokConfig {
+    /// Load ONLY the user-global config (no project overlay). Use this when
+    /// the result will be saved back to the global path — saving the merged
+    /// view would permanently promote project-scoped settings to global.
+    pub fn load_base(paths: &GrokPaths) -> Result<Self> {
+        let mut cfg = Self::default();
+        if paths.config_file.exists() {
+            let raw = fs::read_to_string(&paths.config_file)?;
+            cfg = toml::from_str(&raw)?;
+        }
+        Ok(cfg)
+    }
+
     /// Load config from paths, falling back to defaults.
     pub fn load(paths: &GrokPaths) -> Result<Self> {
         let mut cfg = Self::default();
@@ -177,31 +214,57 @@ impl GrokConfig {
         Ok(())
     }
 
-    /// Shallow merge: overlay non-default fields win for simple fields; maps extend.
+    /// Shallow merge: overlay wins only for fields that differ from the
+    /// defaults; maps extend. An overlay file that omits a key must never
+    /// reset the user's global value (scalars used to be copied blindly).
     pub fn merge_overlay(mut self, overlay: GrokConfig) -> Self {
-        if overlay.default_model != Self::default().default_model {
+        let defaults = Self::default();
+        if overlay.default_model != defaults.default_model {
             self.default_model = overlay.default_model;
         }
-        if overlay.default_effort != Self::default().default_effort {
+        if overlay.default_effort != defaults.default_effort {
             self.default_effort = overlay.default_effort;
         }
         if overlay.grok_binary.is_some() {
             self.grok_binary = overlay.grok_binary;
         }
-        if overlay.max_concurrent_sessions != Self::default().max_concurrent_sessions {
+        if overlay.default_backend != Backend::default() {
+            self.default_backend = overlay.default_backend;
+        }
+        self.backends.extend(overlay.backends);
+        if overlay.max_concurrent_sessions != defaults.max_concurrent_sessions {
             self.max_concurrent_sessions = overlay.max_concurrent_sessions;
         }
-        if overlay.session_timeout_secs != Self::default().session_timeout_secs {
+        if overlay.session_timeout_secs != defaults.session_timeout_secs {
             self.session_timeout_secs = overlay.session_timeout_secs;
         }
-        self.always_approve_default = overlay.always_approve_default;
-        self.plan_mode_default = overlay.plan_mode_default;
-        self.sandbox_profile = overlay.sandbox_profile;
+        if overlay.always_approve_default != defaults.always_approve_default {
+            self.always_approve_default = overlay.always_approve_default;
+        }
+        if overlay.plan_mode_default != defaults.plan_mode_default {
+            self.plan_mode_default = overlay.plan_mode_default;
+        }
+        if overlay.approval_mode_default.is_some() {
+            self.approval_mode_default = overlay.approval_mode_default.clone();
+        }
+        if overlay.sandbox_profile != defaults.sandbox_profile {
+            self.sandbox_profile = overlay.sandbox_profile;
+        }
         if overlay.worktrees_root.is_some() {
             self.worktrees_root = overlay.worktrees_root;
         }
-        self.memory_enabled = overlay.memory_enabled;
-        self.scheduler_enabled = overlay.scheduler_enabled;
+        if overlay.worktree_isolation_default != defaults.worktree_isolation_default {
+            self.worktree_isolation_default = overlay.worktree_isolation_default;
+        }
+        if overlay.explainer_enabled != defaults.explainer_enabled {
+            self.explainer_enabled = overlay.explainer_enabled;
+        }
+        if overlay.explainer_backend.is_some() {
+            self.explainer_backend = overlay.explainer_backend.clone();
+        }
+        if overlay.explainer_model.is_some() {
+            self.explainer_model = overlay.explainer_model.clone();
+        }
         self.mcp_servers.extend(overlay.mcp_servers);
         self.skills.extend(overlay.skills);
         self.plugins.extend(overlay.plugins);
@@ -209,11 +272,49 @@ impl GrokConfig {
             self.permissions.allow = overlay.permissions.allow;
         }
         if !overlay.permissions.deny.is_empty() {
-            self.permissions.deny = overlay.permissions.deny;
+            // Deny rules are additive — an overlay can tighten, never loosen.
+            let mut deny = self.permissions.deny.clone();
+            deny.extend(overlay.permissions.deny);
+            deny.dedup();
+            self.permissions.deny = deny;
         }
-        self.permissions.trust_repo = overlay.permissions.trust_repo;
+        if overlay.permissions.trust_repo != defaults.permissions.trust_repo {
+            self.permissions.trust_repo = overlay.permissions.trust_repo;
+        }
         self.env.extend(overlay.env);
         self
+    }
+
+    /// Per-backend user overrides, if configured.
+    pub fn backend_config(&self, backend: Backend) -> Option<&BackendConfig> {
+        self.backends.get(backend.key())
+    }
+
+    /// Default model for a backend: per-backend config → legacy top-level
+    /// default_model (Grok only) → built-in descriptor default.
+    pub fn model_for(&self, backend: Backend) -> String {
+        if let Some(m) = self
+            .backend_config(backend)
+            .and_then(|c| c.default_model.clone())
+        {
+            return m;
+        }
+        if backend == Backend::Grok {
+            return self.default_model.clone();
+        }
+        backends::descriptor(backend).default_model.to_string()
+    }
+
+    /// Model catalog for a backend: config override when non-empty, else built-in.
+    pub fn models_for(&self, backend: Backend) -> Vec<String> {
+        match self.backend_config(backend) {
+            Some(c) if !c.models.is_empty() => c.models.clone(),
+            _ => backends::descriptor(backend)
+                .model_catalog
+                .iter()
+                .map(|m| m.to_string())
+                .collect(),
+        }
     }
 
     /// Resolve the grok binary path or error.
@@ -293,8 +394,12 @@ mod tests {
         let back: GrokConfig = toml::from_str(&s).unwrap();
         assert_eq!(cfg.default_model, back.default_model);
         assert_eq!(cfg.max_concurrent_sessions, back.max_concurrent_sessions);
+        // No stance is pre-selected: new threads confirm every request until
+        // the user picks plan/auto/yolo.
         assert!(!cfg.always_approve_default);
-        assert!(cfg.plan_mode_default);
+        assert!(!cfg.plan_mode_default);
+        assert_eq!(cfg.approval_mode_default.as_deref(), Some("ask"));
+        assert_eq!(back.approval_mode_default.as_deref(), Some("ask"));
     }
 
     #[test]
@@ -330,6 +435,60 @@ mod tests {
         let loaded = GrokConfig::load(&paths).unwrap();
         assert_eq!(loaded.default_model, "grok-test");
         assert!(loaded.mcp_servers.contains_key("github"));
+    }
+
+    #[test]
+    fn old_config_without_backends_table_loads() {
+        // Pre-multi-backend config.toml: no default_backend, no [backends].
+        let raw = r#"
+default_model = "grok-4"
+default_effort = "high"
+max_concurrent_sessions = 10
+"#;
+        let cfg: GrokConfig = toml::from_str(raw).unwrap();
+        assert_eq!(cfg.default_backend, Backend::Grok);
+        assert!(cfg.backends.is_empty());
+        // Round-trips with the new fields serialized.
+        let s = toml::to_string_pretty(&cfg).unwrap();
+        let back: GrokConfig = toml::from_str(&s).unwrap();
+        assert_eq!(back.default_backend, Backend::Grok);
+    }
+
+    #[test]
+    fn model_for_fallback_chain() {
+        let mut cfg = GrokConfig::default();
+        // Built-in descriptor defaults when nothing configured.
+        assert_eq!(cfg.model_for(Backend::Claude), "claude-fable-5");
+        assert_eq!(cfg.model_for(Backend::Codex), "gpt-5.6-terra");
+        // Grok falls back to legacy top-level default_model.
+        cfg.default_model = "grok-code-fast-1".into();
+        assert_eq!(cfg.model_for(Backend::Grok), "grok-code-fast-1");
+        // Per-backend config wins.
+        cfg.backends.insert(
+            "claude".into(),
+            BackendConfig {
+                default_model: Some("claude-opus-4-8".into()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(cfg.model_for(Backend::Claude), "claude-opus-4-8");
+        // Catalog override.
+        assert_eq!(
+            cfg.models_for(Backend::Codex),
+            backends::descriptor(Backend::Codex)
+                .model_catalog
+                .iter()
+                .map(|m| m.to_string())
+                .collect::<Vec<_>>()
+        );
+        cfg.backends.insert(
+            "codex".into(),
+            BackendConfig {
+                models: vec!["gpt-5-codex".into()],
+                ..Default::default()
+            },
+        );
+        assert_eq!(cfg.models_for(Backend::Codex), vec!["gpt-5-codex".to_string()]);
     }
 
     #[test]

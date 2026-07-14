@@ -48,6 +48,17 @@ impl NdjsonTransport {
     }
 
     async fn read_loop(self: Arc<Self>, stdout: ChildStdout) -> Result<()> {
+        let result = self.read_loop_inner(stdout).await;
+        // Fail every pending waiter immediately — otherwise callers block for
+        // their full request timeout (up to minutes) after the process dies.
+        let mut pending = self.pending.lock().await;
+        for (_, tx) in pending.drain() {
+            drop(tx); // closes the oneshot → callers get ChannelClosed now
+        }
+        result
+    }
+
+    async fn read_loop_inner(&self, stdout: ChildStdout) -> Result<()> {
         let mut reader = BufReader::new(stdout);
         let mut line = String::new();
         loop {
@@ -149,10 +160,18 @@ impl NdjsonTransport {
 
         let line = serde_json::to_string(&req)? + "\n";
         debug!(method, %id_str, "acp send");
-        {
+        let write_res: Result<()> = async {
             let mut stdin = self.stdin.lock().await;
             stdin.write_all(line.as_bytes()).await?;
             stdin.flush().await?;
+            Ok(())
+        }
+        .await;
+        if let Err(e) = write_res {
+            // Failed write leaks the pending entry — remove it so a later
+            // response for a reused id can't match, and callers fail fast.
+            self.pending.lock().await.remove(&id_str);
+            return Err(e);
         }
         Ok(rx)
     }

@@ -13,10 +13,12 @@ use tokio::process::{Child, Command};
 use tracing::{debug, warn};
 
 pub mod auth;
+pub mod backend_auth;
 pub mod inspect;
 pub mod spawn_opts;
 
 pub use auth::{AuthStatus, LoginManager, LoginPhase, LoginResult, LoginSessionState};
+pub use backend_auth::{AuthKind, BackendAuth};
 pub use inspect::{GrokInspect, InspectReport};
 pub use spawn_opts::HeadlessSpawnOptions;
 
@@ -89,6 +91,17 @@ impl GrokCli {
         Ok(out.stdout)
     }
 
+    /// Like `run_args` with an explicit timeout (long one-shot LLM calls).
+    pub async fn run_args_timeout(
+        &self,
+        args: &[&str],
+        cwd: Option<&Path>,
+        timeout: Duration,
+    ) -> Result<String> {
+        let out = self.run(args, cwd, timeout).await?;
+        Ok(out.stdout)
+    }
+
     /// Spawn headless one-shot: `grok -p '...'` (and optional flags).
     pub async fn spawn_headless(
         &self,
@@ -110,10 +123,8 @@ impl GrokCli {
 
         if opts.always_approve {
             cmd.arg("--always-approve");
-        }
-        if opts.plan_mode {
-            // Prefer plan gate when not always-approve
-            // (flag names may vary by grok version; keep as optional)
+        } else if opts.plan_mode {
+            cmd.args(["--permission-mode", "plan"]);
         }
         if let Some(ref model) = opts.model {
             cmd.args(["--model", model]);
@@ -162,31 +173,70 @@ impl GrokCli {
         self.run_args(&["mcp", "list"], None).await
     }
 
-    pub async fn mcp_add(&self, name: &str, command: &str, args: &[&str]) -> Result<String> {
+    /// `grok mcp add [-e K=V]... NAME COMMAND -- ARGS...`
+    /// Env vars ride along so the CLI-registered copy can actually
+    /// authenticate; `--` keeps server args (e.g. `-y`) away from grok's parser.
+    pub async fn mcp_add(
+        &self,
+        name: &str,
+        command: &str,
+        args: &[&str],
+        env: &[(String, String)],
+    ) -> Result<String> {
         validate_name(name)?;
-        let mut a = vec!["mcp", "add", name, command];
-        a.extend(args);
+        let env_flags: Vec<String> = env
+            .iter()
+            .map(|(k, v)| format!("{k}={v}"))
+            .collect();
+        let mut a: Vec<&str> = vec!["mcp", "add"];
+        for pair in &env_flags {
+            a.push("-e");
+            a.push(pair);
+        }
+        a.push(name);
+        a.push(command);
+        if !args.is_empty() {
+            a.push("--");
+            a.extend(args);
+        }
         self.run_args(&a, None).await
     }
 
-    /// `grok mcp add --transport http|sse NAME URL`
+    /// `grok mcp add --transport http|sse [-H 'Name: value']... NAME URL`
     pub async fn mcp_add_http(
         &self,
         name: &str,
         url: &str,
         transport: &str,
+        headers: &[(String, String)],
     ) -> Result<String> {
         validate_name(name)?;
-        if !(url.starts_with("https://")
-            || url.starts_with("http://localhost")
-            || url.starts_with("http://127.0.0.1"))
-        {
-            return Err(CliError::InvalidArg("url must be https or localhost".into()));
+        // Parse the host — prefix checks accepted `http://127.0.0.1.evil.com`.
+        let allowed = url::Url::parse(url)
+            .map(|u| match u.scheme() {
+                "https" => true,
+                "http" => matches!(
+                    u.host_str(),
+                    Some("localhost") | Some("127.0.0.1") | Some("[::1]") | Some("::1")
+                ),
+                _ => false,
+            })
+            .unwrap_or(false);
+        if !allowed {
+            return Err(CliError::InvalidArg("url must be https or loopback http".into()));
         }
-        self.run_args(
-            &["mcp", "add", "--transport", transport, name, url],
-            None,
-        )
+        let header_flags: Vec<String> = headers
+            .iter()
+            .map(|(k, v)| format!("{k}: {v}"))
+            .collect();
+        let mut a: Vec<&str> = vec!["mcp", "add", "--transport", transport];
+        for h in &header_flags {
+            a.push("-H");
+            a.push(h);
+        }
+        a.push(name);
+        a.push(url);
+        self.run_args(&a, None)
         .await
     }
 
@@ -218,6 +268,36 @@ impl GrokCli {
 
     pub async fn sessions_list(&self) -> Result<String> {
         self.run_args(&["sessions", "list"], None).await
+    }
+
+    /// Live model catalog from `grok models`: (model_id, is_default).
+    /// The CLI's list is the source of truth — built-in catalogs go stale
+    /// and a stale id fails every `-m` call with "unknown model id".
+    pub async fn list_models(&self) -> Result<Vec<(String, bool)>> {
+        let out = self.run_args(&["models"], None).await?;
+        let mut models = Vec::new();
+        for line in out.lines() {
+            let t = line.trim();
+            let (rest, is_default_marker) = if let Some(r) = t.strip_prefix("* ") {
+                (r, true)
+            } else if let Some(r) = t.strip_prefix("- ") {
+                (r, false)
+            } else {
+                continue;
+            };
+            let name = rest
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .trim()
+                .to_string();
+            if name.is_empty() {
+                continue;
+            }
+            let is_default = is_default_marker || rest.contains("(default)");
+            models.push((name, is_default));
+        }
+        Ok(models)
     }
 
     pub async fn doctor(&self) -> Result<String> {

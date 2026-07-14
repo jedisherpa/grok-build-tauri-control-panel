@@ -77,6 +77,20 @@ pub enum ControlEvent {
         request_id: String,
         tool: String,
         summary: String,
+        options: Vec<PermissionOptionInfo>,
+        auto_approved: bool,
+        selected_option: Option<String>,
+        /// True when this approval presents a plan (enables the
+        /// "code with a different model" handoff in the UI).
+        #[serde(default)]
+        plan_approval: bool,
+        at: DateTime<Utc>,
+    },
+    ApprovalResolved {
+        session_id: Uuid,
+        request_id: String,
+        option_id: Option<String>,
+        cancelled: bool,
         at: DateTime<Utc>,
     },
     Error {
@@ -102,6 +116,14 @@ pub enum ControlEvent {
         session_id: Option<Uuid>,
         payload: Value,
     },
+}
+
+/// One option offered by the agent in a `session/request_permission` request.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PermissionOptionInfo {
+    pub id: String,
+    pub kind: String,
+    pub label: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,7 +162,9 @@ pub struct PlanStep {
     pub status: String,
 }
 
-const DEFAULT_CAPACITY: usize = 512;
+// Heavy token streaming can burst thousands of events; a lagged receiver
+// permanently loses transcript rows, so keep generous headroom.
+const DEFAULT_CAPACITY: usize = 8192;
 
 #[derive(Debug)]
 pub struct EventBus {

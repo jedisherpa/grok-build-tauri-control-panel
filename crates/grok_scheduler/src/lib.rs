@@ -92,12 +92,17 @@ struct LiveJob {
     handle: Option<JoinHandle<()>>,
 }
 
+type ChangeHook = dyn Fn(Vec<ScheduledJob>) + Send + Sync;
+
 pub struct Scheduler {
     jobs: RwLock<HashMap<String, LiveJob>>,
     event_bus: Arc<EventBus>,
     handler: Mutex<Option<JobHandler>>,
     rate_limit: Duration,
     last_fire: Mutex<HashMap<String, DateTime<Utc>>>,
+    /// Called with the full job list after every mutation — the app layer
+    /// persists it so routines survive a restart.
+    on_change: Mutex<Option<Arc<ChangeHook>>>,
 }
 
 impl Scheduler {
@@ -108,11 +113,53 @@ impl Scheduler {
             handler: Mutex::new(None),
             rate_limit: Duration::from_secs(5),
             last_fire: Mutex::new(HashMap::new()),
+            on_change: Mutex::new(None),
         })
     }
 
     pub async fn set_handler(&self, handler: JobHandler) {
         *self.handler.lock().await = Some(handler);
+    }
+
+    pub async fn set_change_hook<F>(&self, hook: F)
+    where
+        F: Fn(Vec<ScheduledJob>) + Send + Sync + 'static,
+    {
+        *self.on_change.lock().await = Some(Arc::new(hook));
+    }
+
+    async fn notify_change(&self) {
+        let hook = self.on_change.lock().await.clone();
+        if let Some(hook) = hook {
+            let jobs = self.list().await;
+            hook(jobs);
+        }
+    }
+
+    /// Re-register persisted jobs after a restart. Terminal jobs are kept in
+    /// the list for history but not re-armed; Running degrades to Scheduled.
+    pub async fn restore_jobs(self: &Arc<Self>, specs: Vec<ScheduledJob>) {
+        for mut spec in specs {
+            if matches!(
+                spec.status,
+                JobStatus::Completed | JobStatus::Failed | JobStatus::Cancelled
+            ) {
+                continue;
+            }
+            if spec.status == JobStatus::Running {
+                spec.status = JobStatus::Scheduled;
+            }
+            let handle = if spec.status == JobStatus::Paused {
+                None
+            } else {
+                Some(self.spawn_runner(spec.clone()))
+            };
+            self.jobs
+                .write()
+                .await
+                .insert(spec.id.clone(), LiveJob { spec, handle });
+        }
+        info!(count = self.jobs.read().await.len(), "scheduler jobs restored");
     }
 
     pub async fn list(&self) -> Vec<ScheduledJob> {
@@ -162,6 +209,7 @@ impl Scheduler {
             },
         );
         info!(job_id = %spec.id, "job scheduled");
+        self.notify_change().await;
         Ok(spec)
     }
 
@@ -249,6 +297,7 @@ impl Scheduler {
         if let Some(live) = self.jobs.write().await.get_mut(&job.id) {
             live.spec = job.clone();
         }
+        self.notify_change().await;
     }
 
     async fn mark_running(&self, id: &str) {
@@ -258,47 +307,70 @@ impl Scheduler {
     }
 
     async fn mark_completed(&self, id: &str) {
-        if let Some(live) = self.jobs.write().await.get_mut(id) {
-            live.spec.status = JobStatus::Completed;
-            if let Some(h) = live.handle.take() {
-                h.abort();
+        // Take the handle out before aborting — this runs on the job's own
+        // task, and aborting while holding the write lock is a footgun the
+        // moment anything awaits after it.
+        let handle = {
+            let mut jobs = self.jobs.write().await;
+            match jobs.get_mut(id) {
+                Some(live) => {
+                    live.spec.status = JobStatus::Completed;
+                    live.handle.take()
+                }
+                None => None,
             }
+        };
+        self.last_fire.lock().await.remove(id);
+        self.notify_change().await;
+        if let Some(h) = handle {
+            h.abort();
         }
     }
 
     pub async fn pause(&self, id: &str) -> Result<()> {
-        let mut jobs = self.jobs.write().await;
-        let live = jobs
-            .get_mut(id)
-            .ok_or_else(|| SchedulerError::NotFound(id.to_string()))?;
-        live.spec.status = JobStatus::Paused;
+        {
+            let mut jobs = self.jobs.write().await;
+            let live = jobs
+                .get_mut(id)
+                .ok_or_else(|| SchedulerError::NotFound(id.to_string()))?;
+            live.spec.status = JobStatus::Paused;
+        }
+        self.notify_change().await;
         Ok(())
     }
 
     pub async fn resume(self: &Arc<Self>, id: &str) -> Result<()> {
-        let mut jobs = self.jobs.write().await;
-        let live = jobs
-            .get_mut(id)
-            .ok_or_else(|| SchedulerError::NotFound(id.to_string()))?;
-        if live.spec.status != JobStatus::Paused {
-            return Ok(());
+        {
+            let mut jobs = self.jobs.write().await;
+            let live = jobs
+                .get_mut(id)
+                .ok_or_else(|| SchedulerError::NotFound(id.to_string()))?;
+            if live.spec.status != JobStatus::Paused {
+                return Ok(());
+            }
+            live.spec.status = JobStatus::Scheduled;
+            let spec = live.spec.clone();
+            if let Some(h) = live.handle.take() {
+                h.abort();
+            }
+            live.handle = Some(self.spawn_runner(spec));
         }
-        live.spec.status = JobStatus::Scheduled;
-        let spec = live.spec.clone();
-        if let Some(h) = live.handle.take() {
-            h.abort();
-        }
-        live.handle = Some(self.spawn_runner(spec));
+        self.notify_change().await;
         Ok(())
     }
 
     pub async fn cancel(&self, id: &str) -> Result<()> {
-        let mut jobs = self.jobs.write().await;
-        let mut live = jobs
-            .remove(id)
-            .ok_or_else(|| SchedulerError::NotFound(id.to_string()))?;
-        live.spec.status = JobStatus::Cancelled;
-        if let Some(h) = live.handle.take() {
+        let handle = {
+            let mut jobs = self.jobs.write().await;
+            let mut live = jobs
+                .remove(id)
+                .ok_or_else(|| SchedulerError::NotFound(id.to_string()))?;
+            live.spec.status = JobStatus::Cancelled;
+            live.handle.take()
+        };
+        self.last_fire.lock().await.remove(id);
+        self.notify_change().await;
+        if let Some(h) = handle {
             h.abort();
         }
         Ok(())
@@ -309,6 +381,7 @@ async fn this_fail(sched: &Scheduler, id: &str, msg: &str) {
     if let Some(live) = sched.jobs.write().await.get_mut(id) {
         live.spec.status = JobStatus::Failed;
     }
+    sched.notify_change().await;
     sched.event_bus.emit(ControlEvent::SchedulerJob {
         job_id: id.to_string(),
         message: format!("failed: {msg}"),

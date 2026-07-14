@@ -265,6 +265,7 @@ impl McpServerConfigExt {
     }
 
     /// JSON-RPC / ACP payload fragment for session/new mcpServers.
+    /// Carries real (resolved) env values — this goes to the agent process.
     pub fn to_acp_payload(&self) -> serde_json::Value {
         match self.transport {
             McpTransport::Stdio => {
@@ -272,7 +273,7 @@ impl McpServerConfigExt {
                     "name": self.name,
                     "command": self.command,
                     "args": self.args,
-                    "env": mask_env_for_spawn(&self.env),
+                    "env": strip_panel_keys(&self.env),
                 })
             }
             McpTransport::Http | McpTransport::Sse => {
@@ -280,16 +281,37 @@ impl McpServerConfigExt {
                     "name": self.name,
                     "url": self.url,
                     "headers": self.headers,
-                    "env": mask_env_for_spawn(&self.env),
+                    "env": strip_panel_keys(&self.env),
                 })
             }
         }
     }
 }
 
-fn mask_env_for_spawn(env: &HashMap<String, String>) -> HashMap<String, String> {
-    // Pass through; actual secret values resolved from credential store by manager.
-    env.clone()
+/// Drop internal `_panel_*` bookkeeping keys before spawning a server.
+fn strip_panel_keys(env: &HashMap<String, String>) -> HashMap<String, String> {
+    env.iter()
+        .filter(|(k, _)| !k.starts_with("_panel_"))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect()
+}
+
+/// Mask secret-looking values for anything shown to the webview/UI.
+pub fn mask_payload_for_preview(payload: &serde_json::Value) -> serde_json::Value {
+    use crate::security::{looks_like_secret_key, mask_secret};
+    let mut out = payload.clone();
+    for field in ["env", "headers"] {
+        if let Some(map) = out.get_mut(field).and_then(|v| v.as_object_mut()) {
+            for (k, v) in map.iter_mut() {
+                if let Some(s) = v.as_str() {
+                    if looks_like_secret_key(k) || field == "headers" && k.eq_ignore_ascii_case("authorization") {
+                        *v = serde_json::Value::String(mask_secret(s));
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

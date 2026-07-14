@@ -111,7 +111,7 @@ impl ExtensionsService {
 
         if self.prefer_cli {
             let arg_refs: Vec<&str> = args.iter().map(String::as_str).collect();
-            if let Err(e) = self.grok_cli.mcp_add(&name, &command, &arg_refs).await {
+            if let Err(e) = self.grok_cli.mcp_add(&name, &command, &arg_refs, &[]).await {
                 tracing::warn!(error = %e, "grok mcp add failed; updating config only");
             }
         }
@@ -157,14 +157,44 @@ impl ExtensionsService {
     }
 
     pub async fn toggle_mcp(&self, name: &str, enabled: bool) -> Result<()> {
-        {
+        let entry = {
             let mut cfg = self.config.write().await;
             let server = cfg
                 .mcp_servers
                 .get_mut(name)
                 .ok_or_else(|| ExtensionsError::NotFound(name.to_string()))?;
             server.enabled = enabled;
+            let entry = server.clone();
             cfg.save(&self.paths.config_file)?;
+            entry
+        };
+        // Mirror into the grok CLI registry — otherwise a disabled server keeps
+        // loading in every terminal grok session. CLI has no disable: remove on
+        // disable, re-add on enable.
+        if self.prefer_cli {
+            let res = if enabled {
+                let args: Vec<&str> = entry.args.iter().map(String::as_str).collect();
+                match entry.command.as_deref() {
+                    Some(cmd) => {
+                        let env_pairs: Vec<(String, String)> = entry
+                            .env
+                            .iter()
+                            .filter(|(k, _)| !k.starts_with("_panel_"))
+                            .map(|(k, v)| (k.clone(), v.clone()))
+                            .collect();
+                        self.grok_cli
+                            .mcp_add(name, cmd, &args, &env_pairs)
+                            .await
+                            .map(|_| ())
+                    }
+                    None => Ok(()),
+                }
+            } else {
+                self.grok_cli.mcp_remove(name).await.map(|_| ())
+            };
+            if let Err(e) = res {
+                tracing::warn!(error = %e, name, enabled, "grok CLI mirror sync failed");
+            }
         }
         self.event_bus.emit(ControlEvent::McpChanged {
             name: name.to_string(),

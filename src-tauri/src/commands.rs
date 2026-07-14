@@ -8,7 +8,7 @@ use tauri::State;
 use uuid::Uuid;
 
 use grok_config::{DiscoveryReport, GrokConfig};
-use grok_control_core::{AgentHandleSnapshot, SessionStatus, SpawnOptions};
+use grok_control_core::{AgentHandleSnapshot, SpawnOptions};
 use grok_diff::{DiffCapture, DiffEngine, DiffSummary};
 use grok_extensions::ExtensionEntry;
 use grok_mcp::{
@@ -40,6 +40,72 @@ pub async fn get_config(state: State<'_, AppState>) -> Result<GrokConfig, String
     Ok(state.config.read().await.clone())
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackendInfo {
+    pub id: String,
+    pub display_name: String,
+    pub available: bool,
+    /// "binary:/abs/path" | "npx" | null when unavailable.
+    pub via: Option<String>,
+    /// Why the backend is unavailable, when it is.
+    pub reason: Option<String>,
+    pub default_model: String,
+    pub models: Vec<String>,
+    pub supports_headless: bool,
+}
+
+#[tauri::command]
+pub async fn list_backends(state: State<'_, AppState>) -> Result<Vec<BackendInfo>, String> {
+    let cfg = state.config.read().await.clone();
+    // Grok's model ids move fast — ask the CLI for the live catalog so the
+    // pickers never offer an id that fails every `-m` call.
+    let live_grok_models = state.grok_cli.list_models().await.unwrap_or_default();
+    Ok(grok_config::Backend::ALL
+        .iter()
+        .map(|&b| {
+            let desc = grok_config::descriptor(b);
+            let (available, via, reason) = match grok_config::resolve_backend(b, &cfg) {
+                Ok(r) => {
+                    let via = match r.via {
+                        grok_config::LaunchVia::Binary => {
+                            format!("binary:{}", r.program.display())
+                        }
+                        grok_config::LaunchVia::Npx => "npx".to_string(),
+                    };
+                    (true, Some(via), None)
+                }
+                Err(e) => (false, None, Some(e.to_string())),
+            };
+            let (default_model, models) = if b == grok_config::Backend::Grok
+                && !live_grok_models.is_empty()
+            {
+                let default = live_grok_models
+                    .iter()
+                    .find(|(_, d)| *d)
+                    .map(|(m, _)| m.clone())
+                    .unwrap_or_else(|| cfg.model_for(b));
+                (
+                    default,
+                    live_grok_models.iter().map(|(m, _)| m.clone()).collect(),
+                )
+            } else {
+                (cfg.model_for(b), cfg.models_for(b))
+            };
+            BackendInfo {
+                id: b.key().to_string(),
+                display_name: desc.display_name.to_string(),
+                available,
+                via,
+                reason,
+                default_model,
+                models,
+                supports_headless: desc.supports_headless,
+            }
+        })
+        .collect())
+}
+
 #[tauri::command]
 pub async fn save_config(state: State<'_, AppState>, config: GrokConfig) -> Result<(), String> {
     {
@@ -62,6 +128,63 @@ pub async fn capture_baseline(
 #[tauri::command]
 pub async fn get_auth_status() -> Result<grok_cli_wrapper::AuthStatus, String> {
     Ok(grok_cli_wrapper::GrokCli::auth_status())
+}
+
+/// Sign-in state for every backend: which services can actually run right now.
+#[tauri::command]
+pub async fn backend_auth_status(
+    state: State<'_, AppState>,
+) -> Result<Vec<grok_cli_wrapper::BackendAuth>, String> {
+    let cfg = state.config.read().await.clone();
+    Ok(grok_cli_wrapper::backend_auth::all(&cfg).await)
+}
+
+/// Hand a backend's sign-in (or sign-out) off to a real terminal window.
+///
+/// `claude auth login` and `codex login` drive a browser flow and expect a TTY,
+/// so we cannot run them headless the way we drive grok's device-code flow.
+/// The panel polls `backend_auth_status` afterwards to notice the result.
+#[tauri::command]
+pub async fn open_backend_login(backend: String, logout: bool) -> Result<(), String> {
+    let cmd = if logout {
+        grok_cli_wrapper::backend_auth::logout_command(&backend)
+    } else {
+        grok_cli_wrapper::backend_auth::login_command(&backend)
+    }
+    .ok_or_else(|| format!("no way to sign in to {backend}: install its CLI, or npx"))?;
+
+    spawn_in_terminal(&cmd).map_err(|e| format!("could not open a terminal: {e}"))
+}
+
+/// Open `cmd` in the platform's terminal. The command string is built by
+/// `backend_auth` from a fixed table, never from user input.
+fn spawn_in_terminal(cmd: &str) -> std::io::Result<()> {
+    #[cfg(target_os = "macos")]
+    {
+        // `osascript` keeps the window open and focused so the user can see the
+        // browser prompt and any error the CLI prints.
+        let script = format!(
+            r#"tell application "Terminal"
+                 activate
+                 do script "{cmd}"
+               end tell"#
+        );
+        std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()?;
+        return Ok(());
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = cmd;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "terminal hand-off is only wired up for macOS; run the command yourself",
+        ))
+    }
 }
 
 /// Start interactive login (device-code). Returns immediately with URL + confirm code.
@@ -108,29 +231,6 @@ pub async fn open_grok_login_url(
 pub async fn cancel_grok_login(state: State<'_, AppState>) -> Result<(), String> {
     state.login.cancel().await;
     Ok(())
-}
-
-/// Legacy blocking helpers (still available).
-#[tauri::command]
-pub async fn login_with_grok(
-    state: State<'_, AppState>,
-) -> Result<grok_cli_wrapper::LoginResult, String> {
-    state
-        .grok_cli
-        .login_oauth(std::time::Duration::from_secs(300))
-        .await
-        .map_err(err)
-}
-
-#[tauri::command]
-pub async fn login_with_device(
-    state: State<'_, AppState>,
-) -> Result<grok_cli_wrapper::LoginResult, String> {
-    state
-        .grok_cli
-        .login_device(std::time::Duration::from_secs(300))
-        .await
-        .map_err(err)
 }
 
 #[tauri::command]
@@ -257,10 +357,13 @@ pub async fn haven_get_config(
     state: State<'_, AppState>,
 ) -> Result<crate::haven::HavenConfig, String> {
     let mut cfg = state.haven.config().await;
-    // Never return full token to UI logs — mask middle.
-    if cfg.auth_token.len() > 12 {
-        let t = &cfg.auth_token;
-        cfg.auth_token = format!("{}…{}", &t[..6], &t[t.len() - 4..]);
+    // Never return full token to UI logs — mask middle (char-safe: byte
+    // slicing panics on multibyte tokens).
+    let chars: Vec<char> = cfg.auth_token.chars().collect();
+    if chars.len() > 12 {
+        let head: String = chars[..6].iter().collect();
+        let tail: String = chars[chars.len() - 4..].iter().collect();
+        cfg.auth_token = format!("{head}…{tail}");
     }
     Ok(cfg)
 }
@@ -275,8 +378,47 @@ pub async fn haven_set_config(
     if config.auth_token.contains('…') || config.auth_token.contains("...") {
         config.auth_token = existing.auth_token;
     }
+    // A bearer token over plaintext http is readable by anyone on the path —
+    // but private/tailnet hosts (Tailscale, LAN, localhost) are fine.
+    if config.base_url.starts_with("http://")
+        && !config.auth_token.is_empty()
+        && !is_private_host(&config.base_url)
+        && !config.allow_insecure_http
+    {
+        return Err(
+            "haven base_url must be https for public hosts (plain http is allowed for \
+             localhost, LAN, and Tailscale addresses — or tick 'allow insecure http' \
+             to accept the risk)"
+                .into(),
+        );
+    }
     state.haven.set_config(config).await?;
     Ok(state.haven.connect_and_status().await)
+}
+
+/// True for hosts where plaintext http is acceptable: loopback, RFC1918 LAN,
+/// Tailscale CGNAT range (100.64/10), .local, and MagicDNS .ts.net names.
+fn is_private_host(base_url: &str) -> bool {
+    let host = base_url
+        .trim_start_matches("http://")
+        .split(['/', ':'])
+        .next()
+        .unwrap_or("");
+    if host == "localhost" || host.ends_with(".local") || host.ends_with(".ts.net") {
+        return true;
+    }
+    let octets: Vec<u8> = host.split('.').filter_map(|p| p.parse().ok()).collect();
+    if octets.len() != 4 {
+        return false;
+    }
+    match octets[..] {
+        [127, ..] => true,
+        [10, ..] => true,
+        [192, 168, ..] => true,
+        [172, b, ..] if (16..=31).contains(&b) => true,
+        [100, b, ..] if (64..=127).contains(&b) => true,
+        _ => false,
+    }
 }
 
 #[tauri::command]
@@ -290,8 +432,29 @@ pub async fn haven_start_shell(
     name: String,
     command: String,
     cwd: Option<String>,
+    keep_alive: Option<bool>,
 ) -> Result<serde_json::Value, String> {
-    state.haven.start_shell(name, command, cwd).await
+    state
+        .haven
+        .start_shell(name, command, cwd, keep_alive.unwrap_or(false))
+        .await
+}
+
+#[tauri::command]
+pub async fn haven_job_log(
+    state: State<'_, AppState>,
+    id: String,
+    bytes: Option<u64>,
+) -> Result<String, String> {
+    state.haven.job_log(id, bytes.unwrap_or(64_000)).await
+}
+
+#[tauri::command]
+pub async fn haven_remove_job(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<serde_json::Value, String> {
+    state.haven.remove_job(id).await
 }
 
 #[tauri::command]
@@ -412,8 +575,9 @@ pub async fn start_session(
     mut opts: SpawnOptions,
 ) -> Result<SessionIdResponse, String> {
     // Resolve MCP attachments via McpManager (names + auto + high-risk approval).
+    let mut mcp_skipped = Vec::new();
     if !opts.mcp_server_names.is_empty() || opts.include_auto_mcp {
-        let payload = state
+        let resolution = state
             .mcp
             .session_mcp_payload(
                 &opts.mcp_server_names,
@@ -422,11 +586,86 @@ pub async fn start_session(
             )
             .await
             .map_err(err)?;
-        if !payload.is_empty() {
-            opts.mcp_servers = payload;
+        opts.mcp_servers = resolution.payload;
+        opts.mcp_server_names = resolution.attached_names;
+        mcp_skipped = resolution.skipped;
+    }
+    // Thread-per-worktree isolation: give this thread its own checkout so
+    // parallel threads on the same project can't overwrite each other.
+    let id = Uuid::new_v4();
+    let mut isolation_note: Option<String> = None;
+    let requested_cwd = cwd.clone();
+    let mut spawn_cwd = cwd.clone();
+    if opts.isolate_worktree && opts.mode == grok_control_core::AgentMode::Acp {
+        if grok_worktree::is_git_repo(std::path::Path::new(&cwd)).await {
+            let short = &id.to_string()[..8];
+            match state
+                .worktrees
+                .create(
+                    std::path::Path::new(&cwd),
+                    CreateWorktreeRequest {
+                        name: format!("t-{short}"),
+                        base_ref: None,
+                        prefer_grok_cli: false,
+                    },
+                )
+                .await
+            {
+                Ok(wt) => {
+                    spawn_cwd = wt.path.display().to_string();
+                    opts.worktree = Some(wt.name.clone());
+                    opts.project_root = Some(requested_cwd.clone());
+                    isolation_note = Some(format!(
+                        "🌱 isolated worktree · branch {} · {}",
+                        wt.branch.as_deref().unwrap_or("?"),
+                        wt.path.display()
+                    ));
+                }
+                Err(e) => {
+                    isolation_note = Some(format!(
+                        "⚠ worktree isolation unavailable ({e}) — thread shares the project folder"
+                    ));
+                }
+            }
+        } else {
+            isolation_note =
+                Some("not a git repo — thread works directly in the folder".into());
         }
     }
-    let id = state.registry.spawn_agent(&cwd, opts).await.map_err(err)?;
+
+    // Durable memory rides along: global notes + this project's notes are
+    // injected with the thread's first prompt.
+    let memory_context = build_memory_context(&state, &requested_cwd).await;
+    let connect_opts = grok_control_core::ConnectOpts {
+        resume_acp_session_id: None,
+        transcript_context: None,
+        memory_context,
+    };
+    state
+        .registry
+        .spawn_agent_preallocated(id, &spawn_cwd, opts, connect_opts)
+        .await
+        .map_err(err)?;
+    if let Some(note) = isolation_note {
+        let _ = state
+            .persistence
+            .append_message(id, "system", &note, Utc::now());
+        state.event_bus.emit(grok_events::ControlEvent::Raw {
+            session_id: Some(id),
+            payload: serde_json::json!({ "channel": "term", "stream": "worktree", "line": note }),
+        });
+    }
+    // Tell the thread why a server was left out — otherwise it just looks broken.
+    for s in &mcp_skipped {
+        let msg = format!("⚠ MCP `{}` skipped: {}", s.name, s.reason);
+        let _ = state
+            .persistence
+            .append_message(id, "system", &msg, Utc::now());
+        state.event_bus.emit(grok_events::ControlEvent::Raw {
+            session_id: Some(id),
+            payload: serde_json::json!({ "channel": "term", "stream": "mcp", "line": msg }),
+        });
+    }
     let _ = state.persistence.set_kv("last_cwd", &cwd);
     persist_session(&state, id).await;
     Ok(SessionIdResponse {
@@ -484,13 +723,116 @@ pub async fn send_prompt(
     state: State<'_, AppState>,
     id: String,
     prompt: String,
+    backend: Option<String>,
+    model: Option<String>,
+    approval_mode: Option<String>,
+    plan_mode: Option<bool>,
+    always_approve: Option<bool>,
 ) -> Result<(), String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
+
+    let want_backend = backend.as_deref().and_then(grok_config::Backend::from_key);
+    let want_model = model.filter(|m| {
+        let t = m.trim();
+        !t.is_empty() && !t.eq_ignore_ascii_case("default")
+    });
+
+    // Switching backend/model mid-thread: restart the thread under the new
+    // agent. Cross-agent session/load can't work, so the resume ladder lands
+    // on history-only and injects the prior transcript as context.
+    if state.registry.is_live(id) {
+        let snap = state.registry.get_snapshot(id).map_err(err)?;
+        let cur = &snap.metadata;
+        let backend_changed = want_backend.is_some_and(|b| b != cur.backend);
+        let model_changed = want_model
+            .as_deref()
+            .is_some_and(|m| !m.eq_ignore_ascii_case(&cur.model) && cur.model != "mock");
+        if backend_changed || (model_changed && cur.mode == grok_control_core::AgentMode::Acp) {
+            let label = format!(
+                "🔀 switching to {} · {} — prior chat carries over as context",
+                want_backend.unwrap_or(cur.backend).key(),
+                want_model.clone().unwrap_or_else(|| cur.model.clone()),
+            );
+            persist_session(&state, id).await;
+            state.registry.remove_session(id).await.map_err(err)?;
+            let _ = state
+                .persistence
+                .append_message(id, "system", &label, Utc::now());
+            resume_saved_session(
+                &state,
+                id,
+                want_backend,
+                want_model.clone(),
+                approval_mode.clone(),
+                plan_mode,
+                always_approve,
+            )
+            .await?;
+        }
+    }
 
     // Saved threads after reboot have history in SQLite but no live ACP process.
     // Auto-resume so "Send" picks up the same thread id + transcript.
     if !state.registry.is_live(id) {
-        resume_saved_session(&state, id).await?;
+        resume_saved_session(
+            &state,
+            id,
+            want_backend,
+            want_model,
+            approval_mode.clone(),
+            plan_mode,
+            always_approve,
+        )
+        .await?;
+    }
+
+    // Smart thread naming on the FIRST prompt: instant word-slug, then an
+    // async narrator-provider title upgrade.
+    let needs_label = state
+        .registry
+        .get_snapshot(id)
+        .map(|s| s.metadata.label.is_none())
+        .unwrap_or(false);
+    if needs_label {
+        let slug = prompt_slug(&prompt);
+        if !slug.is_empty() {
+            let _ = state.registry.set_label(id, &slug);
+            emit_thread_label(&state, id, &slug);
+        }
+        let explainer = state.explainer.clone();
+        let registry = state.registry.clone();
+        let bus = state.event_bus.clone();
+        let persistence = state.persistence.clone();
+        let prompt_for_title = prompt.clone();
+        tauri::async_runtime::spawn(async move {
+            if let Ok(title) = explainer.generate_title(&prompt_for_title).await {
+                if !title.is_empty() && registry.set_label(id, &title).is_ok() {
+                    bus.emit(grok_events::ControlEvent::Raw {
+                        session_id: Some(id),
+                        payload: serde_json::json!({
+                            "channel": "thread", "kind": "label", "label": title,
+                        }),
+                    });
+                    // Persist the upgraded label into the session record.
+                    if let Ok(snap) = registry.get_snapshot(id) {
+                        let _ = persistence.upsert_session(&SessionRecord {
+                            id,
+                            cwd: snap.metadata.cwd.clone(),
+                            mode: "acp".into(),
+                            model: snap.metadata.model.clone(),
+                            status: format!("{:?}", snap.metadata.status).to_lowercase(),
+                            worktree: snap.metadata.worktree.clone(),
+                            acp_session_id: snap.metadata.acp_session_id.clone(),
+                            metadata_json: serde_json::to_string(&snap)
+                                .unwrap_or_else(|_| "{}".into()),
+                            created_at: snap.metadata.created_at,
+                            updated_at: Utc::now(),
+                            message_count: 0,
+                        });
+                    }
+                }
+            }
+        });
     }
 
     let prompt_len = prompt.len();
@@ -512,7 +854,18 @@ pub async fn send_prompt(
 
 /// Bring a SQLite thread back online under the same id.
 /// Ladder: session/load → session/resume → session/new + transcript inject.
-async fn resume_saved_session(state: &AppState, id: Uuid) -> Result<(), String> {
+/// Overrides switch the thread to a different backend/model; a backend switch
+/// drops the prior ACP session id (it belongs to another agent) so the ladder
+/// goes straight to history-only transcript injection.
+async fn resume_saved_session(
+    state: &AppState,
+    id: Uuid,
+    override_backend: Option<grok_config::Backend>,
+    override_model: Option<String>,
+    approval_mode: Option<String>,
+    plan_mode: Option<bool>,
+    always_approve: Option<bool>,
+) -> Result<(), String> {
     let rec = state
         .persistence
         .get_session(id)
@@ -534,32 +887,78 @@ async fn resume_saved_session(state: &AppState, id: Uuid) -> Result<(), String> 
     } else {
         grok_control_core::AgentMode::Acp
     };
-    opts.model = if rec.model.is_empty() {
-        None
-    } else {
-        Some(rec.model.clone())
-    };
+    let recorded_backend = extract_backend_from_meta(&rec.metadata_json);
+    opts.backend = override_backend.unwrap_or(recorded_backend);
+    let backend_switched = opts.backend != recorded_backend;
+    opts.model = override_model.or_else(|| {
+        if rec.model.is_empty() || backend_switched {
+            // Old model id belongs to the other vendor; let config pick.
+            None
+        } else {
+            Some(rec.model.clone())
+        }
+    });
     opts.worktree = rec.worktree.clone();
-    opts.plan_mode = true;
+    // Preserve the project link so Land/Sync keep working after a restart.
+    // Never re-isolate on resume: the stored cwd already IS the worktree.
+    opts.isolate_worktree = false;
+    opts.project_root = extract_meta_string(&rec.metadata_json, "projectRoot")
+        .or_else(|| extract_meta_string(&rec.metadata_json, "project_root"));
+    // Honor the caller's current stance. An explicit approval_mode wins;
+    // otherwise fall back to the legacy booleans (default: plan on, yolo off).
+    opts.approval_mode = approval_mode.as_deref().and_then(|m| match m {
+        "plan" => Some(grok_control_core::ApprovalMode::Plan),
+        "auto" => Some(grok_control_core::ApprovalMode::Auto),
+        "yolo" | "always_approve" => Some(grok_control_core::ApprovalMode::Yolo),
+        "ask" | "default" => Some(grok_control_core::ApprovalMode::Ask),
+        _ => None,
+    });
+    opts.always_approve = always_approve.unwrap_or(false);
+    opts.plan_mode = if opts.always_approve {
+        false
+    } else {
+        plan_mode.unwrap_or(false)
+    };
     opts.mcp_server_names = extract_mcp_from_meta(&rec.metadata_json);
+    // Re-apply the high-risk approvals granted when the thread was created —
+    // resuming must not silently drop approved servers (e.g. playwright).
+    opts.approved_high_risk_mcp = extract_approved_mcp_from_meta(&rec.metadata_json);
     if matches!(opts.mode, grok_control_core::AgentMode::Headless) {
         opts.mode = grok_control_core::AgentMode::Acp;
     }
 
     if !opts.mcp_server_names.is_empty() {
-        if let Ok(payload) = state
+        let resolution = state
             .mcp
-            .session_mcp_payload(&opts.mcp_server_names, &[], false)
+            .session_mcp_payload(&opts.mcp_server_names, &opts.approved_high_risk_mcp, false)
             .await
-        {
-            opts.mcp_servers = payload;
+            .map_err(|e| format!("MCP resolution failed on resume: {e}"))?;
+        opts.mcp_servers = resolution.payload;
+        opts.mcp_server_names = resolution.attached_names;
+        for s in &resolution.skipped {
+            let _ = state.persistence.append_message(
+                id,
+                "system",
+                format!("⚠ MCP `{}` skipped on resume: {}", s.name, s.reason),
+                Utc::now(),
+            );
         }
     }
 
     let transcript_context = build_transcript_context(state, id);
+    let memory_root = opts
+        .project_root
+        .clone()
+        .unwrap_or_else(|| rec.cwd.clone());
     let connect_opts = grok_control_core::ConnectOpts {
-        resume_acp_session_id: rec.acp_session_id.clone().filter(|s| !s.is_empty()),
+        // A prior ACP session id from another agent can't be loaded/resumed.
+        resume_acp_session_id: if backend_switched {
+            None
+        } else {
+            rec.acp_session_id.clone().filter(|s| !s.is_empty())
+        },
         transcript_context: transcript_context.clone(),
+        memory_context: build_memory_context(state, &memory_root).await,
     };
 
     let brain = state
@@ -586,7 +985,60 @@ async fn resume_saved_session(state: &AppState, id: Uuid) -> Result<(), String> 
     Ok(())
 }
 
+/// Cheap instant label: first significant words of the prompt.
+fn prompt_slug(prompt: &str) -> String {
+    const STOP: &[&str] = &[
+        "a", "an", "the", "to", "of", "in", "on", "for", "and", "or", "is", "it", "that", "this",
+        "please", "can", "you", "me", "my", "i", "we",
+    ];
+    let words: Vec<&str> = prompt
+        .split_whitespace()
+        .map(|w| w.trim_matches(|c: char| !c.is_alphanumeric()))
+        .filter(|w| !w.is_empty() && !STOP.contains(&w.to_lowercase().as_str()))
+        .take(5)
+        .collect();
+    let mut s = words.join(" ");
+    if s.chars().count() > 42 {
+        s = s.chars().take(42).collect::<String>() + "…";
+    }
+    s
+}
+
+fn emit_thread_label(state: &AppState, id: Uuid, label: &str) {
+    state.event_bus.emit(grok_events::ControlEvent::Raw {
+        session_id: Some(id),
+        payload: serde_json::json!({ "channel": "thread", "kind": "label", "label": label }),
+    });
+}
+
 /// Pack recent transcript for history-only rehydration (bounded).
+/// Stable, readable memory scope key for a project folder.
+pub(crate) fn project_memory_scope(project_root: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let clean = project_root.trim_end_matches('/');
+    let base = clean.split('/').filter(|s| !s.is_empty()).last().unwrap_or("project");
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    clean.hash(&mut h);
+    format!("{base}-{:06x}", h.finish() & 0xff_ffff)
+}
+
+/// Global notes + the project's notes, capped, for first-prompt injection.
+async fn build_memory_context(state: &AppState, project_root: &str) -> Option<String> {
+    let mut parts = Vec::new();
+    if let Some(g) = state.memory.context_pack("global", 1500).await {
+        parts.push(format!("Global:\n{g}"));
+    }
+    let scope = project_memory_scope(project_root);
+    if let Some(p) = state.memory.context_pack(&scope, 2500).await {
+        parts.push(format!("This project:\n{p}"));
+    }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n"))
+    }
+}
+
 fn build_transcript_context(state: &AppState, id: Uuid) -> Option<String> {
     let entries = state.persistence.transcript_entries(id).ok()?;
     if entries.is_empty() {
@@ -638,11 +1090,33 @@ pub async fn cancel_session(state: State<'_, AppState>, id: String) -> Result<()
 }
 
 #[tauri::command]
-pub async fn remove_session(state: State<'_, AppState>, id: String) -> Result<(), String> {
+pub async fn remove_session(
+    state: State<'_, AppState>,
+    id: String,
+    remove_worktree: Option<bool>,
+) -> Result<(), String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
+    // Capture worktree context before the records disappear.
+    let wt_ctx = if remove_worktree.unwrap_or(false) {
+        thread_worktree_context(&state, id).await.ok()
+    } else {
+        None
+    };
     // Live handle may be gone after reboot — still wipe SQLite memory.
     let _ = state.registry.remove_session(id).await;
     state.persistence.delete_session(id).map_err(err)?;
+    if let Some((worktree, root, _branch, _)) = wt_ctx {
+        // Only remove managed worktrees (never the project root itself).
+        if worktree != root && worktree.starts_with(state.worktrees.worktrees_root()) {
+            if let Err(e) = state
+                .worktrees
+                .remove(&root, &worktree.display().to_string(), true)
+                .await
+            {
+                tracing::warn!(error = %e, "worktree removal failed after thread delete");
+            }
+        }
+    }
     Ok(())
 }
 
@@ -660,19 +1134,394 @@ pub async fn set_plan_mode(
         .map_err(err)
 }
 
+// ── Explainer (right-panel ELI12 narrator) ───────────────────────────────
+
+#[tauri::command]
+pub async fn explainer_focus(
+    state: State<'_, AppState>,
+    id: Option<String>,
+) -> Result<(), String> {
+    let uuid = match id.as_deref().filter(|s| !s.is_empty()) {
+        Some(s) => Some(Uuid::parse_str(s).map_err(err)?),
+        None => None,
+    };
+    state.explainer.set_focus(uuid).await;
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn set_explainer_provider(
+    state: State<'_, AppState>,
+    backend: Option<String>,
+    model: Option<String>,
+) -> Result<(), String> {
+    state
+        .explainer
+        .set_provider(backend.clone(), model.clone())
+        .await;
+    {
+        let mut cfg = state.config.write().await;
+        if backend.is_some() {
+            cfg.explainer_backend = backend;
+        }
+        if model.is_some() {
+            cfg.explainer_model = model;
+        }
+        cfg.save(&state.paths.config_file).map_err(err)?;
+    }
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn set_explainer_enabled(
+    state: State<'_, AppState>,
+    enabled: bool,
+) -> Result<bool, String> {
+    state.explainer.set_enabled(enabled);
+    {
+        let mut cfg = state.config.write().await;
+        cfg.explainer_enabled = enabled;
+        cfg.save(&state.paths.config_file).map_err(err)?;
+    }
+    Ok(state.explainer.enabled())
+}
+
+/// Set a live session's approval stance: plan | ask | auto | yolo.
+#[tauri::command]
+pub async fn set_approval_mode(
+    state: State<'_, AppState>,
+    id: String,
+    mode: String,
+) -> Result<(), String> {
+    let id = Uuid::parse_str(&id).map_err(err)?;
+    let mode = match mode.to_lowercase().as_str() {
+        "plan" => grok_control_core::ApprovalMode::Plan,
+        "auto" => grok_control_core::ApprovalMode::Auto,
+        "yolo" | "always_approve" => grok_control_core::ApprovalMode::Yolo,
+        "ask" | "default" => grok_control_core::ApprovalMode::Ask,
+        other => return Err(format!("unknown approval mode: {other}")),
+    };
+    state
+        .registry
+        .set_approval_mode(id, mode)
+        .await
+        .map_err(err)?;
+    persist_session(&state, id).await;
+    Ok(())
+}
+
+/// "Always allow this" from an approval card — auto-approves matching
+/// requests for the rest of the session.
+#[tauri::command]
+pub async fn add_session_allow_rule(
+    state: State<'_, AppState>,
+    id: String,
+    pattern: String,
+) -> Result<(), String> {
+    let id = Uuid::parse_str(&id).map_err(err)?;
+    let pattern = pattern.trim().to_string();
+    if pattern.is_empty() {
+        return Err("empty rule".into());
+    }
+    state
+        .registry
+        .add_session_allow_rule(id, pattern.clone())
+        .await
+        .map_err(err)?;
+    let _ = state.persistence.append_message(
+        id,
+        "system",
+        format!("✓ always allowing `{pattern}` for the rest of this session"),
+        Utc::now(),
+    );
+    Ok(())
+}
+
+#[tauri::command]
+pub async fn set_always_approve(
+    state: State<'_, AppState>,
+    id: String,
+    enabled: bool,
+) -> Result<(), String> {
+    let id = Uuid::parse_str(&id).map_err(err)?;
+    state
+        .registry
+        .set_always_approve(id, enabled)
+        .await
+        .map_err(err)
+}
+
 #[tauri::command]
 pub async fn respond_approval(
     state: State<'_, AppState>,
     id: String,
     request_id: String,
-    approved: bool,
+    option_id: Option<String>,
 ) -> Result<(), String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
     state
         .registry
-        .respond_approval(id, &request_id, approved)
+        .respond_approval(id, &request_id, option_id.as_deref())
         .await
         .map_err(err)
+}
+
+/// Rename a thread (manual override of the smart name). Works for live and
+/// saved threads; manual names are never overwritten by the auto-titler
+/// (which only fires when a thread has no label at its first prompt).
+#[tauri::command]
+pub async fn rename_thread(
+    state: State<'_, AppState>,
+    id: String,
+    label: String,
+) -> Result<(), String> {
+    let id = Uuid::parse_str(&id).map_err(err)?;
+    let label = label.trim();
+    if label.is_empty() {
+        return Err("name cannot be empty".into());
+    }
+    let label: String = label.chars().take(60).collect();
+
+    if state.registry.set_label(id, &label).is_ok() {
+        persist_session(&state, id).await;
+    } else {
+        // Saved thread: patch the label inside the persisted metadata.
+        let mut rec = state.persistence.get_session(id).map_err(err)?;
+        let mut v: serde_json::Value =
+            serde_json::from_str(&rec.metadata_json).unwrap_or_else(|_| serde_json::json!({}));
+        if !v.get("metadata").map(|m| m.is_object()).unwrap_or(false) {
+            v["metadata"] = serde_json::json!({});
+        }
+        v["metadata"]["label"] = serde_json::json!(label);
+        rec.metadata_json = v.to_string();
+        rec.updated_at = Utc::now();
+        state.persistence.upsert_session(&rec).map_err(err)?;
+    }
+    emit_thread_label(&state, id, &label);
+    Ok(())
+}
+
+// ── Projects (persisted folder list for the sidebar) ─────────────────────
+
+#[tauri::command]
+pub async fn list_projects(state: State<'_, AppState>) -> Result<Vec<String>, String> {
+    Ok(state
+        .persistence
+        .get_kv("projects")
+        .ok()
+        .flatten()
+        .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+        .unwrap_or_default())
+}
+
+#[tauri::command]
+pub async fn add_project(state: State<'_, AppState>, path: String) -> Result<Vec<String>, String> {
+    let path = path.trim().trim_end_matches('/').to_string();
+    if path.is_empty() || !PathBuf::from(&path).is_dir() {
+        return Err(format!("not a folder: {path}"));
+    }
+    let mut list = list_projects(state.clone()).await?;
+    if !list.contains(&path) {
+        list.push(path);
+        list.sort();
+        state
+            .persistence
+            .set_kv("projects", &serde_json::to_string(&list).map_err(err)?)
+            .map_err(err)?;
+    }
+    Ok(list)
+}
+
+#[tauri::command]
+pub async fn remove_project(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<Vec<String>, String> {
+    let mut list = list_projects(state.clone()).await?;
+    list.retain(|p| p != &path);
+    state
+        .persistence
+        .set_kv("projects", &serde_json::to_string(&list).map_err(err)?)
+        .map_err(err)?;
+    Ok(list)
+}
+
+// ── Thread land / sync (worktree merge flow) ─────────────────────────────
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ThreadMergeResult {
+    /// landed | needs_sync | synced | conflicts
+    pub status: String,
+    pub files: Vec<String>,
+    pub branch: String,
+    pub target_branch: String,
+}
+
+/// Worktree path + project root + branch for a thread, or a friendly error.
+async fn thread_worktree_context(
+    state: &AppState,
+    id: Uuid,
+) -> Result<(PathBuf, PathBuf, String, String), String> {
+    // Live metadata first; fall back to the persisted record.
+    let (cwd, project_root, label) = match state.registry.get_snapshot(id) {
+        Ok(snap) => (
+            snap.metadata.cwd.clone(),
+            snap.metadata.project_root.clone(),
+            snap.metadata.label.clone().unwrap_or_default(),
+        ),
+        Err(_) => {
+            let rec = state.persistence.get_session(id).map_err(err)?;
+            let root = serde_json::from_str::<serde_json::Value>(&rec.metadata_json)
+                .ok()
+                .and_then(|v| {
+                    v.pointer("/metadata/projectRoot")
+                        .or_else(|| v.pointer("/metadata/project_root"))
+                        .and_then(|p| p.as_str())
+                        .map(String::from)
+                });
+            (rec.cwd, root, String::new())
+        }
+    };
+    let project_root = project_root
+        .filter(|p| !p.is_empty())
+        .ok_or("this thread has no isolated worktree (it works directly in the project folder)")?;
+    let worktree = PathBuf::from(&cwd);
+    let root = PathBuf::from(&project_root);
+    let branch = state
+        .worktrees
+        .current_branch(&worktree)
+        .await
+        .map_err(err)?;
+    Ok((worktree, root, branch, label))
+}
+
+/// Merge the thread's worktree branch back into the project's current branch.
+#[tauri::command]
+pub async fn land_thread(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<ThreadMergeResult, String> {
+    let id = Uuid::parse_str(&id).map_err(err)?;
+    let (worktree, root, branch, label) = thread_worktree_context(&state, id).await?;
+    let title = if label.is_empty() { branch.clone() } else { label.clone() };
+
+    let _ = state
+        .worktrees
+        .commit_all(&worktree, &format!("thread {title}: work in progress"))
+        .await
+        .map_err(err)?;
+
+    if !state.worktrees.is_clean(&root).await.map_err(err)? {
+        return Err(format!(
+            "the project folder has uncommitted changes — commit or stash them in {} first",
+            root.display()
+        ));
+    }
+    let target_branch = state.worktrees.current_branch(&root).await.map_err(err)?;
+
+    match state
+        .worktrees
+        .merge(&root, &branch, &format!("land thread: {title}"))
+        .await
+        .map_err(err)?
+    {
+        grok_worktree::MergeOutcome::Merged => {
+            let msg = format!("⬆ landed into {target_branch} ✓");
+            let _ = state.persistence.append_message(id, "system", &msg, Utc::now());
+            state.event_bus.emit(grok_events::ControlEvent::Raw {
+                session_id: Some(id),
+                payload: serde_json::json!({ "channel": "term", "stream": "worktree", "line": msg }),
+            });
+            Ok(ThreadMergeResult {
+                status: "landed".into(),
+                files: vec![],
+                branch,
+                target_branch,
+            })
+        }
+        grok_worktree::MergeOutcome::Conflicts { files } => {
+            // Never leave the user's main checkout mid-merge.
+            state.worktrees.merge_abort(&root).await;
+            let msg = format!(
+                "⚠ landing hit conflicts in {} — run Sync so this thread's agent can resolve them, then land again",
+                files.join(", ")
+            );
+            let _ = state.persistence.append_message(id, "system", &msg, Utc::now());
+            state.event_bus.emit(grok_events::ControlEvent::Raw {
+                session_id: Some(id),
+                payload: serde_json::json!({ "channel": "term", "stream": "worktree", "line": msg }),
+            });
+            Ok(ThreadMergeResult {
+                status: "needs_sync".into(),
+                files,
+                branch,
+                target_branch,
+            })
+        }
+    }
+}
+
+/// Merge the project's current branch INTO the thread's worktree. Conflicts
+/// stay in the worktree where the thread's own agent can resolve them.
+#[tauri::command]
+pub async fn sync_thread(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<ThreadMergeResult, String> {
+    let id = Uuid::parse_str(&id).map_err(err)?;
+    let (worktree, root, branch, label) = thread_worktree_context(&state, id).await?;
+    let title = if label.is_empty() { branch.clone() } else { label.clone() };
+    let target_branch = state.worktrees.current_branch(&root).await.map_err(err)?;
+
+    let _ = state
+        .worktrees
+        .commit_all(&worktree, &format!("thread {title}: work in progress"))
+        .await
+        .map_err(err)?;
+
+    match state
+        .worktrees
+        .merge(
+            &worktree,
+            &target_branch,
+            &format!("sync from {target_branch}"),
+        )
+        .await
+        .map_err(err)?
+    {
+        grok_worktree::MergeOutcome::Merged => {
+            let msg = format!("⟳ synced from {target_branch} ✓");
+            let _ = state.persistence.append_message(id, "system", &msg, Utc::now());
+            state.event_bus.emit(grok_events::ControlEvent::Raw {
+                session_id: Some(id),
+                payload: serde_json::json!({ "channel": "term", "stream": "worktree", "line": msg }),
+            });
+            Ok(ThreadMergeResult {
+                status: "synced".into(),
+                files: vec![],
+                branch,
+                target_branch,
+            })
+        }
+        grok_worktree::MergeOutcome::Conflicts { files } => {
+            let msg = format!(
+                "⚠ merge conflicts from {target_branch} left in this worktree: {} — ask this thread's agent to resolve and commit them",
+                files.join(", ")
+            );
+            let _ = state.persistence.append_message(id, "system", &msg, Utc::now());
+            state.event_bus.emit(grok_events::ControlEvent::Raw {
+                session_id: Some(id),
+                payload: serde_json::json!({ "channel": "term", "stream": "worktree", "line": msg }),
+            });
+            Ok(ThreadMergeResult {
+                status: "conflicts".into(),
+                files,
+                branch,
+                target_branch,
+            })
+        }
+    }
 }
 
 // ── Phase 2: Worktrees & Permissions ─────────────────────────────────────
@@ -703,7 +1552,9 @@ pub async fn create_worktree(
             CreateWorktreeRequest {
                 name,
                 base_ref,
-                prefer_grok_cli: true,
+                // Pure git, same as thread isolation — one layout for all
+                // managed worktrees (the CLI path used its own location).
+                prefer_grok_cli: false,
             },
         )
         .await
@@ -720,6 +1571,18 @@ pub async fn remove_worktree(
     state
         .worktrees
         .remove(PathBuf::from(repo).as_path(), &name, force)
+        .await
+        .map_err(err)
+}
+
+#[tauri::command]
+pub async fn prune_worktrees(
+    state: State<'_, AppState>,
+    repo: String,
+) -> Result<String, String> {
+    state
+        .worktrees
+        .prune(PathBuf::from(repo).as_path())
         .await
         .map_err(err)
 }
@@ -754,7 +1617,7 @@ pub async fn evaluate_permission(
     preset: Option<String>,
 ) -> Result<PermissionEvalResult, String> {
     let cfg = state.config.read().await;
-    let mut ctl = if let Some(name) = preset {
+    let ctl = if let Some(name) = preset {
         let presets = builtin_presets();
         let p = presets
             .iter()
@@ -764,8 +1627,6 @@ pub async fn evaluate_permission(
     } else {
         PermissionController::from_defaults(&cfg.permissions, cfg.sandbox_profile)
     };
-    // silence mut if unused later
-    let _ = &mut ctl;
     Ok(PermissionEvalResult {
         decision: ctl.evaluate(&tool, &detail),
     })
@@ -910,6 +1771,14 @@ pub async fn list_mcp_credentials(
 }
 
 #[tauri::command]
+pub async fn remove_mcp_credential(
+    state: State<'_, AppState>,
+    key: String,
+) -> Result<(), String> {
+    state.mcp.credentials().remove(&key).map_err(err)
+}
+
+#[tauri::command]
 pub async fn suggest_mcp_for_project(
     state: State<'_, AppState>,
     git_remote: Option<String>,
@@ -927,12 +1796,23 @@ pub async fn preview_session_mcp(
     names: Vec<String>,
     approved_high_risk: Vec<String>,
     include_auto: bool,
-) -> Result<Vec<serde_json::Value>, String> {
-    state
+) -> Result<serde_json::Value, String> {
+    let res = state
         .mcp
         .session_mcp_payload(&names, &approved_high_risk, include_auto)
         .await
-        .map_err(err)
+        .map_err(err)?;
+    // Webview gets masked secrets only.
+    let masked: Vec<serde_json::Value> = res
+        .payload
+        .iter()
+        .map(grok_mcp::mask_payload_for_preview)
+        .collect();
+    Ok(serde_json::json!({
+        "servers": masked,
+        "attached": res.attached_names,
+        "skipped": res.skipped,
+    }))
 }
 
 #[tauri::command]
@@ -988,15 +1868,69 @@ pub async fn memory_flush(state: State<'_, AppState>, scope: String) -> Result<S
     state.memory.flush_markdown(&scope).await.map_err(err)
 }
 
+/// Digest: LLM-summarize a scope's notes into one compact entry (tagged
+/// `digest`). Originals stay — the user deletes what's superseded.
 #[tauri::command]
-pub async fn memory_dream(
+pub async fn memory_digest(
     state: State<'_, AppState>,
     scope: String,
-    max_chars: Option<usize>,
-) -> Result<String, String> {
+) -> Result<MemoryEntry, String> {
+    let pack = state
+        .memory
+        .context_pack(&scope, 6000)
+        .await
+        .ok_or("no notes in this scope to digest")?;
+    let summary = state
+        .explainer
+        .summarize(&format!(
+            "Condense these project notes into at most 8 short bullet points, \
+             merging duplicates and dropping anything obsolete. Keep concrete \
+             facts (commands, versions, decisions). Output only the bullets.\n\n{pack}"
+        ))
+        .await?;
     state
         .memory
-        .dream(&scope, max_chars.unwrap_or(4000))
+        .add(&scope, summary, vec!["digest".into()])
+        .await
+        .map_err(err)
+}
+
+/// Scope key the given project folder maps to (for the Memory view).
+#[tauri::command]
+pub async fn project_scope(path: String) -> Result<String, String> {
+    if path.trim().is_empty() {
+        return Ok("global".into());
+    }
+    Ok(project_memory_scope(&path))
+}
+
+/// Pin a piece of transcript text into the project's durable memory.
+#[tauri::command]
+pub async fn remember(
+    state: State<'_, AppState>,
+    id: String,
+    content: String,
+) -> Result<MemoryEntry, String> {
+    let id = Uuid::parse_str(&id).map_err(err)?;
+    let content = content.trim();
+    if content.is_empty() {
+        return Err("nothing to remember".into());
+    }
+    let content: String = content.chars().take(600).collect();
+    // Scope by the thread's project (fall back to its cwd, then global).
+    let root = state
+        .registry
+        .get_snapshot(id)
+        .ok()
+        .map(|s| s.metadata.project_root.clone().unwrap_or(s.metadata.cwd))
+        .or_else(|| state.persistence.get_session(id).ok().map(|r| r.cwd))
+        .filter(|s| !s.is_empty());
+    let scope = root
+        .map(|r| project_memory_scope(&r))
+        .unwrap_or_else(|| "global".into());
+    state
+        .memory
+        .add(&scope, content, vec!["remembered".into()])
         .await
         .map_err(err)
 }
@@ -1156,6 +2090,7 @@ fn build_thread_list(state: &AppState) -> Vec<ThreadDto> {
             cwd: m.cwd,
             mode: mode.into(),
             model: m.model,
+            backend: m.backend.key().to_string(),
             status,
             live: true,
             message_count: msg_count,
@@ -1164,6 +2099,13 @@ fn build_thread_list(state: &AppState) -> Vec<ThreadDto> {
             worktree: m.worktree,
             mcp_servers: m.mcp_servers,
             label: m.label,
+            approval_mode: Some(
+                serde_json::to_value(m.approval_mode)
+                    .ok()
+                    .and_then(|v| v.as_str().map(String::from))
+                    .unwrap_or_else(|| "ask".into()),
+            ),
+            project_root: m.project_root,
             brain_mode: Some(m.brain_mode.as_str().into()),
         });
     }
@@ -1179,11 +2121,16 @@ fn build_thread_list(state: &AppState) -> Vec<ThreadDto> {
                 other => other.to_string(),
             };
             let mcp = extract_mcp_from_meta(&rec.metadata_json);
+            let backend = extract_backend_from_meta(&rec.metadata_json);
+            let label = extract_meta_string(&rec.metadata_json, "label");
+            let project_root = extract_meta_string(&rec.metadata_json, "projectRoot")
+                .or_else(|| extract_meta_string(&rec.metadata_json, "project_root"));
             out.push(ThreadDto {
                 id: rec.id.to_string(),
                 cwd: rec.cwd,
                 mode: rec.mode,
                 model: rec.model,
+                backend: backend.key().to_string(),
                 status,
                 live: false,
                 message_count: rec.message_count,
@@ -1191,7 +2138,10 @@ fn build_thread_list(state: &AppState) -> Vec<ThreadDto> {
                 updated_at: rec.updated_at.to_rfc3339(),
                 worktree: rec.worktree,
                 mcp_servers: mcp,
-                label: None,
+                label,
+                approval_mode: extract_meta_string(&rec.metadata_json, "approvalMode")
+                    .or_else(|| extract_meta_string(&rec.metadata_json, "approval_mode")),
+                project_root,
                 brain_mode: None,
             });
         }
@@ -1199,6 +2149,40 @@ fn build_thread_list(state: &AppState) -> Vec<ThreadDto> {
 
     out.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
     out
+}
+
+fn extract_backend_from_meta(json: &str) -> grok_config::Backend {
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|v| {
+            v.pointer("/metadata/backend")
+                .and_then(|b| b.as_str())
+                .and_then(grok_config::Backend::from_key)
+        })
+        .unwrap_or_default()
+}
+
+fn extract_approved_mcp_from_meta(json: &str) -> Vec<String> {
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|v| {
+            v.pointer("/metadata/approvedHighRiskMcp")
+                .or_else(|| v.pointer("/metadata/approved_high_risk_mcp"))
+                .cloned()
+        })
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default()
+}
+
+fn extract_meta_string(json: &str, key: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(json)
+        .ok()
+        .and_then(|v| {
+            v.pointer(&format!("/metadata/{key}"))
+                .and_then(|s| s.as_str())
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+        })
 }
 
 fn extract_mcp_from_meta(json: &str) -> Vec<String> {
@@ -1229,15 +2213,24 @@ pub fn persist_control_event(db: &grok_persistence::Persistence, ev: &ControlEve
             if lower.starts_with("prompt sent") || lower == "turn complete" {
                 return Ok(());
             }
-            let kind = if text.starts_with('💭') {
-                "thought"
-            } else {
-                "agent"
+            // Keep the chunk's own spacing — these are streaming deltas and
+            // append_message_merged concatenates them into one row.
+            let (kind, body) = match text.strip_prefix('💭') {
+                Some(rest) => ("thought", rest),
+                None => ("agent", text.as_str()),
             };
-            let body = text.strip_prefix('💭').unwrap_or(text).trim_start();
-            db.append_message(*session_id, kind, body, *at).map(|_| ())
+            db.append_message_merged(*session_id, kind, body, *at, 10)
+                .map(|_| ())
         }
         ToolCall { session_id, event } => {
+            // Plan-presenting tool calls persist their plan as a plan_doc
+            // row — the raw JSON dump would just duplicate it, hugely.
+            let is_plan_tool = event.tool.to_lowercase().contains("plan")
+                || event.args_summary.contains("\"plan\":");
+            if is_plan_tool {
+                let _ = db.update_session_status(*session_id, "running");
+                return Ok(());
+            }
             let payload = serde_json::json!({
                 "id": event.id,
                 "tool": event.tool,
@@ -1276,15 +2269,80 @@ pub fn persist_control_event(db: &grok_persistence::Persistence, ev: &ControlEve
             session_id,
             tool,
             summary,
+            auto_approved,
             at,
             ..
         } => {
-            let _ = db.update_session_status(*session_id, "waitingapproval");
-            db.append_message(
+            if *auto_approved {
+                db.append_message(
+                    *session_id,
+                    "system",
+                    format!("auto-approved (yolo): {tool}"),
+                    *at,
+                )
+                .map(|_| ())
+            } else {
+                let _ = db.update_session_status(*session_id, "waitingapproval");
+                // Durable as an approval row so it renders as a card (inert
+                // after restart — the live request died with the process).
+                db.append_message(
+                    *session_id,
+                    "approval",
+                    format!("{tool} — {summary}"),
+                    *at,
+                )
+                .map(|_| ())
+            }
+        }
+        ApprovalResolved {
+            session_id,
+            option_id,
+            cancelled,
+            at,
+            ..
+        } => {
+            let _ = db.update_session_status(*session_id, "running");
+            let body = if *cancelled {
+                "approval cancelled".to_string()
+            } else {
+                format!(
+                    "approval granted: {}",
+                    option_id.as_deref().unwrap_or("selected")
+                )
+            };
+            db.append_message(*session_id, "system", body, *at).map(|_| ())
+        }
+        // Plan documents lifted out of plan-presenting tool calls
+        // (ExitPlanMode etc.) — durable as real plan rows.
+        Raw {
+            session_id: Some(session_id),
+            payload,
+        } if payload.get("channel").and_then(|v| v.as_str()) == Some("plan_doc") => {
+            let Some(text) = payload.get("text").and_then(|v| v.as_str()) else {
+                return Ok(());
+            };
+            db.append_message(*session_id, "plan", text, Utc::now())
+                .map(|_| ())
+        }
+        // Raw ACP protocol lines: persist (merged into bounded multiline
+        // rows) so the View toggle can reveal history across restarts.
+        // Skip our own side channels (explain/usage/thread label events).
+        Raw {
+            session_id: Some(session_id),
+            payload,
+        } if payload.get("channel").and_then(|v| v.as_str()) == Some("term") => {
+            let Some(line) = payload.get("line").and_then(|v| v.as_str()) else {
+                return Ok(());
+            };
+            if line.trim().is_empty() {
+                return Ok(());
+            }
+            db.append_message_merged(
                 *session_id,
-                "system",
-                format!("approval required: {tool} — {summary}"),
-                *at,
+                "term",
+                &format!("{line}\n"),
+                Utc::now(),
+                10,
             )
             .map(|_| ())
         }
@@ -1293,7 +2351,9 @@ pub fn persist_control_event(db: &grok_persistence::Persistence, ev: &ControlEve
             message,
             at,
         } => {
-            let _ = db.update_session_status(*session_id, "failed");
+            // Errors are rows, not verdicts — terminal failures arrive as
+            // SessionStatusChanged(Failed). Flipping the record here made a
+            // recovered thread show a permanent failed badge after reboot.
             db.append_message(*session_id, "error", message.clone(), *at)
                 .map(|_| ())
         }
@@ -1304,19 +2364,31 @@ pub fn persist_control_event(db: &grok_persistence::Persistence, ev: &ControlEve
     }
 }
 
-// Keep SessionStatus import used for docs / future
-#[allow(dead_code)]
-fn _status_idle() -> SessionStatus {
-    SessionStatus::Idle
-}
-
 // ── Dev server / live preview ────────────────────────────────────────────
 
 fn resolve_preview_cwd(state: &AppState, cwd: Option<String>, session_id: Option<String>) -> Result<PathBuf, String> {
-    if let Some(id) = session_id {
-        let uuid = Uuid::parse_str(&id).map_err(err)?;
-        let snap = state.registry.get_snapshot(uuid).map_err(err)?;
-        return Ok(PathBuf::from(snap.metadata.cwd));
+    // A thread's own directory wins (it may be a worktree). Live threads carry
+    // it in the registry; a saved thread has no live snapshot but its cwd is
+    // still on disk — falling straight through to "session not found" made
+    // preview unusable for any thread whose agent was not currently running.
+    if let Some(id) = session_id.as_deref() {
+        if let Ok(uuid) = Uuid::parse_str(id) {
+            let from_thread = state
+                .registry
+                .get_snapshot(uuid)
+                .map(|snap| snap.metadata.cwd)
+                .ok()
+                .or_else(|| state.persistence.get_session(uuid).map(|rec| rec.cwd).ok());
+            if let Some(dir) = from_thread {
+                let p = PathBuf::from(dir);
+                if p.is_dir() {
+                    return Ok(p);
+                }
+                // A worktree that has since been pruned: fall back to the
+                // project cwd rather than dead-ending.
+                tracing::warn!(path = %p.display(), "thread cwd is gone; falling back to project cwd");
+            }
+        }
     }
     if let Some(c) = cwd {
         let p = PathBuf::from(c);

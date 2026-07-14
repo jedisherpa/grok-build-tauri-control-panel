@@ -1,3 +1,4 @@
+use grok_config::Backend;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -11,14 +12,22 @@ pub enum AgentMode {
 
 // Note: AgentMode accepts "acp" / "headless" (snake). Frontend may send same.
 
+pub use grok_acp::ApprovalMode;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct SpawnOptions {
+    /// Which agent backend to spawn (grok | claude | codex).
+    pub backend: Backend,
     pub model: Option<String>,
     pub worktree: Option<String>,
     pub mode: AgentMode,
     pub prompt: Option<String>,
     pub rules: Vec<String>,
+    /// Approval stance: plan | ask | auto | yolo. The two booleans below are
+    /// legacy inputs (older payloads / persisted metadata) — `resolved_mode()`
+    /// reconciles them.
+    pub approval_mode: Option<ApprovalMode>,
     pub always_approve: bool,
     pub plan_mode: bool,
     pub sandbox_profile: Option<String>,
@@ -33,18 +42,26 @@ pub struct SpawnOptions {
     pub permission_allow: Vec<String>,
     pub permission_deny: Vec<String>,
     pub trust_repo: bool,
+    /// Give this thread its own git worktree when the project is a repo.
+    pub isolate_worktree: bool,
+    /// The real project folder (thread cwd may be a worktree derived from it).
+    pub project_root: Option<String>,
 }
 
 impl Default for SpawnOptions {
     fn default() -> Self {
         Self {
+            backend: Backend::Grok,
             model: None,
             worktree: None,
             mode: AgentMode::Acp,
             prompt: None,
             rules: Vec::new(),
+            approval_mode: None,
             always_approve: false,
-            plan_mode: true,
+            // No stance by default — every request is confirmed until the user
+            // picks plan/auto/yolo.
+            plan_mode: false,
             sandbox_profile: Some("workspace".into()),
             mcp_servers: Vec::new(),
             mcp_server_names: Vec::new(),
@@ -53,6 +70,8 @@ impl Default for SpawnOptions {
             permission_allow: Vec::new(),
             permission_deny: Vec::new(),
             trust_repo: false,
+            isolate_worktree: true,
+            project_root: None,
         }
     }
 }
@@ -63,9 +82,30 @@ impl SpawnOptions {
         {
             return Err("headless mode requires a non-empty prompt".into());
         }
+        if matches!(self.mode, AgentMode::Headless) && self.backend != Backend::Grok {
+            return Err(format!(
+                "headless mode is grok-only (got backend '{}')",
+                self.backend
+            ));
+        }
         if self.always_approve && self.plan_mode {
             // Explicit always_approve wins; plan_mode soft-disabled
         }
         Ok(())
+    }
+
+    /// The stance to run with: an explicit `approval_mode` wins; otherwise
+    /// derive it from the legacy booleans (old payloads / restored metadata).
+    pub fn resolved_mode(&self) -> ApprovalMode {
+        if let Some(m) = self.approval_mode {
+            return m;
+        }
+        if self.always_approve {
+            ApprovalMode::Yolo
+        } else if self.plan_mode {
+            ApprovalMode::Plan
+        } else {
+            ApprovalMode::Ask
+        }
     }
 }
