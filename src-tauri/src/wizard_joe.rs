@@ -21,13 +21,6 @@ const PYTHON: &str = "/Users/paulcooper/Documents/Codex/2026-10-06/tak/work/sens
 const MAX_LINE: usize = 16 * 1024 * 1024;
 const MAX_PROMPT: usize = 200_000;
 const MANIFEST_SHA: &str = "4d466d7d8e830f6a3330e619a497f99aa3b6fa6c7439432c610b1f3485498e83";
-// Paul explicitly deferred external interpretation on 6 October 2026.
-// Keep the local reference and guide, but reject this command before it can
-// start a process or send any passage/reference data to a provider.
-const PROVIDER_POLICY: &str = "Joe's reference is local. Live interpretation is deferred; no passage or reference data will be sent to a provider.";
-fn require_live_interpretation() -> Result<(), String> {
-    Err(PROVIDER_POLICY.into())
-}
 static BUSY: AtomicBool = AtomicBool::new(false);
 struct AnalysisGuard;
 impl Drop for AnalysisGuard {
@@ -118,8 +111,7 @@ fn unavailable_reason(backend: &str) -> Option<String> {
 #[tauri::command]
 pub async fn joe_status(state: State<'_, AppState>) -> Result<Value, String> {
     let (backend, model) = state.explainer.structured_provider().await;
-    // Local reference readiness is independent of the chosen remote narrator.
-    let mut reason = unavailable_reason("grok");
+    let mut reason = unavailable_reason(&backend);
     if reason.is_none() {
         let probe = Command::new(PYTHON)
             .args(["-c", "import numpy, scipy"])
@@ -133,7 +125,7 @@ pub async fn joe_status(state: State<'_, AppState>) -> Result<Value, String> {
         }
     }
     Ok(
-        json!({"available":false,"localReferenceReady":reason.is_none(),"providerCallsEnabled":false,"referenceRoot":REFERENCE,"manifestSha256":MANIFEST_SHA,"pythonPath":PYTHON,"nodePath":NODE,"provider":backend,"model":model,"manualOnly":true,"reason":reason.or_else(||Some(PROVIDER_POLICY.into()))}),
+        json!({"available":reason.is_none(),"referenceRoot":REFERENCE,"manifestSha256":MANIFEST_SHA,"pythonPath":PYTHON,"nodePath":NODE,"provider":backend,"model":model,"manualOnly":true,"reason":reason}),
     )
 }
 
@@ -288,7 +280,6 @@ pub async fn joe_analyze(
     language: String,
     thread_id: Option<String>,
 ) -> Result<Value, String> {
-    require_live_interpretation()?;
     validate_input(&sentence, &language, &thread_id)?;
     if let Some(id) = &thread_id {
         let id = Uuid::parse_str(id).map_err(|_| "Invalid thread identifier")?;
@@ -352,10 +343,6 @@ pub async fn joe_analyze(
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn deferred_interpretation_rejects_before_provider_work() {
-        assert_eq!(require_live_interpretation().unwrap_err(), PROVIDER_POLICY);
-    }
     #[test]
     fn exact_input_boundaries() {
         assert!(validate_input("", "eng", &None).is_err());
