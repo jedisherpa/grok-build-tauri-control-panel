@@ -47,4 +47,16 @@ q = P.applySignal(q, "reply", { replyChars: 20 });
 assert(P.stageClass("tools", q) !== "active", "no fake tools stage");
 assert(P.stageClass("reply", q) === "active", "reply active");
 
+// Output volume and tool counts cannot measure remaining task work.
+for (const chars of [1, 800, 1000000]) {
+  const active = P.emptyPresence(); active.phase = 'reply'; active.replyChars = chars; active.toolCount = 500;
+  const view = P.formatPresence(active);
+  assert(view.meterMode === 'indeterminate', 'reply activity is indeterminate');
+  assert(view.meterProgress === null, 'no fabricated percentage');
+  assert(view.completionLabel.includes('unknown'), 'unknown completion is explicit');
+}
+for (const phase of ['done','error','tools']) {
+  const active = P.emptyPresence(); active.phase = phase;
+  assert(P.formatPresence(active).meterProgress === null, 'terminal/tool state cannot prove task completion');
+}
 console.log("presence.test.mjs: all passed");

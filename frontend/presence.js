@@ -294,23 +294,7 @@
     if (p.phase === "error") return "error";
     if (p.phase === "idle") return "idle";
     if (stall) return "stall";
-    if (p.phase === "reply" && p.replyChars > 0) return "progress";
-    if (p.phase === "tools" && p.toolCount > 0) return "tools";
     return "indeterminate";
-  }
-
-  /** Soft progress 0–1 from reply chars (asymptotic). */
-  function meterProgress(p) {
-    if (p.phase === "done") return 1;
-    if (p.phase === "error") return 1;
-    if (p.replyChars > 0) {
-      // 1 - e^(-chars/800) roughly 0→0.7 over a short reply
-      return Math.min(0.92, 1 - Math.exp(-p.replyChars / 800));
-    }
-    if (p.toolCount > 0) {
-      return Math.min(0.85, 0.15 + p.toolCount * 0.12);
-    }
-    return 0;
   }
 
   /**
@@ -394,7 +378,8 @@
       stall,
       stalled: !!stall && stall !== "awaiting_user",
       meterMode: meterMode(p, stall),
-      meterProgress: meterProgress(p),
+      meterProgress: null,
+      completionLabel: show ? "Task completion unknown · activity only" : "",
       stagesSeen: { ...p.stagesSeen },
       transition: p.transition,
       tierDock: 2,

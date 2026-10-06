@@ -9,6 +9,7 @@ use grok_persistence::{Persistence, SessionRecord};
 use grok_workflows::coordination::{
     queue_state, ready_tasks, validate_graph, CoordinationTask, QueueState,
 };
+use grok_workflows::progress::WorkflowProgress;
 use grok_workflows::{
     normalize_write_path, Role, Workflow, WorkflowSpec, WorkflowStatus, MAX_OUTPUT_BYTES,
 };
@@ -51,8 +52,11 @@ struct BuildRecord {
 pub struct BuildDto {
     #[serde(flatten)]
     workflow: Workflow,
+    progress: WorkflowProgress,
     approval_digest: Option<String>,
     active_session_id: Option<String>,
+    active_session_role: Option<Role>,
+    active_session_round: Option<u8>,
     dependencies: Vec<String>,
     queue_state: QueueState,
     concurrency_limit: usize,
@@ -60,13 +64,17 @@ pub struct BuildDto {
 }
 impl From<Workflow> for BuildDto {
     fn from(workflow: Workflow) -> Self {
+        let progress = workflow.progress();
         let approval_digest = (workflow.status == WorkflowStatus::AwaitingPlanApproval)
             .then(|| workflow.plan_digest().ok())
             .flatten();
         Self {
             workflow,
+            progress,
             approval_digest,
             active_session_id: None,
+            active_session_role: None,
+            active_session_round: None,
             dependencies: Vec::new(),
             queue_state: QueueState::Queued,
             concurrency_limit: 2,
@@ -150,21 +158,34 @@ impl BuildService {
     pub async fn list(&self) -> Result<Vec<BuildDto>> {
         let limit = *self.concurrency.lock().await;
         let running = self.running.lock().await;
-        let records = self.records.lock().await.clone();
+        let record_guard = self.records.lock().await;
+        // A role transition must not replace the session between these two
+        // snapshots. Ownership and role evidence belong to the same record.
+        let records = record_guard.clone();
+        let active = self.sessions.lock().await.clone();
         let tasks = protected_coordination_tasks(&records, &running);
+        drop(record_guard);
         drop(running);
-        let active = self.sessions.lock().await;
         let mut ordered = records.into_values().collect::<Vec<_>>();
         ordered.sort_by_key(|r| r.order);
         ordered
             .into_iter()
             .map(|record| {
+                let active_session = active
+                    .get(&record.workflow.id)
+                    .filter(|session| {
+                        record.cleanup_pending && record.cleanup_session.as_ref() == Some(*session)
+                    });
+                let active_role = active_session.and_then(|_| record.workflow.role_to_run());
+                let active_round = active_role.map(|_| record.workflow.round);
                 let mut dto: BuildDto = record.workflow.into();
                 dto.queue_state = queue_state(&dto.workflow.id, &tasks, limit)?;
                 dto.dependencies = record.dependencies;
                 dto.concurrency_limit = limit;
                 dto.cleanup_pending = record.cleanup_pending;
-                dto.active_session_id = active.get(&dto.workflow.id).map(ToString::to_string);
+                dto.active_session_id = active_session.map(ToString::to_string);
+                dto.active_session_role = active_role;
+                dto.active_session_round = active_round;
                 Ok(dto)
             })
             .collect()
@@ -1522,6 +1543,112 @@ mod tests {
             db,
             bus,
         })
+    }
+
+    #[tokio::test]
+    async fn list_snapshot_cannot_pair_an_old_role_with_a_new_round_session() {
+        let (fixture, workflow) = fixture().await;
+        let old_session = Uuid::new_v4();
+        let new_session = Uuid::new_v4();
+        let mut record = coordination_record(&workflow, "snapshot", "src", 1);
+        record.workflow.status = WorkflowStatus::Verifying;
+        record.cleanup_pending = true;
+        record.cleanup_session = Some(old_session);
+        let service = service_without_timer(&fixture.0, vec![record]);
+        let mut sessions = service.sessions.lock().await;
+        sessions.insert("snapshot".into(), old_session);
+
+        // Poll to the deliberately blocked sessions lock. The record lock must
+        // remain held while this snapshot is waiting for its matching session.
+        let mut listing = Box::pin(service.list());
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(listing.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        assert!(service.records.try_lock().is_err());
+
+        let changing = service.clone();
+        let mut transition = Box::pin(async move {
+            {
+                let mut records = changing.records.lock().await;
+                let record = records.get_mut("snapshot").unwrap();
+                record.workflow.status = WorkflowStatus::Implementing;
+                record.workflow.round = 1;
+                record.cleanup_session = Some(new_session);
+            }
+            changing
+                .sessions
+                .lock()
+                .await
+                .insert("snapshot".into(), new_session);
+        });
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(transition.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        drop(sessions);
+
+        let old = listing.await.unwrap().remove(0);
+        assert_eq!(old.active_session_id, Some(old_session.to_string()));
+        assert_eq!(old.active_session_role, Some(Role::Verifier));
+        assert_eq!(old.active_session_round, Some(0));
+        transition.await;
+        let new = service.list().await.unwrap().remove(0);
+        assert_eq!(new.active_session_id, Some(new_session.to_string()));
+        assert_eq!(new.active_session_role, Some(Role::Implementer));
+        assert_eq!(new.active_session_round, Some(1));
+    }
+
+    #[tokio::test]
+    async fn active_links_require_matching_cleanup_ownership_and_live_role() {
+        let (fixture, workflow) = fixture().await;
+        let owner = Uuid::new_v4();
+        let mut record = coordination_record(&workflow, "snapshot", "src", 1);
+        record.workflow.status = WorkflowStatus::Implementing;
+        record.cleanup_pending = true;
+        record.cleanup_session = Some(owner);
+        let service = service_without_timer(&fixture.0, vec![record]);
+        service
+            .sessions
+            .lock()
+            .await
+            .insert("snapshot".into(), Uuid::new_v4());
+        let stale = service.list().await.unwrap().remove(0);
+        assert!(stale.active_session_id.is_none());
+        assert!(stale.active_session_role.is_none());
+        assert!(stale.active_session_round.is_none());
+
+        service
+            .sessions
+            .lock()
+            .await
+            .insert("snapshot".into(), owner);
+        service
+            .records
+            .lock()
+            .await
+            .get_mut("snapshot")
+            .unwrap()
+            .workflow
+            .status = WorkflowStatus::Cancelled;
+        let cleanup = service.list().await.unwrap().remove(0);
+        assert_eq!(cleanup.active_session_id, Some(owner.to_string()));
+        assert!(cleanup.active_session_role.is_none());
+        assert!(cleanup.active_session_round.is_none());
+
+        service
+            .records
+            .lock()
+            .await
+            .get_mut("snapshot")
+            .unwrap()
+            .cleanup_pending = false;
+        let stopped = service.list().await.unwrap().remove(0);
+        assert!(stopped.active_session_id.is_none());
+        assert!(stopped.active_session_role.is_none());
+        assert!(stopped.active_session_round.is_none());
     }
 
     #[tokio::test]
