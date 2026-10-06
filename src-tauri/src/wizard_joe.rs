@@ -61,7 +61,7 @@ const emit = x => process.stdout.write(JSON.stringify(x)+'\n');
  const interpretation=await interpretWithAgent(agent,{sentence:input.sentence,language:input.language,
  context:{task_anchor:'Clarify the selected coding request',host:{thread_id:input.threadId||null}},latticeScale:8,bridge});
  if(interpretation.execution){
-  interpretation.execution.host_generation_policy={system_prompt_delivery:'prefix-to-provider-prompt',generation_options:'CLI defaults; requested temperature and maxTokens are not applied',tool_free:true};
+  interpretation.execution.host_generation_policy={system_prompt_delivery:'prefix-to-provider-prompt; CLI verbatim',reasoning_effort:'low',provider_timeout_seconds:180,generation_options:'Requested temperature and maxTokens are not applied; remaining CLI defaults',tool_free:true};
   for(const call of interpretation.execution.calls||[]) call.delivered_prompt_sha256=digest(identity+'\n\n'+call.prompt);
  }
  emit({type:'result',interpretation,reference:{root:input.referenceRoot,manifestSha256:crypto.createHash('sha256').update(fs.readFileSync(manifest)).digest('hex')}});
@@ -296,7 +296,7 @@ pub async fn joe_analyze(
     let _guard = AnalysisGuard;
     let request_id = Uuid::new_v4();
     let run = tokio::time::timeout(
-        Duration::from_secs(300),
+        Duration::from_secs(780),
         run_reader(&state, &sentence, &language, &thread_id, &model),
     )
     .await;
