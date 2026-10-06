@@ -394,9 +394,14 @@ impl ExplainerService {
                 "Joe's configured provider changed; analyze again under the new setting".into(),
             );
         }
-        // Exact structured JSON goes through the existing tool-free Grok call;
-        // no narrator prompt, prose clipping, self-healing model change or tools.
-        self.run_narrator("grok", &model, prompt).await
+        // The structured reader needs a longer deadline than a short narrator
+        // card. Exact-prompt mode and low effort passed the actual source-backed
+        // outline/select check with this configured model; retain its identity.
+        let args = structured_reader_args(prompt, &model);
+        self.grok_cli
+            .run_args_timeout(&args, None, Duration::from_secs(180))
+            .await
+            .map_err(|error| error.to_string())
     }
 
     /// One-shot 2-4 word title for a thread's first prompt (smart naming).
@@ -490,6 +495,29 @@ impl ExplainerService {
             session_id: Some(sid),
             payload,
         });
+    }
+}
+
+fn structured_reader_args<'a>(prompt: &'a str, model: &'a str) -> Vec<&'a str> {
+    vec![
+        "-p", prompt, "-m", model, "--output-format", "plain", "--verbatim",
+        "--reasoning-effort", "low", "--max-turns", "1", "--disable-web-search",
+        "--no-subagents", "--no-memory", "--tools", "",
+    ]
+}
+
+#[cfg(test)]
+mod structured_reader_tests {
+    use super::*;
+    #[test]
+    fn reader_preserves_complete_prompt_and_pins_tool_free_model() {
+        let prompt = "Exact input 😀\nwith retained reference data";
+        let args = structured_reader_args(prompt, "configured-model");
+        assert_eq!(&args[..4], &["-p", prompt, "-m", "configured-model"]);
+        assert!(args.windows(2).any(|pair| pair == ["--tools", ""]));
+        assert!(args.windows(2).any(|pair| pair == ["--reasoning-effort", "low"]));
+        assert!(args.contains(&"--verbatim"));
+        assert!(!args.contains(&"--always-approve"));
     }
 }
 
