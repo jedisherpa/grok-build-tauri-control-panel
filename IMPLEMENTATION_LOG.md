@@ -331,3 +331,7 @@ Replace reply-volume pseudo-progress with explicit unknown completion for ordina
 Add a selectable prerequisite graph derived only from persisted dependency IDs, plus a declared role/gate sequence with exact recorded or host-owned active session links. Shared folders, activity and names infer no links. Accessible lists and bounded graph/edge pagination handle large records. Snapshot timestamps and last-known/error states make stale data visible.
 
 Architecture review and revision fixed active role/session snapshot locking, malformed checkpoint handling, renderer rollback/retry, large-graph bounds, and deferred selector refresh after focus. Full workspace: 153 passed, 0 failed, 2 existing dev-server fixtures ignored. Workspace check, strict all-target Clippy, all frontend tests/syntax and whitespace checks passed. Local bundle advances to 0.1.6; installed graph/checkpoint/session-link verification and preservation receipts follow.
+
+### Combined interpretation correction
+
+Paul clarified in the coordinated setup chat that live Joe interpretation should be enabled. Preserve that explicit manual path and the existing local reference with the tested exact, low-effort tool-free provider command; disclose the passage/reference send in the guide. Larger visualizer assets remain a subsequent update. Combined full workspace still passes 153 tests with 2 existing dev-server fixtures ignored; workspace check and strict all-target Clippy pass.
