@@ -6,6 +6,7 @@ license.workspace = true
 description = "Agent Client Protocol (ACP) client over JSON-RPC stdio for Grok Build"
 
 [dependencies]
+libc = "0.2"
 anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true

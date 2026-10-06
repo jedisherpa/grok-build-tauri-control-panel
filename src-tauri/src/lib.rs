@@ -1,5 +1,6 @@
 //! Tauri application library — state, commands, and event bridge.
 
+mod builds;
 mod commands;
 mod devserver;
 mod explainer;
@@ -76,6 +77,14 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             wizard_joe::joe_status,
             wizard_joe::joe_analyze,
+            builds::get_build_concurrency,
+            builds::set_build_concurrency,
+            builds::list_builds,
+            builds::create_build,
+            builds::approve_build_plan,
+            builds::accept_build,
+            builds::cancel_build,
+            builds::retry_build_cleanup,
             history::history_scan,
             history::history_stats,
             history::history_search,

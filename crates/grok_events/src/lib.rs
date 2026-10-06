@@ -59,6 +59,12 @@ pub enum ControlEvent {
         session_id: Uuid,
         at: DateTime<Utc>,
     },
+    /// Emitted only for a real session/prompt response; Idle alone is not completion.
+    PromptFinished {
+        session_id: Uuid,
+        stop_reason: String,
+        at: DateTime<Utc>,
+    },
     ToolCall {
         session_id: Uuid,
         event: ToolCallEvent,
@@ -69,6 +75,13 @@ pub enum ControlEvent {
     },
     AgentMessage {
         session_id: Uuid,
+        text: String,
+        at: DateTime<Utc>,
+    },
+    /// Native message boundaries, separate from the flattened UI transcript.
+    AgentOutput {
+        session_id: Uuid,
+        message_id: Option<String>,
         text: String,
         at: DateTime<Utc>,
     },
@@ -264,7 +277,9 @@ mod tests {
         bus.emit_session_created(id, "/tmp", "acp").await;
         let ev = rx.recv().await.unwrap();
         match ev {
-            ControlEvent::SessionCreated { session_id, cwd, .. } => {
+            ControlEvent::SessionCreated {
+                session_id, cwd, ..
+            } => {
                 assert_eq!(session_id, id);
                 assert_eq!(cwd, "/tmp");
             }

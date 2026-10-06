@@ -16,10 +16,16 @@ use crate::messages::{
     JsonRpcResponse,
 };
 
+/// Local fences share the notification FIFO but cannot be supplied by the agent.
+pub enum NotificationEvent {
+    Notification(JsonRpcNotification),
+    Fence(oneshot::Sender<()>),
+}
+
 pub struct NdjsonTransport {
     stdin: Mutex<ChildStdin>,
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<JsonRpcResponse>>>>,
-    notification_tx: tokio::sync::mpsc::UnboundedSender<JsonRpcNotification>,
+    notification_tx: tokio::sync::mpsc::UnboundedSender<NotificationEvent>,
     agent_request_tx: tokio::sync::mpsc::UnboundedSender<IncomingAgentRequest>,
 }
 
@@ -27,7 +33,7 @@ impl NdjsonTransport {
     pub fn new(
         stdin: ChildStdin,
         stdout: ChildStdout,
-        notification_tx: tokio::sync::mpsc::UnboundedSender<JsonRpcNotification>,
+        notification_tx: tokio::sync::mpsc::UnboundedSender<NotificationEvent>,
         agent_request_tx: tokio::sync::mpsc::UnboundedSender<IncomingAgentRequest>,
     ) -> Arc<Self> {
         let transport = Arc::new(Self {
@@ -87,7 +93,7 @@ impl NdjsonTransport {
                     }
                 }
                 Ok(JsonRpcMessage::Notification(n)) => {
-                    let _ = self.notification_tx.send(n);
+                    let _ = self.notification_tx.send(NotificationEvent::Notification(n));
                 }
                 Ok(JsonRpcMessage::Request(req)) => {
                     // Agent → client request (fs/*, session/request_permission, …).
@@ -114,7 +120,7 @@ impl NdjsonTransport {
                             continue;
                         }
                         if v.get("method").is_some() && v.get("id").is_none() {
-                            let _ = self.notification_tx.send(JsonRpcNotification {
+                            let _ = self.notification_tx.send(NotificationEvent::Notification(JsonRpcNotification {
                                 jsonrpc: "2.0".into(),
                                 method: v
                                     .get("method")
@@ -122,7 +128,7 @@ impl NdjsonTransport {
                                     .unwrap_or("")
                                     .to_string(),
                                 params: v.get("params").cloned(),
-                            });
+                            }));
                             continue;
                         }
                     }
@@ -130,6 +136,16 @@ impl NdjsonTransport {
                 }
             }
         }
+    }
+
+    /// After a response arrives, every earlier wire notification is already in
+    /// this FIFO. Completion must wait until its consumer has handled them all.
+    /// The caller applies a bounded timeout; a closed consumer fails explicitly.
+    pub async fn drain_notifications(&self) -> Result<()> {
+        let (tx, rx) = oneshot::channel();
+        self.notification_tx.send(NotificationEvent::Fence(tx))
+            .map_err(|_| AcpError::ChannelClosed)?;
+        rx.await.map_err(|_| AcpError::ChannelClosed)
     }
 
     pub async fn request(&self, method: &str, params: Option<Value>) -> Result<Value> {
@@ -249,5 +265,62 @@ impl NdjsonTransport {
         stdin.write_all(line.as_bytes()).await?;
         stdin.flush().await?;
         Ok(())
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use std::{process::Stdio, time::Duration};
+    use tokio::sync::oneshot::error::TryRecvError;
+
+    #[tokio::test]
+    async fn rpc_completion_fence_cannot_overtake_prior_wire_notifications() {
+        // The process returns the actual request ID and deliberately batches the
+        // two native messages and response before the consumer handles anything.
+        let mut child = tokio::process::Command::new("/usr/bin/awk")
+            .arg(r#"{ match($0, /"id":"[^"]*"/); id=substr($0,RSTART+6,RLENGTH-7); print "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"message\":\"early PASS\"}}"; print "{\"jsonrpc\":\"2.0\",\"method\":\"session/update\",\"params\":{\"message\":\"final FAIL\"}}"; print "{\"jsonrpc\":\"2.0\",\"id\":\"" id "\",\"result\":{\"stopReason\":\"end_turn\"}}"; fflush(); }"#)
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).kill_on_drop(true).spawn().unwrap();
+        let (notifications, mut updates) = tokio::sync::mpsc::unbounded_channel();
+        let (requests, _request_rx) = tokio::sync::mpsc::unbounded_channel();
+        let transport = NdjsonTransport::new(child.stdin.take().unwrap(), child.stdout.take().unwrap(), notifications, requests);
+        let response = transport.send_request("session/prompt", None).await.unwrap();
+        let response = tokio::time::timeout(Duration::from_secs(3), response).await.unwrap().unwrap();
+        assert_eq!(NdjsonTransport::unwrap_response(response).unwrap()["stopReason"], "end_turn");
+        let waiting_transport = transport.clone();
+        let (finished_tx, mut finished_rx) = oneshot::channel();
+        let completion = tokio::spawn(async move {
+            waiting_transport.drain_notifications().await.unwrap();
+            let _ = finished_tx.send(());
+        });
+        let mut messages = Vec::new();
+        for expected in ["early PASS", "final FAIL"] {
+            match tokio::time::timeout(Duration::from_secs(3), updates.recv()).await.unwrap().unwrap() {
+                NotificationEvent::Notification(notification) => {
+                    let message = notification.params.unwrap()["message"].as_str().unwrap().to_owned();
+                    assert_eq!(message, expected); messages.push(message);
+                }
+                NotificationEvent::Fence(_) => panic!("completion overtook native output"),
+            }
+            assert!(matches!(finished_rx.try_recv(), Err(TryRecvError::Empty)));
+        }
+        match tokio::time::timeout(Duration::from_secs(3), updates.recv()).await.unwrap().unwrap() {
+            NotificationEvent::Fence(ack) => { assert_eq!(messages, vec!["early PASS", "final FAIL"]); ack.send(()).unwrap(); }
+            NotificationEvent::Notification(_) => panic!("unexpected native output"),
+        }
+        tokio::time::timeout(Duration::from_secs(3), finished_rx).await.unwrap().unwrap();
+        completion.await.unwrap();
+        child.kill().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn closed_notification_consumer_cannot_acknowledge_completion() {
+        let mut child = tokio::process::Command::new("/bin/cat")
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).kill_on_drop(true).spawn().unwrap();
+        let (notifications, receiver) = tokio::sync::mpsc::unbounded_channel(); drop(receiver);
+        let (requests, _request_rx) = tokio::sync::mpsc::unbounded_channel();
+        let transport = NdjsonTransport::new(child.stdin.take().unwrap(), child.stdout.take().unwrap(), notifications, requests);
+        assert!(matches!(transport.drain_notifications().await, Err(AcpError::ChannelClosed)));
+        child.kill().await.unwrap();
     }
 }

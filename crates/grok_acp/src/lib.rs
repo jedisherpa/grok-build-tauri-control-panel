@@ -2,6 +2,7 @@
 //!
 //! Preferred path for interactive long-lived sessions (vs headless `-p`).
 
+mod process;
 mod client;
 mod error;
 mod messages;
@@ -18,4 +19,4 @@ pub use messages::{
     InitializeResult, JsonRpcError, JsonRpcMessage, JsonRpcNotification, JsonRpcRequest,
     JsonRpcResponse, PromptContent, SessionNewParams, SessionPromptParams,
 };
-pub use transport::NdjsonTransport;
+pub use transport::{NdjsonTransport, NotificationEvent};

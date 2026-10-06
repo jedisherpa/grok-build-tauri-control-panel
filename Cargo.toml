@@ -14,12 +14,13 @@ members = [
     "crates/grok_scheduler",
     "crates/grok_persistence",
     "crates/grok_diff",
+    "crates/grok_workflows",
     "src-tauri",
 ]
 default-members = ["src-tauri"]
 
 [workspace.package]
-version = "0.1.3"
+version = "0.1.4"
 edition = "2021"
 license = "MIT"
 authors = ["xAI / Grok Build Contributors"]

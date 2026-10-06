@@ -15,7 +15,7 @@ use grok_extensions::ExtensionsService;
 use grok_mcp::McpManager;
 use grok_memory::MemoryService;
 use grok_persistence::Persistence;
-use grok_scheduler::{JobHandler, Scheduler, ScheduledJob};
+use grok_scheduler::{JobHandler, ScheduledJob, Scheduler};
 use grok_worktree::WorktreeManager;
 
 use crate::devserver::DevServerManager;
@@ -23,6 +23,7 @@ use crate::explainer::ExplainerService;
 use crate::haven::HavenClient;
 
 pub struct AppState {
+    pub builds: Arc<crate::builds::BuildService>,
     pub paths: GrokPaths,
     pub config: Arc<RwLock<GrokConfig>>,
     pub event_bus: Arc<EventBus>,
@@ -118,6 +119,13 @@ impl AppState {
         let persistence =
             Arc::new(Persistence::open(persistence_path).context("persistence open")?);
 
+        let builds = crate::builds::BuildService::open(
+            registry.clone(),
+            worktrees.clone(),
+            persistence.clone(),
+            event_bus.clone(),
+        )?;
+
         let scheduler = Scheduler::new(event_bus.clone());
         let registry_for_jobs = registry.clone();
         let persistence_for_jobs = persistence.clone();
@@ -149,18 +157,14 @@ impl AppState {
 
                     match registry.spawn_agent(&cwd, opts).await {
                         Ok(id) => {
-                            let _ = persistence.set_kv(
-                                &format!("last_job_{}", job.id),
-                                &id.to_string(),
-                            );
+                            let _ = persistence
+                                .set_kv(&format!("last_job_{}", job.id), &id.to_string());
                         }
                         Err(e) => {
                             // Offline / no binary: record intent only
                             warn!(error = %e, "scheduler could not spawn agent");
-                            let _ = persistence.set_kv(
-                                &format!("last_job_error_{}", job.id),
-                                &e.to_string(),
-                            );
+                            let _ = persistence
+                                .set_kv(&format!("last_job_error_{}", job.id), &e.to_string());
                         }
                     }
                 }
@@ -225,6 +229,7 @@ impl AppState {
         }
 
         Ok(Self {
+            builds,
             paths,
             config,
             event_bus,

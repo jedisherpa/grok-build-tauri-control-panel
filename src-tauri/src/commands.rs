@@ -729,6 +729,9 @@ pub async fn send_prompt(
     always_approve: Option<bool>,
 ) -> Result<(), String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
+    if state.builds.is_managed(id).await {
+        return Err("Reviewed-build sessions use their Builds controls and individual native tool approvals.".into());
+    }
 
     let want_backend = backend.as_deref().and_then(grok_config::Backend::from_key);
     let want_model = model.filter(|m| {
@@ -1167,6 +1170,9 @@ pub async fn set_plan_mode(
     enabled: bool,
 ) -> Result<(), String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
+    if state.builds.is_managed(id).await {
+        return Err("Reviewed-build sessions use their Builds controls and individual native tool approvals.".into());
+    }
     state
         .registry
         .set_plan_mode(id, enabled)
@@ -1234,6 +1240,9 @@ pub async fn set_approval_mode(
     mode: String,
 ) -> Result<(), String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
+    if state.builds.is_managed(id).await {
+        return Err("Reviewed-build sessions use their Builds controls and individual native tool approvals.".into());
+    }
     let mode = match mode.to_lowercase().as_str() {
         "plan" => grok_control_core::ApprovalMode::Plan,
         "auto" => grok_control_core::ApprovalMode::Auto,
@@ -1259,6 +1268,9 @@ pub async fn add_session_allow_rule(
     pattern: String,
 ) -> Result<(), String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
+    if state.builds.is_managed(id).await {
+        return Err("Reviewed-build sessions use their Builds controls and individual native tool approvals.".into());
+    }
     let pattern = pattern.trim().to_string();
     if pattern.is_empty() {
         return Err("empty rule".into());
@@ -1284,6 +1296,9 @@ pub async fn set_always_approve(
     enabled: bool,
 ) -> Result<(), String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
+    if state.builds.is_managed(id).await {
+        return Err("Reviewed-build sessions use their Builds controls and individual native tool approvals.".into());
+    }
     state
         .registry
         .set_always_approve(id, enabled)

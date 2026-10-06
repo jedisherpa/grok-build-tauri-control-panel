@@ -20,6 +20,7 @@ use crate::options::{AgentMode, SpawnOptions};
 
 pub struct SessionRegistry {
     sessions: Arc<DashMap<Uuid, AgentHandle>>,
+    starting: Arc<DashMap<Uuid, ()>>,
     event_bus: Arc<EventBus>,
     config: Arc<tokio::sync::RwLock<GrokConfig>>,
     grok_cli: Arc<GrokCli>,
@@ -36,10 +37,14 @@ struct PendingConnect {
 /// Run the ACP handshake and fill in (or fail) the placeholder session entry.
 async fn connect_and_fill(
     sessions: Arc<DashMap<Uuid, AgentHandle>>,
+    starting: Arc<DashMap<Uuid, ()>>,
     event_bus: Arc<EventBus>,
     id: Uuid,
     pending: PendingConnect,
 ) -> Result<()> {
+    struct Connecting { starting: Arc<DashMap<Uuid, ()>>, id: Uuid }
+    impl Drop for Connecting { fn drop(&mut self) { self.starting.remove(&self.id); } }
+    let _connecting = Connecting { starting, id };
     match AcpClient::connect_with(
         pending.client_cfg,
         &pending.acp_opts,
@@ -85,6 +90,7 @@ impl SessionRegistry {
     ) -> Arc<Self> {
         let registry = Arc::new(Self {
             sessions: Arc::new(DashMap::new()),
+            starting: Arc::new(DashMap::new()),
             event_bus: event_bus.clone(),
             config,
             grok_cli,
@@ -373,17 +379,20 @@ impl SessionRegistry {
                         acp_opts,
                         connect_opts,
                     };
+                    self.starting.insert(id, ());
                     if background {
+                        let starting = self.starting.clone();
                         let sessions = self.sessions.clone();
                         let bus = self.event_bus.clone();
                         tokio::spawn(async move {
-                            let _ = connect_and_fill(sessions, bus, id, pending).await;
+                            let _ = connect_and_fill(sessions, starting, bus, id, pending).await;
                         });
                     } else {
                         // Blocking (resume): propagate failure and drop the
                         // placeholder so callers see a clean error.
                         if let Err(e) = connect_and_fill(
                             self.sessions.clone(),
+                            self.starting.clone(),
                             self.event_bus.clone(),
                             id,
                             pending,
@@ -471,6 +480,16 @@ impl SessionRegistry {
     }
 
     pub async fn send_prompt(&self, id: Uuid, prompt: &str) -> Result<()> {
+        self.send_prompt_inner(id, prompt, false).await
+    }
+
+    /// Auditor/verifier prompts use their role instructions while native Plan
+    /// mode and permission gates remain unchanged.
+    pub async fn send_review_prompt(&self, id: Uuid, prompt: &str) -> Result<()> {
+        self.send_prompt_inner(id, prompt, true).await
+    }
+
+    async fn send_prompt_inner(&self, id: Uuid, prompt: &str, review: bool) -> Result<()> {
         let client = {
             let mut entry = self
                 .sessions
@@ -488,7 +507,7 @@ impl SessionRegistry {
             entry.acp_client.clone().ok_or(CoreError::NotAcp)?
         };
         self.event_bus.emit_status(id, SessionStatus::Running).await;
-        client.send_prompt(prompt).await?;
+        if review { client.send_review_prompt(prompt).await?; } else { client.send_prompt(prompt).await?; }
         Ok(())
     }
 
@@ -632,14 +651,17 @@ impl SessionRegistry {
     }
 
     pub async fn remove_session(&self, id: Uuid) -> Result<()> {
+        // A cancelled Starting placeholder can still own a detached handshake.
+        // Retain it until handshake cleanup is observable, or return a retryable error.
+        tokio::time::timeout(std::time::Duration::from_secs(120), async {
+            while self.starting.contains_key(&id) { tokio::time::sleep(std::time::Duration::from_millis(25)).await; }
+        }).await.map_err(|_| CoreError::Internal("native startup still pending; retry cleanup".into()))?;
         let _ = self.cancel_session(id).await;
         // cancel() only sends session/cancel — the grok child (and any MCP
         // servers it spawned) keeps running unless we kill it.
-        if let Some((_, handle)) = self.sessions.remove(&id) {
-            if let Some(client) = handle.acp_client {
-                let _ = client.shutdown().await;
-            }
-        }
+        let client = self.sessions.get(&id).and_then(|handle| handle.acp_client.clone());
+        if let Some(client) = client { client.shutdown().await?; }
+        self.sessions.remove(&id);
         Ok(())
     }
 
@@ -691,6 +713,21 @@ mod tests {
         );
         reg.remove_session(id).await.unwrap();
         assert_eq!(reg.session_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn removal_waits_for_detached_startup_ownership() {
+        let reg = test_registry();
+        let id = reg.spawn_mock("/tmp").await.unwrap();
+        reg.starting.insert(id, ());
+        let removing = reg.clone();
+        let task = tokio::spawn(async move { removing.remove_session(id).await });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(reg.is_live(id));
+        assert!(!task.is_finished());
+        reg.starting.remove(&id);
+        task.await.unwrap().unwrap();
+        assert!(!reg.is_live(id));
     }
 
     #[tokio::test]
