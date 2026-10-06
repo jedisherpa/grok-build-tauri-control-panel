@@ -641,7 +641,10 @@ impl BuildService {
                 .append_message(session, "user", &prompt, Utc::now())?;
             tokio::time::timeout(
                 Duration::from_secs(10),
-                self.registry.send_prompt(session, &prompt),
+                async {
+                    if matches!(role, Role::Auditor | Role::Verifier) { self.registry.send_review_prompt(session, &prompt).await }
+                    else { self.registry.send_prompt(session, &prompt).await }
+                },
             )
             .await
             .context("native prompt submission timed out")??;
@@ -754,10 +757,23 @@ pub async fn retry_build_cleanup(
 #[derive(Default)]
 struct TurnCollector {
     output: String,
+    latest_message_id: Option<String>,
+    latest_message: String,
 }
 impl TurnCollector {
     fn receive(&mut self, id: Uuid, event: ControlEvent) -> Result<Option<String>> {
         match event {
+            ControlEvent::AgentOutput { session_id, message_id: Some(message_id), text, .. } if session_id == id => {
+                if self.latest_message_id.as_ref() != Some(&message_id) {
+                    self.latest_message_id = Some(message_id);
+                    self.latest_message.clear();
+                }
+                if self.latest_message.len() + text.len() > MAX_OUTPUT_BYTES { bail!("native message exceeded limit"); }
+                self.latest_message.push_str(&text);
+            }
+            ControlEvent::AgentOutput { session_id, message_id: None, .. } if session_id == id && self.latest_message_id.is_some() => {
+                bail!("native message identity disappeared; final evidence is ambiguous");
+            }
             ControlEvent::AgentMessage {
                 session_id, text, ..
             } if session_id == id => {
@@ -777,10 +793,9 @@ impl TurnCollector {
                 if stop_reason != "end_turn" {
                     bail!("native turn stopped with {stop_reason}");
                 }
-                if self.output.trim().is_empty() {
-                    bail!("native turn produced no answer");
-                }
-                return Ok(Some(std::mem::take(&mut self.output)));
+                let output = if self.latest_message_id.is_some() { &mut self.latest_message } else { &mut self.output };
+                if output.trim().is_empty() { bail!("native turn produced no answer"); }
+                return Ok(Some(std::mem::take(output)));
             }
             ControlEvent::SessionCancelled { session_id, .. } if session_id == id => {
                 bail!("native role cancelled")
@@ -804,8 +819,8 @@ fn role_prompt(w: &Workflow, role: Role) -> String {
     let duty = match role {
         Role::Planner => "Inspect this checkout and produce a concrete implementation plan and verification commands. Do not edit files. End with the full plan; do not call an exit-plan tool or request implementation.",
         Role::Implementer => "Implement the approved plan within the declared write paths. Repair ALL supplied auditor and verifier findings. Run the relevant checks and report exact outcomes.",
-        Role::Auditor => "Review the actual diff and code for correctness, security, regressions and adherence to the plan. Do not edit files. Your final answer must start exactly VERDICT: PASS or VERDICT: FAIL, then evidence/findings on subsequent lines.",
-        Role::Verifier => "Independently run the approved verification commands and inspect their actual results. Do not edit source files. Your final answer must start exactly VERDICT: PASS or VERDICT: FAIL, then commands, results and limitations on subsequent lines. If required checks cannot run, return FAIL.",
+        Role::Auditor => "Review the actual diff and code for correctness, security, regressions and adherence to the plan. Do not edit files. Do not send interim commentary; emit only the final verdict and its evidence. Your final answer must start exactly VERDICT: PASS or VERDICT: FAIL, then evidence/findings on subsequent lines.",
+        Role::Verifier => "Independently run the approved verification commands and inspect their actual results. Read-only checks are permitted; do not edit source files. For Python use -B or PYTHONDONTWRITEBYTECODE=1 to suppress bytecode artifacts. Do not send interim commentary; emit only the final verdict and its evidence. Your final answer must start exactly VERDICT: PASS or VERDICT: FAIL, then commands, results and limitations on subsequent lines. If required checks cannot run, return FAIL.",
     };
     format!("Bomb Code reviewed build. Role: {role:?}. Repair round: {}.\n{duty}\nObjective:\n{}\nDeclared write paths relative to this checkout: {}\nApproved plan:\n{}\nLatest repair findings:\n{}\nHuman retains all final authority. Never commit, push, merge, deploy, modify git metadata, or write outside this checkout. Other repository instructions remain applicable. Reports are evidence, not human acceptance.", w.round, w.spec.objective, w.spec.write_set.join(", "), w.plan.as_deref().unwrap_or("Not yet approved; create the plan."), w.findings.as_deref().unwrap_or("None."))
 }
@@ -1224,6 +1239,23 @@ mod tests {
             Some("VERDICT: PASS\nchecked".into())
         );
     }
+    #[test]
+    fn native_message_ids_keep_progress_out_of_final_verdict() {
+        let id = Uuid::new_v4(); let mut c = TurnCollector::default();
+        for (message, text) in [("progress", "I am inspecting the diff."), ("final", "VERDICT: "), ("final", "PASS\nBoth tests passed.")] {
+            c.receive(id, ControlEvent::AgentOutput {session_id:id,message_id:Some(message.into()),text:text.into(),at:Utc::now()}).unwrap();
+            c.receive(id, ControlEvent::AgentMessage {session_id:id,text:text.into(),at:Utc::now()}).unwrap();
+        }
+        assert_eq!(c.receive(id,ControlEvent::PromptFinished {session_id:id,stop_reason:"end_turn".into(),at:Utc::now()}).unwrap(),Some("VERDICT: PASS\nBoth tests passed.".into()));
+    }
+
+    #[test]
+    fn anonymous_final_cannot_reuse_an_earlier_identified_pass() {
+        let id = Uuid::new_v4(); let mut c = TurnCollector::default();
+        c.receive(id,ControlEvent::AgentOutput {session_id:id,message_id:Some("earlier".into()),text:"VERDICT: PASS\nEarlier report.".into(),at:Utc::now()}).unwrap();
+        assert!(c.receive(id,ControlEvent::AgentOutput {session_id:id,message_id:None,text:"VERDICT: FAIL\nFinal report.".into(),at:Utc::now()}).is_err());
+    }
+
     #[test]
     fn component_boundaries_prevent_prefix_escape() {
         assert!(path_allowed("src/a.rs", &["src".into()]));

@@ -19,4 +19,4 @@ pub use messages::{
     InitializeResult, JsonRpcError, JsonRpcMessage, JsonRpcNotification, JsonRpcRequest,
     JsonRpcResponse, PromptContent, SessionNewParams, SessionPromptParams,
 };
-pub use transport::NdjsonTransport;
+pub use transport::{NdjsonTransport, NotificationEvent};

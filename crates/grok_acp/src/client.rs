@@ -26,7 +26,7 @@ use crate::messages::{
     SessionPromptParams,
 };
 use crate::terminals::TerminalRegistry;
-use crate::transport::NdjsonTransport;
+use crate::transport::{NdjsonTransport, NotificationEvent};
 
 /// How permission requests are answered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -207,7 +207,7 @@ pub struct AcpClient {
     auth_methods: RwLock<Vec<String>>,
     event_bus: Option<Arc<EventBus>>,
     control_session_id: Uuid,
-    notification_rx: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<JsonRpcNotification>>>,
+    notification_rx: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<NotificationEvent>>>,
     agent_request_rx: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<IncomingAgentRequest>>>,
     /// When true, auto-allow tool permission requests (yolo). Atomic so the
     /// UI toggle can flip it mid-session.
@@ -978,6 +978,15 @@ impl AcpClient {
     }
 
     pub async fn send_prompt(&self, prompt: &str) -> Result<()> {
+        self.send_prompt_inner(prompt, true).await
+    }
+
+    /// Review roles retain native restrictive modes without planner-only prose.
+    pub async fn send_review_prompt(&self, prompt: &str) -> Result<()> {
+        self.send_prompt_inner(prompt, false).await
+    }
+
+    async fn send_prompt_inner(&self, prompt: &str, planning_instructions: bool) -> Result<()> {
         let sid = self
             .session_id
             .read()
@@ -1034,7 +1043,7 @@ impl AcpClient {
         // Emulated plan mode: prepend planning instructions to the message —
         // the agent's restrictive mode blocks writes, this sets the
         // investigate → clarify → propose-a-plan behavior.
-        if self.plan_emulation.load(std::sync::atomic::Ordering::Relaxed) {
+        if planning_instructions && self.plan_emulation.load(std::sync::atomic::Ordering::Relaxed) {
             text = format!("{PLAN_EMULATION_PREAMBLE}\n\n{text}");
         }
 
@@ -1096,6 +1105,18 @@ impl AcpClient {
             match tokio::time::timeout(prompt_timeout, rx).await {
                 Ok(Ok(resp)) => match NdjsonTransport::unwrap_response(resp) {
                     Ok(result) => {
+                        // RPC responses and native notifications use separate
+                        // consumers. Drain the ordered notification FIFO before
+                        // declaring the final answer complete.
+                        let drained = tokio::time::timeout(Duration::from_secs(10), transport.drain_notifications()).await;
+                        if !matches!(drained, Ok(Ok(()))) {
+                            warn!("prompt completed but notification drain failed");
+                            if let Some(bus) = &bus {
+                                bus.emit_error(Some(control_id), "acp error: final output drain failed");
+                                bus.emit_status(control_id, SessionStatus::Failed).await;
+                            }
+                            return;
+                        }
                         info!("session/prompt completed");
                         let stop = result
                             .get("stopReason")
@@ -1393,8 +1414,11 @@ impl AcpClient {
             .take()
             .ok_or(AcpError::SessionNotReady)?;
 
-        while let Some(notif) = rx.recv().await {
-            self.handle_notification(notif).await;
+        while let Some(event) = rx.recv().await {
+            match event {
+                NotificationEvent::Notification(notif) => self.handle_notification(notif).await,
+                NotificationEvent::Fence(ack) => { let _ = ack.send(()); }
+            }
         }
         Err(AcpError::ProcessExited)
     }
@@ -2189,6 +2213,12 @@ impl AcpClient {
                     if !text.is_empty() {
                         bus.emit(ControlEvent::AgentMessage {
                             session_id: sid,
+                            text: text.clone(),
+                            at: Utc::now(),
+                        });
+                        bus.emit(ControlEvent::AgentOutput {
+                            session_id: sid,
+                            message_id: update.get("messageId").or_else(|| update.get("message_id")).and_then(|v| v.as_str()).map(str::to_owned),
                             text,
                             at: Utc::now(),
                         });

@@ -480,6 +480,16 @@ impl SessionRegistry {
     }
 
     pub async fn send_prompt(&self, id: Uuid, prompt: &str) -> Result<()> {
+        self.send_prompt_inner(id, prompt, false).await
+    }
+
+    /// Auditor/verifier prompts use their role instructions while native Plan
+    /// mode and permission gates remain unchanged.
+    pub async fn send_review_prompt(&self, id: Uuid, prompt: &str) -> Result<()> {
+        self.send_prompt_inner(id, prompt, true).await
+    }
+
+    async fn send_prompt_inner(&self, id: Uuid, prompt: &str, review: bool) -> Result<()> {
         let client = {
             let mut entry = self
                 .sessions
@@ -497,7 +507,7 @@ impl SessionRegistry {
             entry.acp_client.clone().ok_or(CoreError::NotAcp)?
         };
         self.event_bus.emit_status(id, SessionStatus::Running).await;
-        client.send_prompt(prompt).await?;
+        if review { client.send_review_prompt(prompt).await?; } else { client.send_prompt(prompt).await?; }
         Ok(())
     }
 

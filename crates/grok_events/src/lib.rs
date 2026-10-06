@@ -78,6 +78,13 @@ pub enum ControlEvent {
         text: String,
         at: DateTime<Utc>,
     },
+    /// Native message boundaries, separate from the flattened UI transcript.
+    AgentOutput {
+        session_id: Uuid,
+        message_id: Option<String>,
+        text: String,
+        at: DateTime<Utc>,
+    },
     ApprovalRequired {
         session_id: Uuid,
         request_id: String,
