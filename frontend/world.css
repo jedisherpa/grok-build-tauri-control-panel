@@ -159,3 +159,12 @@ select {
 .history-search select { padding-right: 26px; }
 .settings-field textarea { background: var(--bg); color: var(--text); border: 1px solid var(--border-hi); border-radius: 3px; padding: 8px; font: 12px/1.5 var(--font); resize: vertical; }
 .toggle { font-family: var(--ui); font-size: 12px; }
+/* More specific legacy control backgrounds must not remove the select cue. */
+select { background-image: url("assets/chevron.svg") !important; }
+@media (max-height: 720px) {
+  .col-right { overflow-y: auto; }
+  .col-right .technical-panel { flex: 1 1 auto; min-height: 90px; }
+  .col-right .right-block { padding: 4px 10px 6px; }
+  .col-right .section-label { padding-block: 6px; }
+  .dev-dock { padding: 10px; }
+}

@@ -283,3 +283,9 @@ cargo clippy --workspace --all-targets -- -D warnings → PASS
 - Native System review caught an unstyled allow-rule textarea and platform-gradient selects. Normalize both to the same navy form material while retaining native select behavior and keyboard access.
 - Correct the narrator tooltip to name its main explanation panel; keep keyboard focus visible even where legacy focus rules cleared outlines.
 - Installed first-pass Session/History/System checks passed, all three sign-ins remained available, and the motion-pause control toggled successfully. Final bundle rebuild and restart verifies persistence and the refined controls.
+
+### Compact native window check
+
+- Tested the native app at 960 × 670: composer and approval modes remained usable, but the taller inspector stack clipped the Folder control. Reduce inspector spacing/minimum tool height in short windows and allow inspector scrolling as a fallback.
+- Preserve the custom dropdown arrow across more specific legacy background rules.
+- Re-run required workspace check/strict Clippy, rebuild, and inspect both compact and normal installed windows. No agent prompt is sent by visual verification.
