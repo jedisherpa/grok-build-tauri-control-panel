@@ -7,8 +7,12 @@
     <link rel="stylesheet" href="styles.css" />
     <link rel="stylesheet" href="bombs.css" />
     <link rel="stylesheet" href="world.css" />
+    <link rel="stylesheet" href="spatial-world.css" />
+    <link rel="stylesheet" href="spatial-shell.css" />
+    <link rel="stylesheet" href="spatial-faces.css" />
   </head>
   <body>
+    <div id="spatial-background" aria-hidden="true"></div>
     <div id="app">
       <!-- LEFT: threads + menus -->
       <aside class="col col-left">
@@ -21,7 +25,8 @@
         </header>
 
         <nav class="nav-block">
-          <button class="nav-item active" data-view="chat" title="Session">
+          <button class="nav-item active" data-view="spatial" title="World"><span class="nav-icon">◇</span> World</button>
+          <button class="nav-item" data-view="chat" title="Session">
             <span class="nav-icon">⌘</span> Session
           </button>
           <button class="nav-item" data-view="history" title="History"><span class="nav-icon">◷</span> History</button>
@@ -118,6 +123,7 @@
         </header>
 
         <!-- views -->
+        <section id="view-spatial" class="view active" aria-label="Spatial workspace"></section>
         <section id="view-builds" class="view">
           <header class="builds-header">
             <div class="builds-heading"><div><h1>Builds</h1><p>Plan, implement, audit and verify in separate native sessions. You approve the plan and accept the result.</p></div><button id="builds-refresh" class="btn ghost" type="button">Refresh</button></div>
@@ -152,7 +158,7 @@ tests/feature" spellcheck="false" required></textarea><span class="builds-help">
           <div class="history-workspace"><div class="history-list-panel"><div id="history-list" class="history-list"></div><div class="history-pagination"><button id="history-prev" class="btn ghost">Previous</button><span id="history-count"></span><button id="history-next" class="btn ghost">Next</button></div></div>
           <article class="history-reader"><div id="history-reader-head"><p>Select a conversation to read it.</p><p class="muted">Imported conversations are reference material. They carry no execution permissions or approval.</p></div><div id="history-messages"></div><button id="history-more" class="btn ghost" hidden>Load more messages</button></article></div>
         </section>
-        <section id="view-chat" class="view active">
+        <section id="view-chat" class="view">
         <div class="narrative-panel">
           <div class="section-label explain-header">
             <span class="explain-heading">What's happening</span><span class="narrator-label">AI activity explanation</span>
@@ -577,10 +583,15 @@ tests/feature" spellcheck="false" required></textarea><span class="builds-help">
     </div>
     <script src="world.js"></script>
     <script src="presence.js"></script>
+    <script src="thread-drafts.js"></script>
     <script src="app.js"></script>
     <script src="history.js"></script>
     <script src="wizard-joe.js"></script>
     <script src="collaboration.js"></script>
     <script src="builds.js"></script>
+    <script src="spatial-world.js"></script>
+    <script src="spatial-host.js"></script>
+    <script src="spatial-faces.js"></script>
+    <script src="spatial-shell.js"></script>
   </body>
 </html>

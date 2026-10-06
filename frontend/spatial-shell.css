@@ -1,0 +1,40 @@
+/* One stable source lattice across every native view. */
+#spatial-background { position: fixed; inset: 0; z-index: 0; pointer-events: none; }
+#app { position: relative; z-index: 1; background: transparent; }
+.col-left, .col-right { background: #101d3078; }
+.col-center { background: transparent; }
+.col-header { background: #101d3078; }
+.view, .pane-pad, .history-header, .builds-header { background-color: transparent; }
+.history-reader, .history-list-panel, .builds-detail, .builds-list { background-color: #101d30b8; }
+#view-spatial { padding: 0; overflow: hidden; flex: 1; min-height: 0; }
+#view-spatial > .spatial-world { min-height: 0; }
+html[data-view="spatial"] { --left: 190px; --right: 240px; }
+html[data-view="spatial"] .center-header { min-height: 53px; padding-block: 8px; }
+.spatial-workspace { padding: 0; overflow: hidden; }
+.spatial-workspace #view-chat { display: flex; flex-direction: column; overflow: auto; }
+.spatial-workspace .narrative-panel { flex: 0 0 51%; max-height: 56%; min-height: 120px; padding: 18px 22px 12px; background: #101d30a8; }
+.spatial-workspace .explain-heading { font: 400 clamp(24px, 2.4vw, 34px)/1.15 var(--display); letter-spacing: -.02em; }
+.spatial-workspace .narrator-label { display: none; }
+.spatial-workspace .explain-header { flex-wrap: wrap; }
+.spatial-workspace .explain-header-actions { margin-left: auto; }
+.spatial-workspace .explain-feed:has(> .empty-hint:only-child) { background: none; }
+.spatial-workspace .explain-text { font-size: 16px; }
+.spatial-workspace .conversation-label { padding: 9px 22px 0; }
+.spatial-workspace .transcript { padding: 10px 22px; }
+.spatial-workspace .composer { background: #101d30e8; padding: 10px 14px; }
+.spatial-workspace .welcome-hero { display: none; }
+.spatial-workspace .welcome p { font-size: 13px; }
+.spatial-workspace .composer-meta { flex-wrap: wrap; gap: 6px; }
+.spatial-workspace .wizard-joe { margin-top: 10px; }
+.spatial-workspace .narrative-panel:has(.wizard-joe[open]) { flex-basis: 65%; max-height: 68%; }
+.spatial-workspace .narrative-panel:has(.wizard-joe[open]) .explain-header { padding-bottom: 6px; }
+.spatial-workspace .narrative-panel:has(.wizard-joe[open]) .explain-feed { display: none; }
+@media(max-width:1100px) {
+ html[data-view="spatial"] { --left: 180px; }
+ .spatial-workspace .narrative-panel { padding: 14px 16px; }
+ .spatial-workspace .composer-agent { flex-wrap: wrap; }
+ .spatial-workspace .transcript { padding-inline: 16px; }
+}
+@media(max-width:760px) { .spatial-workspace .narrative-panel { min-height: 95px; } }
+
+.spatial-world[data-view="focus"] .spatial-empty { display: none; }

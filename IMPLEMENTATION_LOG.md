@@ -335,3 +335,12 @@ Architecture review and revision fixed active role/session snapshot locking, mal
 ### Combined interpretation correction
 
 Paul clarified in the coordinated setup chat that live Joe interpretation should be enabled. Preserve that explicit manual path and the existing local reference with the tested exact, low-effort tool-free provider command; disclose the passage/reference send in the guide. Larger visualizer assets remain a subsequent update. Combined full workspace still passes 153 tests with 2 existing dev-server fixtures ignored; workspace check and strict all-target Clippy pass.
+
+
+## Spatial working faces and embedded Joe — 6 October 2026
+
+Combined release 0.1.7 preserves the reviewed-build/collaboration implementation from 1c850c4. The canonical 240-root E8 source projection is a persistent full-window background at 0.5 layer opacity. Sparse original geometric connections use 0.48px lines; working surfaces mask the background without moving source coordinates. Independent presentation tethers form a centered working face with hinged top/side faces. Root locations are navigation addresses, never inferred meaning, permission or collaboration.
+
+World reuses the original native chat DOM. Additional faces render exact cached narrative and transcript context using text nodes; Focus promotes their geometry and switches the one original coding composer. Threads retain separate in-memory unsent drafts. Faces can move, resize and arrange through bounded pointer/keyboard controls. Motion pauses for typing, hidden views and reduced-motion preferences. Original Joeville Phaser atlas frames are packaged unchanged with provenance. Manual Joe interpretation uses the explicitly authorized tool-free configured provider path; native check retained three proposed readings, added only an unsent question, and invalidated the review when the passage changed.
+
+Completion now requires typed PromptFinished end_turn/mock evidence. Idle/timeouts retain open tools and approvals with completion unconfirmed; session cleanup after a completed response remains distinct from failure and human task acceptance. Source checks: full Rust workspace 153 passed, 0 failed, 2 preexisting dev-server fixture tests ignored; workspace check/strict all-target Clippy and focused frontend checks passed. Exact source/binary identity, installed UI verification and preservation receipts are recorded in the accompanying local release report.

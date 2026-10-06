@@ -1,0 +1,187 @@
+{
+  "schema": "bomb-code/wizard-joe-asset-provenance/v1",
+  "copiedAt": "2026-10-06",
+  "ownerRequestedReuse": true,
+  "sourceRepository": "/Users/paulcooper/joeville",
+  "sourceCommit": "4e55e2de3301100a08ecedaec494da2f554d5369",
+  "sourceAssetWorkingTree": "clean for copied files at inspection",
+  "atlasMeta": {
+    "image": "wizard-joe-hd.webp",
+    "size": {
+      "w": 3864,
+      "h": 1728
+    },
+    "scale": "1",
+    "note": "Official masters rebuild (user upload 2026-07-27): sheet-wizard-joe + w2..w8"
+  },
+  "frameCount": 48,
+  "frameDimensions": {
+    "width": 483,
+    "height": 288,
+    "rotated": false,
+    "trimmed": false
+  },
+  "files": [
+    {
+      "file": "wizard-joe-hd.webp",
+      "sourcePath": "/Users/paulcooper/joeville/client/public/atlas/wizard-joe-hd.webp",
+      "bytes": 935278,
+      "sha256": "66acbdf69231597a9971a46caa4990317684826636bd356b06b6a7746346bf82"
+    },
+    {
+      "file": "wizard-joe-hd.json",
+      "sourcePath": "/Users/paulcooper/joeville/client/public/atlas/wizard-joe-hd.json",
+      "bytes": 9602,
+      "sha256": "8eec43da58ffbe62cdeb70eeb6a2a5fa1ca61ce38955d13b422993d7d77c2664"
+    }
+  ],
+  "animations": {
+    "idle": {
+      "frames": [
+        "idle-neutral",
+        "idle-inhale",
+        "idle-neutral",
+        "idle-shift"
+      ],
+      "fps": 4,
+      "repeat": -1
+    },
+    "walk": {
+      "frames": [
+        "walk-1",
+        "walk-2",
+        "walk-3",
+        "walk-4",
+        "walk-5",
+        "walk-6"
+      ],
+      "fps": 10,
+      "repeat": -1
+    },
+    "run": {
+      "frames": [
+        "run-1",
+        "run-2",
+        "run-3"
+      ],
+      "fps": 14,
+      "repeat": -1
+    },
+    "front-idle": {
+      "frames": [
+        "front-idle"
+      ],
+      "fps": 4,
+      "repeat": -1
+    },
+    "front-walk": {
+      "frames": [
+        "front-walk-1",
+        "front-walk-2",
+        "front-walk-3",
+        "front-walk-4"
+      ],
+      "fps": 10,
+      "repeat": -1
+    },
+    "back-idle": {
+      "frames": [
+        "back-idle"
+      ],
+      "fps": 4,
+      "repeat": -1
+    },
+    "back-walk": {
+      "frames": [
+        "back-walk-1",
+        "back-walk-2",
+        "back-walk-3",
+        "back-walk-4"
+      ],
+      "fps": 10,
+      "repeat": -1
+    },
+    "fly": {
+      "frames": [
+        "fly-1",
+        "fly-2",
+        "fly-3",
+        "fly-4",
+        "fly-5",
+        "fly-6"
+      ],
+      "fps": 10,
+      "repeat": -1
+    },
+    "hover": {
+      "frames": [
+        "hover",
+        "glide"
+      ],
+      "fps": 4,
+      "repeat": -1
+    },
+    "takeoff": {
+      "frames": [
+        "flight-anticipation",
+        "wing-spread",
+        "takeoff-down",
+        "takeoff-recovery"
+      ],
+      "fps": 10,
+      "repeat": 0
+    },
+    "land": {
+      "frames": [
+        "land-approach",
+        "land-touch",
+        "land-compress",
+        "land-settle"
+      ],
+      "fps": 10,
+      "repeat": 0
+    }
+  },
+  "animationSource": "client/src/game/roster.ts:43-74",
+  "filterSource": "client/src/game/scenes/Boot.ts:70-80 (LINEAR for HD Joe)",
+  "recommended": {
+    "idle": "idle",
+    "moving": "walk",
+    "briefTravel": "run",
+    "paused": "idle-neutral",
+    "layer": "behind geometric edges and work surfaces; no hit area or text interception"
+  },
+  "visualNotes": [
+    "Existing directional frame keys preserved; labels do not prove a complete physically consistent 3D turntable.",
+    "Do not horizontally flip Joe by default: mirroring swaps the canonical staff side.",
+    "Motion is scenery and has no semantic, approval or progress meaning."
+  ],
+  "licensing": {
+    "sourcePackageLicense": "MIT (package.json)",
+    "assetProvenance": "Atlas meta: Official masters rebuild (user upload 2026-07-27): sheet-wizard-joe + w2..w8",
+    "standaloneAssetLicense": "No separate asset license found in inspected local files; owner requested reuse of existing Joe assets."
+  },
+  "optionalIntro": {
+    "imageSource": "/Users/paulcooper/joeville/client/public/intro/wizard-joe-intro.webp",
+    "jsonSource": "/Users/paulcooper/joeville/client/public/intro/wizard-joe-intro.json",
+    "imageSha256": "775780131c6ff0b05a9628ecc12a2d95067485ab8666b9512251484ab2adc5f4",
+    "jsonSha256": "2409b5107540e7376d5cefddecdb041f9f214340a6dd73cc5bf175a541f1250a",
+    "frames": 45,
+    "cell": 832,
+    "sheet": [
+      4160,
+      7488
+    ],
+    "notCopied": "Not required for running/walking surface; available locally for future explicit use.",
+    "playback": {
+      "fly": 10,
+      "land": 8,
+      "gesture": 4
+    },
+    "registration": {
+      "footFrac": 0.946,
+      "contentFrac": 0.892
+    },
+    "provenance": "Production gestures/idle/landing reference approved base250; optional forward-flight ZIP remains QA-passed candidate with canonical promotion pending."
+  }
+}

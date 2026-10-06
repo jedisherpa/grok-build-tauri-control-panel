@@ -50,6 +50,10 @@
       preview: "",
       thoughtPreview: "",
       note: "",
+      completedAt: null,
+      stopReason: null,
+      sessionClosed: false,
+      completionUnconfirmed: false,
       stagesSeen: { send: false, think: false, tools: false, reply: false },
       transition: null,
       _lastMood: "idle",
@@ -110,6 +114,12 @@
    */
   function applySignal(p, phase, patch, now) {
     now = now || Date.now();
+    if (phase === "run") phase = "think";
+    const activitySignal = ["send", "think", "tools", "reply"].includes(phase);
+    if (activitySignal || phase === "error") {
+      p.completedAt = null; p.stopReason = null; p.sessionClosed = false; p.completionUnconfirmed = false;
+      if (activitySignal && ["done", "error"].includes(p.phase)) p.phase = "idle";
+    }
     if (!p.startedAt && phase !== "idle" && phase !== "done") {
       p.startedAt = now;
     }
@@ -174,7 +184,9 @@
     if (p.phase === "reply" || phase === "reply" || p.replyChars > 0) p.stagesSeen.reply = true;
 
     if (phase === "idle") {
-      return emptyPresence();
+      // The animation may settle to Idle; keep its exact response receipt so
+      // later native session cleanup can be distinguished from interruption.
+      return { ...emptyPresence(), completedAt: p.completedAt, stopReason: p.stopReason, sessionClosed: p.sessionClosed, note: p.sessionClosed ? p.note : "" };
     }
 
     if (phaseChanged) {
@@ -182,6 +194,38 @@
     }
 
     return p;
+  }
+
+  function normallyFinished(p) {
+    return !!p.completedAt && ["end_turn", "mock"].includes(p.stopReason) && p.phase !== "error";
+  }
+
+  function finishPrompt(p, stopReason, now = Date.now()) {
+    const normal = ["end_turn", "mock"].includes(stopReason);
+    if (normal) {
+      const pendingPermission = p.phase === "wait";
+      p = applySignal(p, pendingPermission ? "wait" : "done", { toolsActive: 0, note: pendingPermission ? "Turn ended · permission still pending" : "Turn ended" }, now);
+      p.completedAt = now; p.stopReason = stopReason; p.sessionClosed = false; p.completionUnconfirmed = false;
+      return p;
+    }
+    const next = /cancel|error|fail/.test(String(stopReason)) ? "error" : p.phase === "wait" ? "wait" : "think";
+    p = applySignal(p, next, { note: `Response stopped · ${stopReason || "stop reason unavailable"}` }, now);
+    p.completionUnconfirmed = true;
+    return p;
+  }
+
+  function idleStatus(p, now = Date.now()) {
+    if (normallyFinished(p) || !turnActive(p) || p.phase === "wait") return p;
+    p.completionUnconfirmed = true;
+    p.note = "Session idle · response completion unconfirmed";
+    p.lastSignalAt = now;
+    return p;
+  }
+
+  function closeCompletedSession(p, now = Date.now()) {
+    if (!normallyFinished(p) || turnActive(p)) return false;
+    p.sessionClosed = true; p.note = "Turn ended · session closed"; p.lastSignalAt = now;
+    return true;
   }
 
   function markToolStart(p, toolName, now) {
@@ -307,7 +351,7 @@
     const stall = deriveStall(p, now);
     const active = turnActive(p);
     const show =
-      active || p.phase === "done" || p.phase === "error";
+      active || p.phase === "done" || p.phase === "error" || p.sessionClosed;
     const elapsed = p.startedAt ? formatElapsed(now - p.startedAt) : "";
     const quietMs = p.lastSignalAt ? now - p.lastSignalAt : 0;
     const mood = resolveMood(p, now);
@@ -320,6 +364,9 @@
 
     let title;
     if (stall === "awaiting_user") title = "Needs you";
+    else if (p.phase === "error") title = "Failed";
+    else if (p.sessionClosed) title = "Turn ended · session closed";
+    else if (p.completionUnconfirmed) title = "Completion unconfirmed";
     else if (stall === "tool_hang") title = "Quiet · tool";
     else if (stall === "no_first_signal") title = "Quiet";
     else if (stall === "stream_gap") title = "Quiet";
@@ -327,7 +374,7 @@
     else if (p.phase === "reply") title = "Writing";
     else if (p.phase === "think") title = "Thinking";
     else if (p.phase === "send") title = "Sent";
-    else if (p.phase === "done") title = "Done";
+    else if (p.phase === "done") title = "Turn ended";
     else if (p.phase === "error") title = "Failed";
     else if (p.phase === "wait") title = "Needs you";
     else title = "Idle";
@@ -350,6 +397,8 @@
     if (p.phase === "wait") bits.push(p.note || "approval required");
     if (p.phase === "error") bits.push(p.note || "see timeline");
     if (p.phase === "done") bits.push(p.note || "ready for next message");
+    if (p.sessionClosed && p.phase !== "done") bits.push(p.note);
+    if (p.completionUnconfirmed && p.phase !== "error") bits.push(p.note);
     if (stall && stall !== "awaiting_user") {
       bits.push(`no new signal for ${formatElapsed(quietMs)}`);
       if (stall === "tool_hang" && p.lastTool) {
@@ -406,6 +455,10 @@
     turnActive,
     deriveStall,
     applySignal,
+    normallyFinished,
+    finishPrompt,
+    idleStatus,
+    closeCompletedSession,
     markToolStart,
     markToolDone,
     pickFlavor,

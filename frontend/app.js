@@ -17,6 +17,7 @@ if (!P || typeof P.emptyPresence !== "function") {
   });
 }
 
+const threadDrafts = window.BombThreadDrafts.createStore();
 const state = {
   selectedSession: null,
   sessions: [],
@@ -543,6 +544,7 @@ function toastError(e) {
 
 // ── Navigation ──────────────────────────────────────────────────────────
 function activateView(name) {
+  document.documentElement.dataset.view = name;
   document.querySelectorAll(".nav-item").forEach((b) =>
     b.classList.toggle("active", b.dataset.view === name)
   );
@@ -559,6 +561,7 @@ function activateView(name) {
     refreshRuntimeCard();
     loadSettingsCard();
   }
+  document.dispatchEvent(new CustomEvent("bomb-code:view-selected", { detail: { view: name } }));
 }
 
 document.querySelectorAll(".nav-item").forEach((btn) => {
@@ -1481,6 +1484,10 @@ function renderTools() {
 
 async function selectSession(id) {
   const prev = state.selectedSession;
+  if (prev !== (id || null) && $("prompt")) {
+    $("prompt").value = threadDrafts.switchThread(prev, id || null, $("prompt").value);
+    $("prompt").dispatchEvent(new Event("input", { bubbles: true }));
+  }
   // Persist current presence under previous id before switching
   if (prev && state.turn && P) {
     state.presenceBySession.set(prev, state.turn);
@@ -1494,8 +1501,8 @@ async function selectSession(id) {
     state.turn = state.presenceBySession.get(id) || (P ? P.emptyPresence() : { phase: "idle" });
     state.presenceBySession.set(id, state.turn);
   }
-  // Clicking a thread always lands you in the chat view, wherever you were.
-  if (id) activateView("chat");
+  // Preserve the spatial working face when selecting a native thread.
+  if (id) activateView($("view-spatial")?.classList.contains("active") ? "spatial" : "chat");
   const sess = state.sessions.find((s) => s.id === id);
   // Selecting a thread activates its PROJECT (not its worktree path — using
   // the raw cwd made + nest new threads inside another thread's worktree).
@@ -1680,6 +1687,10 @@ function handleControlEvent(ev) {
     if (!sid) return;
     const open = openToolsFor(sid);
     let p = presenceFor(sid);
+    if (P.normallyFinished(p)) {
+      // A concrete tool event is activity even when its start was missed.
+      p = P.applySignal(p, "tools", { lastTool: tool, lastToolStatus: status, toolsActive: open.size });
+    }
     if (terminal) {
       if (open.has(toolId)) {
         open.delete(toolId);
@@ -1723,6 +1734,32 @@ function handleControlEvent(ev) {
     appendTranscript(sid, "term", `session ready · ${shortId(sid)}`);
     pushEvent(`session · ${shortId(sid)} ready`, "ok", "boom", { force: true, milestone: true });
     refreshSessions();
+  } else if (type === "prompt_finished" || type === "promptFinished") {
+    if (!sid) return;
+    endAgentStream(sid);
+    clearBoomTimer(sid);
+    const reason = ev.stop_reason || ev.stopReason || "missing_stop_reason";
+    const now = Date.now();
+    let p = P.finishPrompt(presenceFor(sid), reason, now);
+    appendTranscript(sid, "term", `prompt response ended · ${reason}`);
+    if (P.normallyFinished(p)) {
+      openToolsFor(sid).clear();
+      pushEvent(`turn ended · ${shortId(sid)}`, "ok", p.phase === "done" ? "boom" : "wait", { force: true, milestone: true });
+      if (p.phase === "done") {
+        talkNote(sid, "boom");
+        const receiptAt = p.completedAt;
+        state.boomTimers.set(sid, setTimeout(() => {
+          state.boomTimers.delete(sid);
+          const current = presenceFor(sid);
+          if (current.phase === "done" && current.completedAt === receiptAt) {
+            commitPresence(sid, P.applySignal(current, "idle", {}, Date.now()));
+          }
+        }, P.BOOM_HOLD_MS));
+      }
+    } else {
+      pushEvent(`response stopped · ${reason} · ${shortId(sid)}`, "err", null, { force: true });
+    }
+    commitPresence(sid, p);
   } else if (type === "session_status_changed" || type === "sessionStatusChanged") {
     const st = String(ev.status || "").toLowerCase();
     appendTranscript(sid, "term", `status → ${ev.status}`);
@@ -1736,29 +1773,36 @@ function handleControlEvent(ev) {
         endTurnPresence(sid, "error", String(ev.status));
       } else if (st.includes("cancel")) {
         endAgentStream(sid);
-        sweepToolsForSession(sid, "cancelled");
-        endTurnPresence(sid, "error", "Cancelled");
+        const p = presenceFor(sid);
+        if (P.closeCompletedSession(p)) commitPresence(sid, p);
+        else {
+          sweepToolsForSession(sid, "cancelled");
+          endTurnPresence(sid, "error", "Cancelled");
+        }
       } else if (st.includes("idle") || st.includes("complete")) {
         endAgentStream(sid);
+        // Idle can also be a timeout. Keep tools and permission state until
+        // a typed response boundary or explicit cancellation arrives.
+        commitPresence(sid, P.idleStatus(presenceFor(sid)));
+      } else if (st.includes("run")) {
         const p = presenceFor(sid);
-        if (P.turnActive(p) || p.replyChars || p.toolCount) {
-          talkNote(sid, "boom");
-          flashBoomThenIdle(undefined, sid);
-        } else {
-          talkNote(sid, "idle");
-          noteTurn("idle", {}, sid);
-        }
-      } else if (st.includes("run") && !P.turnActive(presenceFor(sid))) {
-        noteTurn("think", { note: "Session running" }, sid);
+        noteTurn(P.turnActive(p) && p.phase !== "wait" ? p.phase : "think", { note: "Session running" }, sid);
       }
     }
     refreshSessions();
   } else if (type === "session_cancelled" || type === "sessionCancelled") {
     endAgentStream(sid);
-    sweepToolsForSession(sid, "cancelled");
-    appendTranscript(sid, "term", "session cancelled");
-    pushEvent(`cancelled · ${shortId(sid)}`, "err", "error", { force: true, milestone: true });
-    if (sid) endTurnPresence(sid, "error", "Cancelled");
+    const p = sid ? presenceFor(sid) : null;
+    if (p && P.closeCompletedSession(p)) {
+      appendTranscript(sid, "term", "session closed after its completed turn");
+      pushEvent(`session closed · ${shortId(sid)} · turn already ended`, "", null, { force: true });
+      commitPresence(sid, p);
+    } else {
+      sweepToolsForSession(sid, "cancelled");
+      appendTranscript(sid, "term", "session cancelled");
+      pushEvent(`cancelled · ${shortId(sid)}`, "err", "error", { force: true, milestone: true });
+      if (sid) endTurnPresence(sid, "error", "Cancelled");
+    }
     refreshSessions();
   } else if (type === "error") {
     // Session-less errors are host-level — status feed only. Attributing them
@@ -1839,7 +1883,10 @@ function handleControlEvent(ev) {
       const n = Number(payload.totalTokens) || 0;
       if (sid && n > 0) {
         const p = presenceFor(sid);
-        if (P.turnActive(p) || p.phase === "idle") {
+        if (P.normallyFinished(p)) {
+          // Usage may arrive after the response. It is not a new turn.
+          p.contextTokens = n; commitPresence(sid, p);
+        } else if (P.turnActive(p) || p.phase === "idle") {
           noteTurn(p.phase === "idle" ? "think" : p.phase, { contextTokens: n }, sid);
         }
       }
@@ -1853,7 +1900,9 @@ function handleControlEvent(ev) {
         return;
       }
       appendTranscript(sid, "term", String(payload.line), nowIso(), { stream: true });
-      if (P.turnActive(presenceFor(sid))) {
+      if (/session\/prompt still open after/i.test(String(payload.line))) {
+        commitPresence(sid, P.idleStatus(presenceFor(sid)));
+      } else if (P.turnActive(presenceFor(sid)) && !presenceFor(sid).completionUnconfirmed && !P.normallyFinished(presenceFor(sid))) {
         noteTurn(
           presenceFor(sid).phase === "idle" ? "think" : presenceFor(sid).phase,
           { note: String(payload.line).slice(0, 80) },
@@ -4713,10 +4762,8 @@ setInterval(() => {
   if (turnActive() || state.turn.phase === "done") updateBombChrome();
   if (turnActive()) startPhraseCycle();
   else stopPhraseCycle();
-  // Watchdog: presence must never disagree with the thread for long. If the
-  // dock says a turn is running but the session has been idle/failed with no
-  // new signal for 20s, the turn desynced (missed event, rejected send) —
-  // reset instead of showing "Quiet" forever.
+  // Registry Idle cannot prove a response ended (it can follow a timeout).
+  // Preserve in-flight tool/permission state and expose the missing boundary.
   if (turnActive() && state.selectedSession) {
     const sess = state.sessions.find((s) => s.id === state.selectedSession);
     const st = String(sess?.status || "").toLowerCase();
@@ -4724,8 +4771,13 @@ setInterval(() => {
       st.includes("idle") || st.includes("complete") || st.includes("fail") || st.includes("cancel");
     const lastSignal = state.turn.lastSignalAt || state.turn.startedAt || 0;
     if (settled && lastSignal && Date.now() - lastSignal > 20_000) {
-      noteTurn("idle", {}, state.selectedSession);
-      pushEvent("turn indicator desynced from thread status — reset", "", null, { force: true });
+      if (st.includes("fail") || st.includes("cancel")) {
+        sweepToolsForSession(state.selectedSession, st.includes("cancel") ? "cancelled" : "failed");
+        endTurnPresence(state.selectedSession, "error", st.includes("cancel") ? "Cancelled" : "Failed");
+      } else if (!state.turn.completionUnconfirmed) {
+        commitPresence(state.selectedSession, P.idleStatus(state.turn));
+        pushEvent("session idle — response completion unconfirmed", "", null, { force: true });
+      }
     }
   }
 }, 1000);
