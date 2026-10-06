@@ -37,7 +37,7 @@ test("stale input, language and thread scope cannot match a current review", () 
   assert.equal(guide.sameInput(result, result.sentence, "eng", null), true);
 });
 
-function mount(result) {
+function mount(result, options = {}) {
   let currentResult = result;
   const created = [], calls = [];
   class Element {
@@ -53,11 +53,11 @@ function mount(result) {
   ids.get("joe-language").value = "eng";
   const scope = { selectedSession: "thread-1" };
   const document = { handlers: {}, getElementById: id => ids.get(id), createElement: tag => new Element(tag), addEventListener(type, handler) { this.handlers[type] = handler; }, dispatchEvent(event) { this.handlers[event.type]?.(event); } };
-  const invoke = async (command, args) => { calls.push({ command, args }); if (command === "joe_analyze" || command === "joe_cdiss_example") return currentResult; if (command === "joe_status") return { available: true, provider: "grok", model: "fixture" }; throw new Error(`Unexpected native command: ${command}`); };
+  const invoke = async (command, args) => { calls.push({ command, args }); if (command === "joe_analyze" || command === "joe_cdiss_example") return options.reply || currentResult; if (command === "joe_status") return { available: true, provider: "grok", model: "fixture" }; throw new Error(`Unexpected native command: ${command}`); };
   class TestEvent { constructor(type, options = {}) { this.type = type; Object.assign(this, options); } }
   const context = vm.createContext({ document, invoke, state: scope, CustomEvent: TestEvent, Event: TestEvent });
   vm.runInContext(fs.readFileSync(new URL("./wizard-joe.js", import.meta.url), "utf8"), context);
-  return { ids, created, calls, scope, document, setResult(value) { currentResult = value; } };
+  return { ids, created, calls, scope, document, context, setResult(value) { currentResult = value; } };
 }
 
 function withContinuity(result) {
@@ -199,4 +199,33 @@ test("adapter failure stage and validation reason remain inspectable without dum
   assert.match(visible, /Validation error: Unknown source sense id/);
   assert.doesNotMatch(visible, /FULL PRIVATE PROVIDER PROMPT|FULL PROVIDER RESPONSE/);
   assert.match(ui.ids.get("joe-result-status").textContent, /unavailable/);
+});
+
+
+test("same-thread context change rejects a late result before rendering or geometry publication", async () => {
+  const result = response(); let finish; const reply = new Promise(resolve => { finish = resolve; });
+  const ui = mount(result, { reply }); let current = true;
+  ui.context.WizardJoeGuide.setContextValidator(() => current);
+  ui.context.WizardJoeGuide.setPassage(result.sentence, "Prepared locally");
+  assert.equal(ui.calls.length, 0);
+  const running = ui.ids.get("joe-form").handlers.submit({ preventDefault() {} });
+  current = false; finish(result); await running;
+  assert.equal(ui.ids.get("joe-result").children.length, 0);
+  assert.match(ui.ids.get("joe-result-status").textContent, /context changed/);
+  assert.notEqual(ui.ids.get("wizard-joe").lastEvent?.detail?.result, result);
+});
+
+test("context changes reject both immediate stale drafts and an analysis started before the observer tick", async () => {
+  const result=response(), ui=mount(result); let current=true;
+  ui.context.WizardJoeGuide.setContextValidator(() => current);
+  ui.context.WizardJoeGuide.setPassage(result.sentence);
+  await ui.ids.get("joe-form").handlers.submit({preventDefault(){}});
+  current=false;
+  const draft=ui.created.find(el=>el.textContent==="Add question to unsent message");
+  assert.ok(draft); draft.handlers.click();
+  assert.equal(ui.ids.get("prompt").value,"");
+  const before=ui.calls.filter(c=>c.command==="joe_analyze").length;
+  await ui.ids.get("joe-form").handlers.submit({preventDefault(){}});
+  assert.equal(ui.calls.filter(c=>c.command==="joe_analyze").length,before);
+  assert.match(ui.ids.get("joe-result-status").textContent,/context changed/);
 });

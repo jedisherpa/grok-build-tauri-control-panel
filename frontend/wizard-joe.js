@@ -48,6 +48,7 @@
     if (compare) { compare.disabled = busy || !prior; if (!prior) compare.checked = false; }
     if (compareLabel) compareLabel.textContent = prior ? `Compare with previous review ${prior.slice(0, 8)} in this thread` : "Compare with a previous review in this thread when available";
   }
+  let contextValid = () => true;
   function node(tag, content, cls) {
     const el = document.createElement(tag);
     if (content != null) el.textContent = String(content);
@@ -106,6 +107,15 @@
     status.textContent = "Copied the unsent message. Nothing has been sent.";
     passage.focus();
   });
+  globalThis.WizardJoeGuide = Object.freeze({
+    setContextValidator(validate) { contextValid = typeof validate === "function" ? validate : () => true; },
+    setPassage(value, message) { invalidate(); passage.value = value; status.textContent = message || "Passage prepared locally."; },
+    invalidateContext(reason) {
+      generation++; lastResult = null; showingExample = false; output.replaceChildren();
+      status.textContent = reason;
+      guide.dispatchEvent(new CustomEvent("bomb-code:joe-interpretation", { bubbles: true, detail: { schema: "bomb-code/joe-visual-state/v1", status: "invalidated", reason: "context-changed", result: null } }));
+    }
+  });
   function renderAtom(parent, record) {
     const atom = record.atom || {};
     const chosen = list(record.selected_source_bindings);
@@ -158,6 +168,7 @@
       button.addEventListener("click", () => {
         if (lastResult !== result || !sameInput(result, passage.value, language.value.trim(), result.threadId)) return;
         if ((typeof state !== "undefined" ? state.selectedSession || null : null) !== (result.threadId || null)) { status.textContent = "This review belongs to another thread. Select that thread or analyze again before drafting."; return; }
+        if (!contextValid(result.sentence, result.threadId || null)) { status.textContent = "Thread context changed. Prepare a current review before drafting this question."; return; }
         const composer = byId("prompt");
         composer.value = appendDraft(composer.value, question.question);
         composer.dispatchEvent(new Event("input", { bubbles: true }));
@@ -251,6 +262,7 @@
     if (!sentence.trim()) { status.textContent = "Enter an exact passage to analyze."; passage.focus(); return; }
     if (!/^[a-z]{3}$/.test(lang)) { status.textContent = "Enter a three-letter lowercase language code supported by the source snapshot, such as eng."; language.focus(); return; }
     const threadId = typeof state !== "undefined" ? state.selectedSession || null : null;
+    if (!contextValid(sentence, threadId)) { status.textContent = "Thread context changed. Prepare a current review before analyzing."; return; }
     const compareRequestId = compare?.checked ? previousReviews.get(threadId) || null : null;
     invalidate();
     const current = ++generation;
@@ -261,7 +273,7 @@
     status.textContent = "Preparing source candidates and a model-proposed reading. No coding tools are running for this review.";
     try {
       const result = await invoke("joe_analyze", { sentence, language: lang, threadId, compareRequestId });
-      if (current !== generation || !sameInput(result, passage.value, language.value.trim(), typeof state !== "undefined" ? state.selectedSession || null : null)) { status.textContent = "Input or selected thread changed while the review was running. Analyze again for a current reading."; return; }
+      if (current !== generation || !contextValid(sentence, threadId) || !sameInput(result, passage.value, language.value.trim(), typeof state !== "undefined" ? state.selectedSession || null : null)) { status.textContent = "Input or thread context changed while the review was running. Prepare or analyze again for a current reading."; return; }
       render(result); lastResult = result;
       if (threadId && continuityView(result.cdiss).available && typeof result.requestId === "string") {
         previousReviews.delete(threadId); previousReviews.set(threadId, result.requestId);
