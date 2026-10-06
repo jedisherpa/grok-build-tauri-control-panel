@@ -112,7 +112,7 @@
       const listenFace = (type, callback) => listen(handle, type, callback, face.cleanup || cleanup);
       listenFace("pointerdown", event => {
         if (event.button !== 0) return;
-        event.preventDefault(); face.element.style.zIndex = String(++z);
+        event.preventDefault(); handle.focus({ preventScroll: true }); face.element.style.zIndex = String(++z);
         drag = { id: event.pointerId, x: event.clientX, y: event.clientY, rect: { ...face.rect } };
         handle.setPointerCapture(event.pointerId);
       });
@@ -214,7 +214,7 @@
     listen(open, "click", () => openFace(picker.value));
     listen(arrange, "click", arrangeFaces);
     let moving = null;
-    listen(movePrimary, "pointerdown", event => { if (event.button !== 0) return; event.preventDefault(); moving = { id: event.pointerId, x: event.clientX, y: event.clientY, rect: primaryRect() }; movePrimary.setPointerCapture(event.pointerId); });
+    listen(movePrimary, "pointerdown", event => { if (event.button !== 0) return; event.preventDefault(); movePrimary.focus({ preventScroll: true }); moving = { id: event.pointerId, x: event.clientX, y: event.clientY, rect: primaryRect() }; movePrimary.setPointerCapture(event.pointerId); });
     listen(movePrimary, "pointermove", event => { if (moving?.id !== event.pointerId) return; scene.setWorkspaceRect?.(boundedRect({ ...moving.rect, x: moving.rect.x + event.clientX - moving.x, y: moving.rect.y + event.clientY - moving.y }, bounds())); mask(); });
     ["pointerup", "pointercancel", "lostpointercapture"].forEach(type => listen(movePrimary, type, () => { moving = null; }));
     listen(movePrimary, "keydown", event => { if (!/^Arrow(Left|Right|Up|Down)$/.test(event.key) || event.metaKey || event.ctrlKey || event.altKey) return; event.preventDefault(); const step = event.shiftKey ? 32 : 12, rect = primaryRect(); scene.setWorkspaceRect?.(boundedRect({ ...rect, x: rect.x + (event.key === "ArrowRight" ? step : event.key === "ArrowLeft" ? -step : 0), y: rect.y + (event.key === "ArrowDown" ? step : event.key === "ArrowUp" ? -step : 0) }, bounds())); mask(); });

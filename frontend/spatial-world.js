@@ -224,7 +224,7 @@
       approvals.dataset.pending = String(n !== null && n > 0);
       overviewButton.setAttribute("aria-pressed", String(view === "overview")); focusButton.setAttribute("aria-pressed", String(view === "focus")); focusButton.disabled = !selectedId && !contentElement && !options.allowEmptyFocus;
       [rotateLeft, rotateRight, homeButton, planeSelect].forEach(b => { b.disabled = view === "focus" || !!options.backgroundScene && !options.backgroundScene.setProjection; });
-      pauseButton.textContent = reduced.matches ? "Reduced motion" : globalPause() ? "Motion paused in settings" : userPaused ? "Resume motion" : "Pause motion";
+      pauseButton.textContent = reduced.matches ? "Reduced motion" : globalPause() ? "Motion paused" : userPaused ? "Resume motion" : "Pause motion";
       pauseButton.disabled = reduced.matches || globalPause(); pauseButton.setAttribute("aria-pressed", String(userPaused || reduced.matches || globalPause()));
       root.dataset.view = view; root.dataset.motion = motionStopped() ? "paused" : "running";
       if (view === "focus" && !options.backgroundOnly) exclusionElements.set(primaryExclusionOwner,[workspace]); else exclusionElements.delete(primaryExclusionOwner);
@@ -500,7 +500,7 @@
     listen(canvas, "pointermove", e => { if (drag !== e.pointerId) return; turn((e.clientX - lastPointerX) * 0.004, (e.clientY - lastPointerY) * 0.003); lastPointerX = e.clientX; lastPointerY = e.clientY; });
     function endDrag(e) { if (drag !== e.pointerId) return; drag = null; canvas.classList.remove("is-turning"); }
     listen(canvas, "pointerup", endDrag); listen(canvas, "pointercancel", endDrag); listen(canvas, "lostpointercapture", endDrag);
-    listen(resizeHandle,"pointerdown",e => {if (e.button !== 0) return; resizeDrag={id:e.pointerId,x:e.clientX,y:e.clientY,rect:getWorkspaceRect()}; resizeHandle.setPointerCapture(e.pointerId);e.preventDefault();});
+    listen(resizeHandle,"pointerdown",e => {if (e.button !== 0) return; resizeDrag={id:e.pointerId,x:e.clientX,y:e.clientY,rect:getWorkspaceRect()}; resizeHandle.setPointerCapture(e.pointerId);e.preventDefault();resizeHandle.focus({preventScroll:true});});
     listen(resizeHandle,"pointermove",e => {if (resizeDrag?.id !== e.pointerId) return;setWorkspaceRect({...resizeDrag.rect,width:resizeDrag.rect.width+e.clientX-resizeDrag.x,height:resizeDrag.rect.height+e.clientY-resizeDrag.y});});
     const finishResize = e => {if (resizeDrag?.id === e.pointerId) resizeDrag=null;};
     ["pointerup","pointercancel","lostpointercapture"].forEach(type => listen(resizeHandle,type,finishResize));

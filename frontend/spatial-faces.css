@@ -2,14 +2,14 @@
 .spatial-faces-toolbar { position: absolute; z-index: 100002; left: 20px; right: 20px; top: 112px; display: flex; align-items: center; gap: 6px; pointer-events: auto; }
 .spatial-faces-toolbar select { max-width: min(320px, 48%); min-width: 110px; padding: 7px; background: #14243a; color: var(--text); border: 1px solid var(--border-hi); border-radius: 3px; font: 12px/1.4 var(--ui); }
 .spatial-faces-notice { color: var(--muted); font: 10px/1.45 var(--ui); max-width: 45ch; }
-.spatial-faces-layer { position: absolute; inset: 0; pointer-events: none; }
+.spatial-faces-layer { position: absolute; inset: 0; z-index: 5; pointer-events: none; }
 .spatial-has-faces[data-view="focus"] .spatial-workspace { top: 155px; z-index: 100000; padding-top: 38px; }
 .spatial-has-faces .spatial-resize-handle { z-index: 100001; }
 .spatial-primary-move { position: absolute; z-index: 100001; font-size: 10px; min-height: 26px; height: 26px; padding: 4px 7px; cursor: grab; touch-action: none; }
 .spatial-world[data-view="overview"] .spatial-primary-move { display: none; }
 /* Depth stays inside the existing bounded rectangle; only decorative planes
    are skewed. The front face, text, scroll area and controls stay square. */
-.spatial-thread-face { --face-depth: 12px; position: absolute; min-width: 0; box-sizing: border-box; display: flex; flex-direction: column; padding: var(--face-depth) var(--face-depth) 0 0; overflow: hidden; pointer-events: auto; border: 0; border-radius: 0; background: transparent; color: var(--text); filter: drop-shadow(0 5px 9px #07112055); }
+.spatial-thread-face { --face-depth: 12px; position: absolute; min-width: 0; box-sizing: border-box; display: flex; flex-direction: column; padding: var(--face-depth) var(--face-depth) 0 0; overflow: hidden; pointer-events: auto; border: 0; border-radius: 0; background: #101d30; color: var(--text); box-shadow: 0 5px 9px #07112055; }
 .spatial-thread-face::before, .spatial-thread-face::after { content: ""; position: absolute; box-sizing: border-box; z-index: 0; pointer-events: none; border: 1px solid #91bcae9c; }
 .spatial-thread-face::before { left: 0; top: 0; width: calc(100% - var(--face-depth)); height: var(--face-depth); transform: skewX(-45deg); transform-origin: left bottom; background: #203447e8; }
 .spatial-thread-face::after { top: var(--face-depth); right: 0; bottom: 0; width: var(--face-depth); transform: skewY(-45deg); transform-origin: left bottom; background: #172b3de8; }

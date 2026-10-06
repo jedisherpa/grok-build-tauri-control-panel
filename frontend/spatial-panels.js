@@ -40,7 +40,7 @@
     }
     function gesture(p, handle, resize) {
       let drag;
-      listen(handle, "pointerdown", e => { if (e.button !== 0) return; e.preventDefault(); drag = { id: e.pointerId, x: e.clientX, y: e.clientY, rect: { ...p.rect } }; handle.setPointerCapture(e.pointerId); p.element.style.zIndex = String(++z); });
+      listen(handle, "pointerdown", e => { if (e.button !== 0) return; e.preventDefault(); handle.focus({ preventScroll: true }); drag = { id: e.pointerId, x: e.clientX, y: e.clientY, rect: { ...p.rect } }; handle.setPointerCapture(e.pointerId); p.element.style.zIndex = String(++z); });
       listen(handle, "pointermove", e => { if (drag?.id !== e.pointerId) return; const dx = e.clientX - drag.x, dy = e.clientY - drag.y; p.rect = resize ? { ...drag.rect, width: drag.rect.width + dx, height: drag.rect.height + dy } : { ...drag.rect, x: drag.rect.x + dx, y: drag.rect.y + dy }; place(p); });
       ["pointerup", "pointercancel", "lostpointercapture"].forEach(type => listen(handle, type, () => { if (drag) { drag = null; if (p.expanded) p.expandedHeight = p.rect.height; save(); } }));
       listen(handle, "keydown", e => { if (!/^Arrow(Left|Right|Up|Down)$/.test(e.key) || e.metaKey || e.ctrlKey || e.altKey) return; e.preventDefault(); const step = e.shiftKey ? 32 : 8, dx = e.key === "ArrowRight" ? step : e.key === "ArrowLeft" ? -step : 0, dy = e.key === "ArrowDown" ? step : e.key === "ArrowUp" ? -step : 0; p.rect = resize ? { ...p.rect, width: p.rect.width + dx, height: p.rect.height + dy } : { ...p.rect, x: p.rect.x + dx, y: p.rect.y + dy }; p.element.style.zIndex = String(++z); place(p); if (p.expanded) p.expandedHeight = p.rect.height; save(); });
