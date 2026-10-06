@@ -16,6 +16,7 @@ chrono.workspace = true
 grok_acp = { path = "../crates/grok_acp" }
 grok_cli_wrapper = { path = "../crates/grok_cli_wrapper" }
 grok_config = { path = "../crates/grok_config" }
+grok_cdiss = { path = "../crates/grok_cdiss" }
 grok_control_core = { path = "../crates/grok_control_core" }
 grok_diff = { path = "../crates/grok_diff" }
 grok_events = { path = "../crates/grok_events" }

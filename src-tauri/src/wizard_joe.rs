@@ -1,5 +1,6 @@
 //! Manual Wizard Joe guide: one source-backed reader, no execution authority.
 use crate::state::AppState;
+use grok_cdiss::{analyze_joe_result, Config as CdissConfig, State as CdissState};
 use serde_json::{json, Value};
 use std::{
     path::{Path, PathBuf},
@@ -23,6 +24,70 @@ const MAX_PROMPT: usize = 200_000;
 const MANIFEST_SHA: &str = "4d466d7d8e830f6a3330e619a497f99aa3b6fa6c7439432c610b1f3485498e83";
 static BUSY: AtomicBool = AtomicBool::new(false);
 struct AnalysisGuard;
+
+// An explicit comparison references an immutable Joe receipt in the app's own
+// private folder. It never supplies history to the provider or changes tools.
+fn previous_review(
+    dir: &Path,
+    request_id: &str,
+    thread_id: &Option<String>,
+) -> Result<Value, String> {
+    use std::io::Read;
+    if thread_id.is_none() {
+        return Err("Comparison requires a selected thread".into());
+    }
+    let id = Uuid::parse_str(request_id).map_err(|_| "Invalid comparison receipt identifier")?;
+    let path = dir.join(format!("{id}.json"));
+    let metadata =
+        std::fs::symlink_metadata(&path).map_err(|_| "Previous review is unavailable")?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > MAX_LINE as u64
+    {
+        return Err("Previous review is not a bounded private receipt".into());
+    }
+    let file = std::fs::File::open(path).map_err(|_| "Previous review could not be read")?;
+    let mut bytes = Vec::new();
+    file.take(MAX_LINE as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|_| "Previous review could not be read")?;
+    if bytes.len() > MAX_LINE {
+        return Err("Previous review exceeds the comparison limit".into());
+    }
+    let result: Value =
+        serde_json::from_slice(&bytes).map_err(|_| "Previous review is malformed")?;
+    if result["schema"] != "bomb-code/joe-result/v1"
+        || result["requestId"].as_str() != Some(request_id)
+        || result["threadId"].as_str() != thread_id.as_deref()
+        || result["authority"]["toolsDispatched"] != false
+        || result["authority"]["approvalsGranted"] != false
+        || result["authority"]["memoryCommitted"] != false
+    {
+        return Err("Previous review does not match this thread or its read-only boundary".into());
+    }
+    Ok(result)
+}
+
+fn cdiss_attachment(
+    result: &Value,
+    previous: Option<&Value>,
+    ignored_reason: Option<String>,
+) -> Value {
+    let parsed =
+        previous.map(|value| serde_json::from_value::<CdissState>(value["cdiss"]["state"].clone()));
+    let (previous_state, reason) = match parsed {
+        Some(Ok(state)) => (Some(state), ignored_reason),
+        Some(Err(_)) => (
+            None,
+            Some("Previous review has no compatible continuity state".into()),
+        ),
+        None => (None, ignored_reason),
+    };
+    match analyze_joe_result(result, previous_state.as_ref(), &CdissConfig::default()) {
+        Ok(state) => json!({"status":"ready","state":state,"comparisonIgnoredReason":reason}),
+        Err(error) => {
+            json!({"status":"unavailable","reason":error.to_string(),"comparisonIgnoredReason":reason})
+        }
+    }
+}
 impl Drop for AnalysisGuard {
     fn drop(&mut self) {
         BUSY.store(false, Ordering::Release);
@@ -279,6 +344,7 @@ pub async fn joe_analyze(
     sentence: String,
     language: String,
     thread_id: Option<String>,
+    compare_request_id: Option<String>,
 ) -> Result<Value, String> {
     validate_input(&sentence, &language, &thread_id)?;
     if let Some(id) = &thread_id {
@@ -335,14 +401,112 @@ pub async fn joe_analyze(
             .map_err(|_| "Could not restrict Joe's receipt folder")?;
     }
     let path = dir.join(format!("{request_id}.json"));
-    let result = json!({"schema":"bomb-code/joe-result/v1","requestId":request_id,"threadId":thread_id,"sentence":sentence,"language":language,"status":status,"provider":"grok","model":model,"guide":{"identityId":"bomb-code:wizard-joe","roleVersion":"manual-clarification-guide/v1"},"interpretation":interpretation,"reference":reference,"referenceRequested":{"root":REFERENCE,"manifestSha256":MANIFEST_SHA},"runtime":{"pythonPath":PYTHON,"nodePath":NODE},"clarifications":questions,"receiptPath":path,"error":error,"at":chrono::Utc::now(),"authority":{"toolsDispatched":false,"approvalsGranted":false,"memoryCommitted":false}});
+    let mut result = json!({"schema":"bomb-code/joe-result/v1","requestId":request_id,"threadId":thread_id,"sentence":sentence,"language":language,"status":status,"provider":"grok","model":model,"guide":{"identityId":"bomb-code:wizard-joe","roleVersion":"manual-clarification-guide/v1"},"interpretation":interpretation,"reference":reference,"referenceRequested":{"root":REFERENCE,"manifestSha256":MANIFEST_SHA},"runtime":{"pythonPath":PYTHON,"nodePath":NODE},"clarifications":questions,"receiptPath":path,"error":error,"at":chrono::Utc::now(),"authority":{"toolsDispatched":false,"approvalsGranted":false,"memoryCommitted":false}});
+    let prior = compare_request_id
+        .as_deref()
+        .map(|id| previous_review(&dir, id, &thread_id));
+    let (previous, reason) = match prior {
+        Some(Ok(value)) => (Some(value), None),
+        Some(Err(reason)) => (None, Some(reason)),
+        None => (None, None),
+    };
+    result["cdiss"] = cdiss_attachment(&result, previous.as_ref(), reason);
     save_receipt(&path, &result)?;
     Ok(result)
+}
+
+/// Authored source-backed fixtures exercise the installed local math path.
+/// They are clearly labelled; no provider, receipt lookup, tools or memory run.
+#[tauri::command]
+pub fn joe_cdiss_example() -> Result<Value, String> {
+    let mut first: Value = serde_json::from_str(include_str!(
+        "../../crates/grok_cdiss/tests/fixtures/joe-bank.json"
+    ))
+    .map_err(|_| "Packaged comparison example is malformed")?;
+    first["cdiss"] = cdiss_attachment(&first, None, None);
+    let mut second: Value = serde_json::from_str(include_str!(
+        "../../crates/grok_cdiss/tests/fixtures/joe-negative.json"
+    ))
+    .map_err(|_| "Packaged comparison example is malformed")?;
+    second["cdiss"] = cdiss_attachment(&second, Some(&first), None);
+    Ok(
+        json!({"schema":"bomb-code/cdiss-example/v1","verificationClass":"authored-source-backed-example; not live interpretation or user intent","first":first,"second":second,"authority":{"toolsDispatched":false,"approvalsGranted":false,"memoryCommitted":false}}),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn installed_example_runs_real_math_without_execution_authority() {
+        let example = joe_cdiss_example().unwrap();
+        let first = &example["first"];
+        let second = &example["second"];
+        assert_eq!(first["cdiss"]["status"], "ready");
+        assert_eq!(second["cdiss"]["status"], "ready");
+        assert_eq!(first["cdiss"]["state"]["continuity"]["status"], "fresh");
+        let continuity = &second["cdiss"]["state"]["continuity"];
+        assert_eq!(continuity["status"], "compared");
+        assert_eq!(continuity["sourceDistance"]["totalVariation"], 0.0);
+        assert!(
+            continuity["structureDistance"]["totalVariation"]
+                .as_f64()
+                .unwrap()
+                > 0.0
+        );
+        for result in [first, second] {
+            for key in ["toolsDispatched", "approvalsGranted", "memoryCommitted"] {
+                assert_eq!(result["authority"][key], false);
+            }
+            assert_eq!(
+                result["cdiss"]["state"]["observation"]["readings"][0]["geometry"],
+                result["interpretation"]["binding"]["readings"][0]["e8_activations"]
+            );
+        }
+    }
+    #[test]
+    fn comparison_receipts_are_bounded_and_thread_scoped() {
+        let dir = std::env::temp_dir().join(format!("joe-comparison-{}", Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let id = Uuid::new_v4().to_string();
+        let thread = Some(Uuid::new_v4().to_string());
+        let path = dir.join(format!("{id}.json"));
+        let receipt = json!({"schema":"bomb-code/joe-result/v1","requestId":id,"threadId":thread,
+            "authority":{"toolsDispatched":false,"approvalsGranted":false,"memoryCommitted":false}});
+        save_receipt(&path, &receipt).unwrap();
+        assert!(previous_review(&dir, &id, &thread).is_ok());
+        assert!(previous_review(&dir, &id, &None).is_err());
+        assert!(previous_review(&dir, &id, &Some(Uuid::new_v4().to_string())).is_err());
+        assert!(previous_review(&dir, "../escape", &thread).is_err());
+        std::fs::remove_file(&path).unwrap();
+        #[cfg(unix)]
+        {
+            let target = dir.join("target.json");
+            save_receipt(&target, &receipt).unwrap();
+            std::os::unix::fs::symlink(&target, &path).unwrap();
+            assert!(previous_review(&dir, &id, &thread).is_err());
+            std::fs::remove_file(&path).unwrap();
+        }
+        let oversized = std::fs::File::create(&path).unwrap();
+        oversized.set_len(MAX_LINE as u64 + 1).unwrap();
+        assert!(previous_review(&dir, &id, &thread).is_err());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+    #[test]
+    fn malformed_or_corrupt_continuity_preserves_current_joe_evidence() {
+        let example = joe_cdiss_example().unwrap();
+        let current = example["second"].clone();
+        let before = current.clone();
+        let missing = cdiss_attachment(&current, Some(&json!({"cdiss":{"state":null}})), None);
+        assert_eq!(missing["status"], "ready");
+        assert_eq!(missing["state"]["continuity"]["status"], "fresh");
+        assert!(missing["comparisonIgnoredReason"].is_string());
+        let mut corrupt = example["first"].clone();
+        corrupt["cdiss"]["state"]["continuity"]["sourceMixture"][0]["mass"] = json!(0.9);
+        let unavailable = cdiss_attachment(&current, Some(&corrupt), None);
+        assert_eq!(unavailable["status"], "unavailable");
+        assert_eq!(current, before);
+    }
     #[test]
     fn exact_input_boundaries() {
         assert!(validate_input("", "eng", &None).is_err());

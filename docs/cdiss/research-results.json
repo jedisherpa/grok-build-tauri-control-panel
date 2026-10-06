@@ -1,0 +1,73 @@
+{
+  "baseline": {
+    "atomCount": 3,
+    "manifestSha256": "4d466d7d8e830f6a3330e619a497f99aa3b6fa6c7439432c610b1f3485498e83",
+    "mappedMass": 0.6666666666666666,
+    "modelId": "semantic-e8-model:2b9dd301a2075f21448e",
+    "modelSnapshotHash": "bad18249127e5cc50880033906bd53f725c56b13b31b248aa2d22305da8c4c54",
+    "readingCount": 1,
+    "sourceGraphHash": "ed03d9f98d929ce1e3d02c61dc13be61b29da5e34ddf9e2e6c6a96260770f7c7",
+    "stateHash": "bb95900ff6d1eab6f1dbd74561d90e348a0c21e9f57ac6bfaf5929a83c3e7d02",
+    "unmappedMass": 0.33333333333333337
+  },
+  "cases": [
+    {
+      "case": "bank",
+      "elapsedMs": 5.436,
+      "nativePositionsUnchanged": true,
+      "partitionChanged": false,
+      "sourceDistance": {
+        "jensenShannonDistance": 0.0,
+        "totalVariation": 0.0
+      },
+      "structureDistance": {
+        "jensenShannonDistance": 0.0,
+        "totalVariation": 0.0
+      }
+    },
+    {
+      "case": "passive",
+      "elapsedMs": 5.492959000000001,
+      "nativePositionsUnchanged": true,
+      "partitionChanged": false,
+      "sourceDistance": {
+        "jensenShannonDistance": 0.0,
+        "totalVariation": 0.0
+      },
+      "structureDistance": {
+        "jensenShannonDistance": 0.0,
+        "totalVariation": 0.0
+      }
+    },
+    {
+      "case": "negative",
+      "elapsedMs": 5.562708000000001,
+      "nativePositionsUnchanged": true,
+      "partitionChanged": true,
+      "sourceDistance": {
+        "jensenShannonDistance": 0.0,
+        "totalVariation": 0.0
+      },
+      "structureDistance": {
+        "jensenShannonDistance": 0.7071067811865476,
+        "totalVariation": 0.5
+      }
+    },
+    {
+      "case": "conditional",
+      "elapsedMs": 5.478208,
+      "nativePositionsUnchanged": true,
+      "partitionChanged": true,
+      "sourceDistance": {
+        "jensenShannonDistance": 0.0,
+        "totalVariation": 0.0
+      },
+      "structureDistance": {
+        "jensenShannonDistance": 0.7071067811865476,
+        "totalVariation": 0.5
+      }
+    }
+  ],
+  "firstAnalysisMs": 5.525333000000001,
+  "scope": "authored grammar through unmodified pinned source binder; no live provider or human-intent accuracy claim"
+}

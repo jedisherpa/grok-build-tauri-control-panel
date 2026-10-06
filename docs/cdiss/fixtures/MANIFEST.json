@@ -1,0 +1,26 @@
+{
+  "joe-bank.json": {
+    "sha256": "55187a7cfc9a32bc955e1934fb8341e8c793b7085ad249fb1e5e631920749802",
+    "bytes": 2102527
+  },
+  "joe-conditional.json": {
+    "sha256": "1a99de5c6dfa619795690708bb6b37391aa6374a954540b45ba20e156d936435",
+    "bytes": 2102877
+  },
+  "joe-context-pin.json": {
+    "sha256": "0db19fd14efc10648bf869633059f085ef26c6f5849abd41d7a1ee5d1481c935",
+    "bytes": 2117995
+  },
+  "joe-negative.json": {
+    "sha256": "268321e167137f97ea4d9d561a79d3dc4960e115dddddd16d8007ae38afad18c",
+    "bytes": 2102748
+  },
+  "joe-passive.json": {
+    "sha256": "ce9d8f875b8ab52e962f473cdaec1e88dc79f97b0831d2527f76c8ac99e831ee",
+    "bytes": 2102641
+  },
+  "source-root-collision.json": {
+    "sha256": "d10fdb23ba5a86e52b540a994511c7750585596c6c8a848c6ff21a8bf25be75a",
+    "bytes": 7501
+  }
+}

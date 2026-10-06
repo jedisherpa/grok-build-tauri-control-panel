@@ -189,8 +189,11 @@ tests/feature" spellcheck="false" required></textarea><span class="builds-help">
                 <textarea id="joe-passage" rows="3" maxlength="12000" spellcheck="false" placeholder="Paste the wording you want to clarify…" aria-describedby="joe-input-note"></textarea>
                 <div class="joe-input-row"><label for="joe-language">Language code</label><input id="joe-language" value="eng" maxlength="3" spellcheck="false" aria-describedby="joe-input-note" /><button id="joe-copy-composer" class="btn ghost" type="button">Use unsent message</button></div>
                 <p id="joe-input-note" class="joe-notice">The reference stays local. Analyze sends the passage and source/reference metadata to the displayed provider, with no history or saved memory. No coding tools are enabled.</p>
+                <label class="joe-comparison"><input id="joe-compare" type="checkbox" disabled /><span id="joe-compare-label">Compare with a previous review in this thread when available</span></label>
+                <p class="joe-notice">Comparison is calculated locally after the new reading. The previous review is not sent to the provider.</p>
                 <button id="joe-analyze" class="btn primary" type="submit">Analyze passage</button>
               </form>
+              <button id="joe-cdiss-example" class="btn ghost" type="button">Try a local source-backed comparison</button>
               <p id="joe-result-status" class="joe-status" role="status"></p>
               <div id="joe-result"></div>
             </div>

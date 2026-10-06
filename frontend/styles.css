@@ -1345,6 +1345,9 @@ img.logo {
 #joe-form label { color: var(--text); font-size: 12px; }
 #joe-passage { resize: vertical; min-height: 74px; width: 100%; background: var(--bg); border: 1px solid var(--border-hi); border-radius: 3px; color: var(--text); padding: 10px; font: 13px/1.6 var(--ui); }
 .joe-input-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.joe-comparison { display: flex; align-items: center; gap: 8px; margin: 12px 0 4px; }
+.joe-comparison input { flex: 0 0 auto; width: 16px; height: 16px; }
+#joe-cdiss-example { margin-top: 10px; }
 #joe-language { width: 70px; background: var(--bg); border: 1px solid var(--border-hi); border-radius: 3px; color: var(--text); padding: 8px; font: 13px var(--ui); }
 #joe-analyze { align-self: flex-start; min-height: 40px; }
 .joe-notice { font-size: 11px; line-height: 1.55; color: var(--muted); margin: 6px 0; overflow-wrap: anywhere; }

@@ -77,6 +77,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             wizard_joe::joe_status,
             wizard_joe::joe_analyze,
+            wizard_joe::joe_cdiss_example,
             builds::get_build_concurrency,
             builds::set_build_concurrency,
             builds::list_builds,

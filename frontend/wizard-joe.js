@@ -22,7 +22,16 @@
   function sameInput(result, sentence, language, threadId) {
     return result?.sentence === sentence && result?.language === language && (result.threadId || null) === (threadId || null);
   }
-  globalThis.WizardJoeView = Object.freeze({ viewOf, appendDraft, sameInput });
+  function continuityView(attachment) {
+    const s = attachment?.state;
+    if (attachment?.status !== "ready" || s?.schema !== "bomb-code/cdiss-state/v1" || s?.algorithmVersion !== "bomb-code/cdiss-source-structure/v1") return { available: false, reason: text(attachment?.reason) || "Continuity observation is unavailable for this review." };
+    const c = s.continuity || {}, o = s.observation || {};
+    if (![o.readingCount, o.atomCount, o.eventCount, o.alternativeCount, o.mappedMass, o.unmappedMass].every(Number.isFinite)) return { available: false, reason: "Continuity observation has invalid numeric fields." };
+    const distances = [c.sourceDistance, c.structureDistance].filter(Boolean);
+    if (distances.some(d => ![d.totalVariation, d.jensenShannonDistance].every(v => Number.isFinite(v) && v >= 0 && v <= 1))) return { available: false, reason: "Continuity distances are unavailable." };
+    return { available: true, status: text(c.status), reasons: list(c.reasons).filter(v => typeof v === "string"), source: c.sourceDistance, structure: c.structureDistance, partitionChanged: c.partitionChanged, observation: o, state: s, ignoredReason: text(attachment.comparisonIgnoredReason) };
+  }
+  globalThis.WizardJoeView = Object.freeze({ viewOf, appendDraft, sameInput, continuityView });
   if (typeof document === "undefined") return;
   const byId = id => document.getElementById(id);
   const guide = byId("wizard-joe");
@@ -30,7 +39,15 @@
   const passage = byId("joe-passage"), language = byId("joe-language");
   const status = byId("joe-result-status"), output = byId("joe-result");
   const analyze = byId("joe-analyze");
-  let busy = false, generation = 0, lastResult = null;
+  const compare = byId("joe-compare"), compareLabel = byId("joe-compare-label"), example = byId("joe-cdiss-example");
+  const previousReviews = new Map();
+  let busy = false, generation = 0, lastResult = null, showingExample = false;
+  const currentThread = () => typeof state !== "undefined" ? state.selectedSession || null : null;
+  function updateComparison() {
+    const prior = previousReviews.get(currentThread());
+    if (compare) { compare.disabled = busy || !prior; if (!prior) compare.checked = false; }
+    if (compareLabel) compareLabel.textContent = prior ? `Compare with previous review ${prior.slice(0, 8)} in this thread` : "Compare with a previous review in this thread when available";
+  }
   function node(tag, content, cls) {
     const el = document.createElement(tag);
     if (content != null) el.textContent = String(content);
@@ -65,19 +82,22 @@
   guide.addEventListener("toggle", () => { if (guide.open && !busy) checkService(); });
   byId("joe-refresh-service").addEventListener("click", () => { if (!busy) checkService(); });
   document.addEventListener("bomb-code:thread-selected", () => {
-    generation++; lastResult = null; output.replaceChildren();
+    generation++; lastResult = null; showingExample = false; output.replaceChildren();
+    if (compare) compare.checked = false;
+    updateComparison();
     status.textContent = "Thread changed. Your passage and unsent message are preserved; analyze again for this thread.";
     guide.dispatchEvent(new CustomEvent("bomb-code:joe-interpretation", { bubbles: true, detail: { schema: "bomb-code/joe-visual-state/v1", status: "invalidated", reason: "thread-changed", result: null } }));
   });
   function invalidate() {
     generation++;
-    if (lastResult) {
-      lastResult = null;
+    if (lastResult || showingExample) {
+      lastResult = null; showingExample = false;
       output.replaceChildren();
       status.textContent = "Passage or language changed. Analyze again for a current reading.";
       guide.dispatchEvent(new CustomEvent("bomb-code:joe-interpretation", { bubbles: true, detail: { schema: "bomb-code/joe-visual-state/v1", status: "invalidated", result: null } }));
     }
   }
+  if (compare) compare.addEventListener("change", invalidate);
   passage.addEventListener("input", invalidate);
   language.addEventListener("input", invalidate);
   byId("joe-copy-composer").addEventListener("click", () => {
@@ -128,6 +148,7 @@
     if (result.interpretation?.error) paragraph(output, result.interpretation.error, "joe-error");
     if (result.interpretation?.failed_stage) paragraph(output, `Interpretation stopped at stage: ${result.interpretation.failed_stage}`, "joe-error");
     paragraph(output, "This passage review does not determine which requirements or questions are missing from the whole project.");
+    renderContinuity(output, result.cdiss);
     view.clarifications.forEach(question => {
       const section = node("section", null, "joe-question");
       paragraph(section, question.question, "joe-question-text");
@@ -185,6 +206,44 @@
     Object.entries(view.receipt).forEach(([key, value]) => paragraph(receipt, `${key}: ${typeof value === "object" ? JSON.stringify(value) : value}`, "joe-coordinate"));
     paragraph(receipt, "Read-only interpretation: no coding tools dispatched, no approval granted, no memory committed.");
   }
+  function renderContinuity(parent, attachment) {
+    const view = continuityView(attachment);
+    const area = details(parent, "Context continuity · CDISS");
+    area.open = true;
+    if (!view.available) { paragraph(area, view.reason); return; }
+    const o = view.observation;
+    paragraph(area, view.status === "compared" ? "Compared with the explicitly chosen previous review." : view.status === "reset-incompatible" ? "Started fresh because the previous review uses a different context or reference." : "Fresh observation of this proposed reading.", "joe-label");
+    paragraph(area, `${o.readingCount} readings · ${o.atomCount} atom occurrences · ${o.eventCount} events · ${o.alternativeCount} selected alternatives retained.`);
+    paragraph(area, `Fitted E8 allocation: ${o.mappedMass.toFixed(3)} · no fitted E8 position: ${o.unmappedMass.toFixed(3)}. Includes separately typed context pins; allocation is descriptive, not confidence.`);
+    if (view.source) paragraph(area, `Source / context identity change: TV ${view.source.totalVariation.toFixed(3)} · Jensen–Shannon distance ${view.source.jensenShannonDistance.toFixed(3)}. Includes retained unmapped occurrences.`);
+    if (view.structure) paragraph(area, `Role / polarity / modality change: TV ${view.structure.totalVariation.toFixed(3)} · Jensen–Shannon distance ${view.structure.jensenShannonDistance.toFixed(3)}.`);
+    if (view.partitionChanged != null) paragraph(area, view.partitionChanged ? "Occurrence or alternative grouping changed." : "Occurrence and alternative grouping retained.");
+    strings(area, view.reasons, "Comparison notes");
+    paragraph(area, view.ignoredReason);
+    paragraph(area, "The current reading and accumulated context remain separate. E8 positions are retained unchanged. These distances do not grant approval or measure completion.");
+    const provenance = details(area, "Inspect continuity provenance");
+    paragraph(provenance, `Algorithm: ${view.state.algorithmVersion}`, "joe-coordinate");
+    paragraph(provenance, `State: ${view.state.stateHash}`, "joe-coordinate");
+    paragraph(provenance, `Configuration: ${view.state.configDigest}`, "joe-coordinate");
+    paragraph(provenance, `Previous state: ${view.state.previousStateHash || "none"}`, "joe-coordinate");
+    paragraph(provenance, `Source model: ${view.state.basis?.modelSnapshotHash || "unreported"}`, "joe-coordinate");
+  }
+  if (example) example.addEventListener("click", async () => {
+    if (busy) return;
+    invalidate(); const current = ++generation;
+    busy = true; example.disabled = true; analyze.disabled = true; updateComparison();
+    status.textContent = "Preparing the authored local example. No provider call is made.";
+    try {
+      const sample = await invoke("joe_cdiss_example");
+      if (current !== generation) return;
+      if (sample?.schema !== "bomb-code/cdiss-example/v1" || sample.authority?.toolsDispatched !== false || sample.authority?.approvalsGranted !== false || sample.authority?.memoryCommitted !== false) throw new Error("Unexpected example boundary receipt");
+      viewOf(sample.first); render(sample.second); showingExample = true;
+      paragraph(output, `Example baseline: ${sample.first.sentence}`);
+      paragraph(output, `Example current: ${sample.second.sentence}`);
+      status.textContent = "Authored source-backed example: approved versus did not approve. This tests local wiring; it is not a live interpretation of your passage.";
+    } catch (error) { output.replaceChildren(); status.textContent = `Local comparison unavailable: ${String(error)}`; }
+    finally { busy = false; example.disabled = false; analyze.disabled = false; updateComparison(); }
+  });
   byId("joe-form").addEventListener("submit", async event => {
     event.preventDefault();
     if (busy) return;
@@ -192,20 +251,27 @@
     if (!sentence.trim()) { status.textContent = "Enter an exact passage to analyze."; passage.focus(); return; }
     if (!/^[a-z]{3}$/.test(lang)) { status.textContent = "Enter a three-letter lowercase language code supported by the source snapshot, such as eng."; language.focus(); return; }
     const threadId = typeof state !== "undefined" ? state.selectedSession || null : null;
+    const compareRequestId = compare?.checked ? previousReviews.get(threadId) || null : null;
     invalidate();
     const current = ++generation;
     busy = true; analyze.disabled = true; analyze.textContent = "Analyzing…";
+    if (example) example.disabled = true;
+    updateComparison();
     lastResult = null; output.replaceChildren();
     status.textContent = "Preparing source candidates and a model-proposed reading. No coding tools are running for this review.";
     try {
-      const result = await invoke("joe_analyze", { sentence, language: lang, threadId });
+      const result = await invoke("joe_analyze", { sentence, language: lang, threadId, compareRequestId });
       if (current !== generation || !sameInput(result, passage.value, language.value.trim(), typeof state !== "undefined" ? state.selectedSession || null : null)) { status.textContent = "Input or selected thread changed while the review was running. Analyze again for a current reading."; return; }
       render(result); lastResult = result;
+      if (threadId && continuityView(result.cdiss).available && typeof result.requestId === "string") {
+        previousReviews.delete(threadId); previousReviews.set(threadId, result.requestId);
+        if (previousReviews.size > 32) previousReviews.delete(previousReviews.keys().next().value);
+      }
       status.textContent = result.status === "interpretation-unavailable" ? "Interpretation unavailable. Its failure receipt is retained." : "Review ready. Meanings and questions remain proposals.";
       guide.dispatchEvent(new CustomEvent("bomb-code:joe-interpretation", { bubbles: true, detail: { schema: "bomb-code/joe-visual-state/v1", status: result.status, result } }));
     } catch (error) {
       output.replaceChildren(); lastResult = null;
       status.textContent = `Passage review unavailable: ${String(error)}`;
-    } finally { busy = false; analyze.disabled = false; analyze.textContent = "Analyze passage"; }
+    } finally { busy = false; analyze.disabled = false; analyze.textContent = "Analyze passage"; if (example) example.disabled = false; updateComparison(); }
   });
 })();

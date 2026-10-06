@@ -15,12 +15,13 @@ members = [
     "crates/grok_persistence",
     "crates/grok_diff",
     "crates/grok_workflows",
+    "crates/grok_cdiss",
     "src-tauri",
 ]
 default-members = ["src-tauri"]
 
 [workspace.package]
-version = "0.1.8"
+version = "0.1.9"
 edition = "2021"
 license = "MIT"
 authors = ["xAI / Grok Build Contributors"]

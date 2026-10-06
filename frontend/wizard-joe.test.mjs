@@ -38,6 +38,7 @@ test("stale input, language and thread scope cannot match a current review", () 
 });
 
 function mount(result) {
+  let currentResult = result;
   const created = [], calls = [];
   class Element {
     constructor(tag = "div") { this.tag = tag; this.children = []; this.handlers = {}; this.value = ""; this.textContent = ""; created.push(this); }
@@ -48,16 +49,61 @@ function mount(result) {
     focus() { this.focused = true; }
     set innerHTML(_) { throw new Error("Guide must not use an HTML sink"); }
   }
-  const ids = new Map(["wizard-joe", "joe-passage", "joe-language", "joe-result-status", "joe-result", "joe-analyze", "joe-service-status", "joe-refresh-service", "joe-copy-composer", "joe-form", "prompt"].map(id => [id, new Element()]));
+  const ids = new Map(["wizard-joe", "joe-passage", "joe-language", "joe-result-status", "joe-result", "joe-analyze", "joe-service-status", "joe-refresh-service", "joe-copy-composer", "joe-form", "prompt", "joe-compare", "joe-compare-label", "joe-cdiss-example"].map(id => [id, new Element()]));
   ids.get("joe-language").value = "eng";
   const scope = { selectedSession: "thread-1" };
   const document = { handlers: {}, getElementById: id => ids.get(id), createElement: tag => new Element(tag), addEventListener(type, handler) { this.handlers[type] = handler; }, dispatchEvent(event) { this.handlers[event.type]?.(event); } };
-  const invoke = async (command, args) => { calls.push({ command, args }); if (command === "joe_analyze") return result; if (command === "joe_status") return { available: true, provider: "grok", model: "fixture" }; throw new Error(`Unexpected native command: ${command}`); };
+  const invoke = async (command, args) => { calls.push({ command, args }); if (command === "joe_analyze" || command === "joe_cdiss_example") return currentResult; if (command === "joe_status") return { available: true, provider: "grok", model: "fixture" }; throw new Error(`Unexpected native command: ${command}`); };
   class TestEvent { constructor(type, options = {}) { this.type = type; Object.assign(this, options); } }
   const context = vm.createContext({ document, invoke, state: scope, CustomEvent: TestEvent, Event: TestEvent });
   vm.runInContext(fs.readFileSync(new URL("./wizard-joe.js", import.meta.url), "utf8"), context);
-  return { ids, created, calls, scope, document };
+  return { ids, created, calls, scope, document, setResult(value) { currentResult = value; } };
 }
+
+function withContinuity(result) {
+  result.cdiss = { status: "ready", state: { schema: "bomb-code/cdiss-state/v1", algorithmVersion: "bomb-code/cdiss-source-structure/v1", observation: { readingCount: 1, atomCount: 3, eventCount: 1, alternativeCount: 0, mappedMass: 2 / 3, unmappedMass: 1 / 3 }, continuity: { status: "fresh", reasons: [], sourceDistance: null, structureDistance: null, partitionChanged: null }, basis: {}, stateHash: "fixture-state", configDigest: "fixture-config" } };
+  return result;
+}
+
+test("continuity distance display rejects nonfinite and out-of-range observations", () => {
+  const result = withContinuity(response());
+  assert.equal(guide.continuityView(result.cdiss).available, true);
+  result.cdiss.state.continuity.sourceDistance = { totalVariation: 0.5, jensenShannonDistance: NaN };
+  assert.equal(guide.continuityView(result.cdiss).available, false);
+  result.cdiss.state.continuity.sourceDistance.jensenShannonDistance = 2;
+  assert.equal(guide.continuityView(result.cdiss).available, false);
+});
+
+test("comparison is explicitly selected, scoped to one thread and absent from provider history", async () => {
+  const first = withContinuity(response()); first.requestId = "first-review";
+  const ui = mount(first); ui.ids.get("joe-passage").value = first.sentence;
+  await ui.ids.get("joe-form").handlers.submit({ preventDefault() {} });
+  assert.equal(ui.calls[0].args.compareRequestId, null);
+  const second = withContinuity(response()); second.sentence = "Use 🌿 even if tests fail."; second.requestId = "second-review";
+  ui.setResult(second); ui.ids.get("joe-passage").value = second.sentence;
+  ui.ids.get("joe-passage").handlers.input();
+  ui.ids.get("joe-compare").checked = true; ui.ids.get("joe-compare").handlers.change();
+  await ui.ids.get("joe-form").handlers.submit({ preventDefault() {} });
+  assert.equal(ui.calls[1].args.compareRequestId, "first-review");
+  assert.equal(Object.hasOwn(ui.calls[1].args, "history"), false);
+  ui.scope.selectedSession = "thread-2"; ui.document.handlers["bomb-code:thread-selected"]();
+  assert.equal(ui.ids.get("joe-compare").checked, false);
+  assert.equal(ui.ids.get("joe-compare").disabled, true);
+  assert.equal(ui.ids.get("prompt").value, "");
+});
+
+test("the local example uses its separate zero-provider command and cannot become previous user context", async () => {
+  const first = withContinuity(response()), second = withContinuity(response());
+  const sample = { schema: "bomb-code/cdiss-example/v1", authority: first.authority, first, second };
+  const ui = mount(sample); ui.ids.get("prompt").value = "Keep my unsent work";
+  await ui.ids.get("joe-cdiss-example").handlers.click();
+  assert.deepEqual(ui.calls.map(c => c.command), ["joe_cdiss_example"]);
+  assert.match(ui.ids.get("joe-result-status").textContent, /Authored source-backed example/);
+  assert.equal(ui.ids.get("prompt").value, "Keep my unsent work");
+  assert.equal(ui.ids.get("joe-compare").disabled, true);
+  ui.ids.get("joe-passage").value = "New passage"; ui.ids.get("joe-passage").handlers.input();
+  assert.equal(ui.ids.get("joe-result").children.length, 0);
+});
 
 test("guide starts idle; explicit passage review renders untrusted text without executing it or sending work", async () => {
   const result = response();

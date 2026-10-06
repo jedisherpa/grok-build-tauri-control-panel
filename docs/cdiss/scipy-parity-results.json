@@ -1,0 +1,8 @@
+{
+  "scope": "independent SciPy parity on explicit normalized sparse identity allocations; no linguistic accuracy claim",
+  "scipyVersion": "1.17.0",
+  "numpyVersion": "2.3.5",
+  "caseCount": 35,
+  "maxJsAbsoluteError": 1.1102230246251565e-16,
+  "maxTvAbsoluteError": 1.1102230246251565e-16
+}
