@@ -291,3 +291,11 @@ cargo clippy --workspace --all-targets -- -D warnings → PASS
 - Re-run required workspace check/strict Clippy, rebuild, and inspect both compact and normal installed windows. No agent prompt is sent by visual verification.
 
 - Compact installed verification confirmed the Folder control is reachable. Legacy background shorthands also reset the arrow tiling properties; preserve the entire arrow recipe together and reverify native dropdown rendering.
+
+## Wizard Joe source-backed guide phase — 2026-10-06
+
+- Add an explicit manual passage guide through the supplied current SenseSnap/RoundTrip adapter, one existing tool-free Grok reader, exact input, grounded source selections, retained alternatives/geometry/missingness and private immutable receipts.
+- Pin and verify the current 340-member reference manifest; use the matched aligned graph/model and prepared local Python 3.12 runtime. Keep the original reference immutable and do not launch the five-role runtime.
+- Clarification proposals derive from retained unresolved items or competing readings. Drafting appends to the unsent composer. Thread/passage/language changes invalidate readings and the typed future-visualization event.
+- No inferred approval, coding tool execution, source-map update or automatic memory commitment. Joe uses the configured Grok narrator model; other narrator backends report unavailable for this new structured path.
+- Phase validation: workspace check and strict all-target Clippy pass, five native boundary/real-reference failure tests pass, ten frontend boundary tests pass, JavaScript syntax and diff whitespace checks pass. Installed-provider verification follows combination with the newer reviewed-build workflow.

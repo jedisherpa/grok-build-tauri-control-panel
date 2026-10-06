@@ -6,6 +6,7 @@ mod explainer;
 mod haven;
 mod history;
 mod state;
+mod wizard_joe;
 
 use tauri::{Emitter, Manager};
 use tracing::{info, warn};
@@ -73,6 +74,8 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            wizard_joe::joe_status,
+            wizard_joe::joe_analyze,
             history::history_scan,
             history::history_stats,
             history::history_search,

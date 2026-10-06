@@ -374,6 +374,31 @@ impl ExplainerService {
         Ok(text)
     }
 
+    /// Snapshot identity for a manual structured reader. Never falls back to
+    /// the ACP adapters' best-effort headless path.
+    pub async fn structured_provider(&self) -> (String, String) {
+        (
+            self.backend.read().await.clone(),
+            self.model.read().await.clone(),
+        )
+    }
+
+    pub async fn structured_grok(
+        &self,
+        prompt: &str,
+        expected_model: &str,
+    ) -> Result<String, String> {
+        let (backend, model) = self.structured_provider().await;
+        if backend != "grok" || model != expected_model {
+            return Err(
+                "Joe's configured provider changed; analyze again under the new setting".into(),
+            );
+        }
+        // Exact structured JSON goes through the existing tool-free Grok call;
+        // no narrator prompt, prose clipping, self-healing model change or tools.
+        self.run_narrator("grok", &model, prompt).await
+    }
+
     /// One-shot 2-4 word title for a thread's first prompt (smart naming).
     /// Uses the same locked-down narrator provider; errors bubble so callers
     /// can keep the local slug.

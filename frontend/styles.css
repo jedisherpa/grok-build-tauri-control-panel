@@ -1296,4 +1296,36 @@ img.logo {
 @media (max-width: 1100px) { .narrative-panel { padding: 16px 20px; } .narrator-label { display: none; } .history-reader { padding: 18px; } }
 
 .history-subagents { display:flex; align-items:center; gap:6px; white-space:nowrap; font-size:11px; color:var(--muted); }
+
+/* Wizard Joe is an explicit passage review beside the explanation feed.
+   Its forms remain still and all results are ordinary accessible text. */
+.wizard-joe { flex: 0 0 auto; border-top: 1px solid var(--border); margin-top: 10px; min-height: 0; }
+.wizard-joe > summary { display: flex; align-items: center; gap: 9px; cursor: pointer; padding: 10px 2px; min-height: 44px; color: var(--text); font: 400 18px/1.3 var(--display); }
+.wizard-joe[open] > summary { position: sticky; top: 0; background: var(--bg-elev); z-index: 1; }
+.joe-mark { width: 29px; height: 33px; flex: 0 0 auto; }
+.joe-summary-note { margin-left: auto; color: var(--user); font: 11px/1.4 var(--ui); }
+.joe-body { max-height: min(38vh, 400px); overflow: auto; padding: 4px 3px 16px; font: 13px/1.6 var(--ui); }
+.joe-intro { margin: 0 0 10px; color: var(--muted); }
+.joe-status { color: var(--accent); margin: 8px 0; overflow-wrap: anywhere; }
+#joe-form { display: flex; flex-direction: column; gap: 8px; }
+#joe-form label { color: var(--text); font-size: 12px; }
+#joe-passage { resize: vertical; min-height: 74px; width: 100%; background: var(--bg); border: 1px solid var(--border-hi); border-radius: 3px; color: var(--text); padding: 10px; font: 13px/1.6 var(--ui); }
+.joe-input-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+#joe-language { width: 70px; background: var(--bg); border: 1px solid var(--border-hi); border-radius: 3px; color: var(--text); padding: 8px; font: 13px var(--ui); }
+#joe-analyze { align-self: flex-start; min-height: 40px; }
+.joe-notice { font-size: 11px; line-height: 1.55; color: var(--muted); margin: 6px 0; overflow-wrap: anywhere; }
+.joe-label { color: var(--user); font-size: 12px; margin: 10px 0 6px; }
+.joe-question { border-left: 2px solid var(--user); padding: 4px 0 8px 12px; margin: 12px 0; }
+.joe-question-text, .joe-source-text { white-space: pre-wrap; overflow-wrap: anywhere; color: var(--text); margin: 4px 0 7px; }
+.joe-question-text { font-size: 14px; }
+.joe-question .btn { margin-top: 7px; min-height: 40px; }
+.joe-details { border-top: 1px solid var(--border); padding-top: 5px; margin-top: 9px; }
+.joe-details > summary { cursor: pointer; min-height: 36px; padding: 6px 0; color: var(--accent); overflow-wrap: anywhere; }
+.joe-details .joe-details { margin-left: 8px; }
+.joe-coordinate { font: 10px/1.6 var(--font); color: var(--muted); overflow-wrap: anywhere; white-space: pre-wrap; margin: 6px 0; }
+.joe-error { color: var(--err); overflow-wrap: anywhere; }
+.joe-body ul { padding-left: 20px; }
+.narrative-panel:has(.wizard-joe[open]) .explain-feed { flex-shrink: 1; min-height: 0; max-height: 70px; }
+.narrative-panel:has(.wizard-joe[open]) .wizard-joe { flex: 1 1 auto; overflow: auto; }
+.narrative-panel:has(.wizard-joe[open]) .joe-body { max-height: none; overflow: visible; }
 .history-search .history-subagents input { width:auto; }

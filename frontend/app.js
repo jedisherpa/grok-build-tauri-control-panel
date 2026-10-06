@@ -1391,7 +1391,10 @@ async function deleteThread(id) {
     await invoke("remove_session", { id, removeWorktree });
     state.transcriptBySession.delete(id);
     state.explainBySession.delete(id);
-    if (state.selectedSession === id) state.selectedSession = null;
+    if (state.selectedSession === id) {
+      state.selectedSession = null;
+      document.dispatchEvent(new CustomEvent("bomb-code:thread-selected", { detail: { threadId: null } }));
+    }
     await refreshSessions();
     pushEvent(`deleted thread ${name}`, "ok", null, { force: true });
   } catch (e) {
@@ -1481,6 +1484,7 @@ async function selectSession(id) {
   }
   // Do not clear boom timer mid-hold — it is session-scoped in the callback
   state.selectedSession = id || null;
+  if (prev !== state.selectedSession) document.dispatchEvent(new CustomEvent("bomb-code:thread-selected", { detail: { threadId: state.selectedSession } }));
   if (!id) {
     state.turn = P ? P.emptyPresence() : { phase: "idle" };
   } else {
@@ -4344,6 +4348,7 @@ $("btn-shutdown").onclick = async () => {
   try {
     await invoke("shutdown_all");
     state.selectedSession = null;
+    document.dispatchEvent(new CustomEvent("bomb-code:thread-selected", { detail: { threadId: null } }));
     await refreshSessions();
     pushEvent("all agents shut down", "ok", null, { force: true });
   } catch (e) {
