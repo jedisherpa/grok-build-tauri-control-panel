@@ -1,0 +1,21 @@
+/* Joe is a body-level foreground companion, outside every cube transform. */
+.joe-companion { position: fixed; z-index: 2000000; right: 18px; bottom: 14px; width: 120px; pointer-events: none; }
+.joe-companion-button { pointer-events: auto; width: 120px; padding: 0; background: none; border: 0; cursor: pointer; color: var(--text); }
+.joe-companion-sprite { display: block; width: 120px; height: 140px; filter: drop-shadow(0 3px 3px #0009); }
+.joe-companion-badge { display: block; width: max-content; margin: 0 auto; border: 1px solid var(--border-hi); border-radius: 3px; background: #101d30; padding: 3px 8px; font: 11px var(--ui); }
+.joe-companion-button[data-notice="true"] .joe-companion-badge { border-color: var(--warn); color: var(--warn); }
+.joe-companion-drawer { pointer-events: auto; position: fixed; right: 18px; bottom: 180px; width: min(540px, calc(100vw - 36px)); max-height: calc(100vh - 230px); overflow: auto; padding: 18px; background: #101d30; border: 1px solid #91bcae; border-radius: 5px; box-shadow: 0 12px 35px #0007; }
+.joe-companion-drawer[hidden] { display: none; }
+.joe-companion-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.joe-companion-heading h2 { font: 22px Georgia; margin: 0; }
+.joe-companion-drawer label { display: block; margin-top: 12px; font-size: 12px; }
+.joe-companion-drawer textarea { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--border-hi); padding: 8px; font: 13px/1.5 var(--ui); resize: vertical; }
+.joe-local-notices { padding-left: 20px; color: var(--warn); font-size: 12px; line-height: 1.7; }
+.joe-companion-drawer .wizard-joe { margin-top: 16px; }
+.joe-companion[data-corner="bottom-left"] { right: auto; left: 18px; }
+.joe-companion[data-corner="bottom-left"] .joe-companion-drawer { right: auto; left: 18px; }
+.joe-companion[data-corner^="top"] { bottom: auto; top: 58px; }
+.joe-companion[data-corner^="top"] .joe-companion-drawer { bottom: auto; top: 226px; }
+.joe-companion[data-corner="top-left"] { right: auto; left: 18px; }
+.joe-companion[data-corner="top-left"] .joe-companion-drawer { right: auto; left: 18px; }
+@media (max-height: 720px) { .joe-companion-drawer { max-height: calc(100vh - 230px); padding: 12px; } }

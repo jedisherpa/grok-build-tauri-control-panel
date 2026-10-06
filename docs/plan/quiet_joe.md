@@ -1,0 +1,7 @@
+# Quiet foreground Joe
+
+Paul requested a stationary foreground companion above the cubes, using small gestures until asked for clarification. Reuse the packaged neutral/wing atlas; disable the old travelling scene sprite. Add a body-level accessible nonmodal drawer containing the existing guide. Local observation reads only the selected loaded transcript and exact host evidence. It exposes questions, recent typed tool failures, current pending plan entries and native approvals as cues. An optional explicit outcome stays local per thread. No project alignment is inferred from geometry or counts.
+
+Prepare copies at most eight user/agent/plan excerpts of 1,000 UTF-16 units each plus an explicit outcome capped at 2,000 into the visible passage. Thought/raw logs/terminal rows/other threads/saved memory are excluded. Only Analyze calls the existing source-backed reader. Revision/outcome/build evidence changes invalidate the prepared review; validation before Analyze, drafting and publication prevents stale results during the polling gap.
+
+Use a fixed corner with a user corner selector, static idle, brief wing gesture at least 30 seconds apart, pause/reduced-motion/hidden-page support, Escape close and focus return. Keep original native controls and all cube positions/records. Planning, implementation, independent architecture audit and revision follow repo AGENTS. Audit has no remaining Critical/High/Medium issues. Native install and preservation checks follow source gates.

@@ -28,6 +28,7 @@ const state = {
   startingSession: false,
   devServer: null,
   transcriptBySession: new Map(),
+  transcriptRevisionBySession: new Map(),
   transcriptLoaded: new Set(),
   /** @type {ReturnType<typeof P.emptyPresence>} */
   turn: P ? P.emptyPresence() : { phase: "idle" },
@@ -578,6 +579,7 @@ function getTranscript(sessionId) {
 
 function appendTranscript(sessionId, role, body, at = nowIso(), opts = {}) {
   if (!sessionId) return;
+  state.transcriptRevisionBySession.set(sessionId, (state.transcriptRevisionBySession.get(sessionId) || 0) + 1);
   const list = getTranscript(sessionId);
   const text = body == null ? "" : String(body);
   const stream = !!opts.stream;
@@ -1543,6 +1545,7 @@ async function loadTranscriptFromDb(id, { force = false } = {}) {
       streaming: false,
     }));
     state.transcriptBySession.set(id, mapped);
+    state.transcriptRevisionBySession.set(id, (state.transcriptRevisionBySession.get(id) || 0) + 1);
     state.transcriptLoaded.add(id);
   } catch (e) {
     // Older builds / empty DB — ignore

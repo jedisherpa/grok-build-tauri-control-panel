@@ -11,6 +11,7 @@
     <link rel="stylesheet" href="spatial-shell.css" />
     <link rel="stylesheet" href="spatial-faces.css" />
     <link rel="stylesheet" href="spatial-panels.css" />
+    <link rel="stylesheet" href="joe-companion.css" />
   </head>
   <body>
     <div id="spatial-background" aria-hidden="true"></div>
@@ -188,7 +189,7 @@ tests/feature" spellcheck="false" required></textarea><span class="builds-help">
                 <label for="joe-passage">Exact passage</label>
                 <textarea id="joe-passage" rows="3" maxlength="12000" spellcheck="false" placeholder="Paste the wording you want to clarify…" aria-describedby="joe-input-note"></textarea>
                 <div class="joe-input-row"><label for="joe-language">Language code</label><input id="joe-language" value="eng" maxlength="3" spellcheck="false" aria-describedby="joe-input-note" /><button id="joe-copy-composer" class="btn ghost" type="button">Use unsent message</button></div>
-                <p id="joe-input-note" class="joe-notice">The reference stays local. Analyze sends the passage and source/reference metadata to the displayed provider, with no history or saved memory. No coding tools are enabled.</p>
+                <p id="joe-input-note" class="joe-notice">The reference stays local. Analyze sends the visible passage and source/reference metadata to the displayed provider. Preparing thread context includes selected excerpts; thought/raw logs and saved memory are excluded. No coding tools are enabled.</p>
                 <button id="joe-analyze" class="btn primary" type="submit">Analyze passage</button>
               </form>
               <p id="joe-result-status" class="joe-status" role="status"></p>
@@ -594,6 +595,7 @@ tests/feature" spellcheck="false" required></textarea><span class="builds-help">
     <script src="spatial-host.js"></script>
     <script src="spatial-faces.js"></script>
     <script src="spatial-panels.js"></script>
+    <script src="joe-companion.js"></script>
     <script src="spatial-shell.js"></script>
   </body>
 </html>
