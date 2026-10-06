@@ -11,7 +11,7 @@ use uuid::Uuid;
 
 use grok_acp::{AcpClient, AcpClientConfig, AcpSpawnOptions, ApprovalMode, BrainMode, ConnectOpts};
 use grok_cli_wrapper::{GrokCli, HeadlessSpawnOptions};
-use grok_config::{Backend, GrokConfig, ResolvedBackend, descriptor, resolve_backend};
+use grok_config::{descriptor, resolve_backend, Backend, GrokConfig, ResolvedBackend};
 use grok_events::{EventBus, SessionStatus};
 
 use crate::error::{CoreError, Result};
@@ -223,10 +223,7 @@ impl SessionRegistry {
         }
 
         let backend = opts.backend;
-        let model = opts
-            .model
-            .clone()
-            .unwrap_or_else(|| cfg.model_for(backend));
+        let model = opts.model.clone().unwrap_or_else(|| cfg.model_for(backend));
         // Mock threads need no binary; headless resolves via grok_cli.
         let needs_binary =
             matches!(opts.mode, AgentMode::Acp) && !model.eq_ignore_ascii_case("mock");
@@ -277,8 +274,10 @@ impl SessionRegistry {
             AgentMode::Acp => {
                 // Offline / mock threads from memory
                 if model.eq_ignore_ascii_case("mock") {
-                    let client =
-                        AcpClient::mock_for_tests(&format!("mock-{id}"), Some(self.event_bus.clone()));
+                    let client = AcpClient::mock_for_tests(
+                        &format!("mock-{id}"),
+                        Some(self.event_bus.clone()),
+                    );
                     metadata.acp_session_id = Some(format!("mock-{id}"));
                     metadata.status = SessionStatus::Idle;
                     metadata.label = Some("mock".into());
@@ -365,7 +364,9 @@ impl SessionRegistry {
                         }
                     }
                     self.event_bus.emit_session_created(id, cwd, "acp").await;
-                    self.event_bus.emit_status(id, SessionStatus::Starting).await;
+                    self.event_bus
+                        .emit_status(id, SessionStatus::Starting)
+                        .await;
 
                     let pending = PendingConnect {
                         client_cfg,
@@ -425,12 +426,8 @@ impl SessionRegistry {
             AgentMode::Acp => "acp",
             AgentMode::Headless => "headless",
         };
-        self.event_bus
-            .emit_session_created(id, cwd, mode_str)
-            .await;
-        self.event_bus
-            .emit_status(id, handle.metadata.status)
-            .await;
+        self.event_bus.emit_session_created(id, cwd, mode_str).await;
+        self.event_bus.emit_status(id, handle.metadata.status).await;
 
         info!(%id, mode = mode_str, cwd, "session spawned");
         self.sessions.insert(id, handle);
@@ -440,9 +437,11 @@ impl SessionRegistry {
     /// Spawn a mock ACP session for tests / offline UI development.
     pub async fn spawn_mock(&self, cwd: &str) -> Result<Uuid> {
         let id = Uuid::new_v4();
-        let mut opts = SpawnOptions::default();
-        opts.model = Some("mock".into());
-        opts.mode = AgentMode::Acp;
+        let opts = SpawnOptions {
+            model: Some("mock".into()),
+            mode: AgentMode::Acp,
+            ..Default::default()
+        };
         self.spawn_agent_with_id(id, cwd, opts, None, ConnectOpts::default(), false)
             .await?;
         Ok(id)
@@ -486,14 +485,9 @@ impl SessionRegistry {
             }
             entry.touch();
             entry.metadata.status = SessionStatus::Running;
-            entry
-                .acp_client
-                .clone()
-                .ok_or(CoreError::NotAcp)?
+            entry.acp_client.clone().ok_or(CoreError::NotAcp)?
         };
-        self.event_bus
-            .emit_status(id, SessionStatus::Running)
-            .await;
+        self.event_bus.emit_status(id, SessionStatus::Running).await;
         client.send_prompt(prompt).await?;
         Ok(())
     }

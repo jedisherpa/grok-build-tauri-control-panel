@@ -77,17 +77,10 @@ pub struct BackendDescriptor {
 }
 
 impl BackendDescriptor {
-    /// Extra args appended after the resolved binary, which depend on which
-    /// binary matched (e.g. native `codex` needs the `acp` subcommand while
-    /// the `codex-acp` adapter does not).
-    pub fn args_for_binary(&self, program: &std::path::Path) -> Vec<String> {
-        let name = program
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or_default();
+    /// Grok has a native ACP entry point; other backends use ACP adapters.
+    pub fn args_for_binary(&self, _program: &std::path::Path) -> Vec<String> {
         match self.id {
             Backend::Grok => vec!["agent".into(), "stdio".into()],
-            Backend::Codex if name == "codex" => vec!["acp".into()],
             _ => Vec::new(),
         }
     }
@@ -114,7 +107,11 @@ const CLAUDE: BackendDescriptor = BackendDescriptor {
         "@agentclientprotocol/claude-agent-acp",
         "@zed-industries/claude-code-acp",
     ],
-    env_passthrough: &["ANTHROPIC_API_KEY", "ANTHROPIC_BASE_URL", "CLAUDE_CONFIG_DIR"],
+    env_passthrough: &[
+        "ANTHROPIC_API_KEY",
+        "ANTHROPIC_BASE_URL",
+        "CLAUDE_CONFIG_DIR",
+    ],
     auth_preference: &["claude-login", "anthropic-api-key"],
     skip_auth_when_unadvertised: true,
     default_model: "claude-fable-5",
@@ -130,10 +127,14 @@ const CLAUDE: BackendDescriptor = BackendDescriptor {
 const CODEX: BackendDescriptor = BackendDescriptor {
     id: Backend::Codex,
     display_name: "Codex",
-    binary_names: &["codex-acp", "codex"],
+    // The installed Codex CLI exposes app-server, not an `acp` subcommand.
+    binary_names: &["codex-acp"],
     // Old @zed-industries package is deprecated and its bundled Codex core
     // rejects gpt-5.6 models ("requires a newer version of Codex").
-    npx_packages: &["@agentclientprotocol/codex-acp", "@zed-industries/codex-acp"],
+    npx_packages: &[
+        "@agentclientprotocol/codex-acp",
+        "@zed-industries/codex-acp",
+    ],
     env_passthrough: &["OPENAI_API_KEY", "CODEX_HOME"],
     auth_preference: &["chatgpt", "openai-api-key", "apikey"],
     skip_auth_when_unadvertised: true,
@@ -184,7 +185,12 @@ pub fn resolve_backend(b: Backend, cfg: &GrokConfig) -> Result<ResolvedBackend> 
     if let Some(over) = cfg.backend_config(b).and_then(|c| c.binary.clone()) {
         if over.exists() {
             let args = desc.args_for_binary(&over);
-            return Ok(ResolvedBackend { backend: b, program: over, args, via: LaunchVia::Binary });
+            return Ok(ResolvedBackend {
+                backend: b,
+                program: over,
+                args,
+                via: LaunchVia::Binary,
+            });
         }
         tracing::warn!(backend = %b, path = %over.display(), "configured backend binary missing");
     }
@@ -193,7 +199,12 @@ pub fn resolve_backend(b: Backend, cfg: &GrokConfig) -> Result<ResolvedBackend> 
     if b == Backend::Grok {
         let program = cfg.resolve_grok_binary()?;
         let args = desc.args_for_binary(&program);
-        return Ok(ResolvedBackend { backend: b, program, args, via: LaunchVia::Binary });
+        return Ok(ResolvedBackend {
+            backend: b,
+            program,
+            args,
+            via: LaunchVia::Binary,
+        });
     }
 
     for name in desc.binary_names {
@@ -201,13 +212,23 @@ pub fn resolve_backend(b: Backend, cfg: &GrokConfig) -> Result<ResolvedBackend> 
             if candidate.is_file() {
                 let program = std::fs::canonicalize(&candidate).unwrap_or(candidate);
                 let args = desc.args_for_binary(&program);
-                return Ok(ResolvedBackend { backend: b, program, args, via: LaunchVia::Binary });
+                return Ok(ResolvedBackend {
+                    backend: b,
+                    program,
+                    args,
+                    via: LaunchVia::Binary,
+                });
             }
         }
         if let Ok(p) = which(name) {
             let program = std::fs::canonicalize(&p).unwrap_or(p);
             let args = desc.args_for_binary(&program);
-            return Ok(ResolvedBackend { backend: b, program, args, via: LaunchVia::Binary });
+            return Ok(ResolvedBackend {
+                backend: b,
+                program,
+                args,
+                via: LaunchVia::Binary,
+            });
         }
     }
 
@@ -232,6 +253,10 @@ fn candidate_paths(name: &str) -> Vec<PathBuf> {
         .map(|u| u.home_dir().to_path_buf())
         .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
     {
+        out.push(
+            home.join(".grok/control-panel/adapters/node_modules/.bin")
+                .join(name),
+        );
         out.push(home.join(".local").join("bin").join(name));
         out.push(home.join(".cargo").join("bin").join(name));
         out.push(home.join(".npm-global").join("bin").join(name));
@@ -257,7 +282,10 @@ mod tests {
 
     #[test]
     fn backend_serde_snake_case() {
-        assert_eq!(serde_json::to_string(&Backend::Claude).unwrap(), "\"claude\"");
+        assert_eq!(
+            serde_json::to_string(&Backend::Claude).unwrap(),
+            "\"claude\""
+        );
         let b: Backend = serde_json::from_str("\"codex\"").unwrap();
         assert_eq!(b, Backend::Codex);
         assert_eq!(Backend::from_key("grok"), Some(Backend::Grok));
@@ -265,14 +293,17 @@ mod tests {
 
     #[test]
     fn grok_args_are_agent_stdio() {
-        let args = descriptor(Backend::Grok).args_for_binary(std::path::Path::new("/usr/local/bin/grok"));
+        let args =
+            descriptor(Backend::Grok).args_for_binary(std::path::Path::new("/usr/local/bin/grok"));
         assert_eq!(args, vec!["agent".to_string(), "stdio".to_string()]);
     }
 
     #[test]
-    fn codex_native_binary_gets_acp_subcommand() {
+    fn codex_requires_an_acp_adapter() {
         let d = descriptor(Backend::Codex);
-        assert_eq!(d.args_for_binary(std::path::Path::new("/usr/local/bin/codex")), vec!["acp".to_string()]);
-        assert!(d.args_for_binary(std::path::Path::new("/usr/local/bin/codex-acp")).is_empty());
+        assert!(!d.binary_names.contains(&"codex"));
+        assert!(d
+            .args_for_binary(std::path::Path::new("/usr/local/bin/codex-acp"))
+            .is_empty());
     }
 }

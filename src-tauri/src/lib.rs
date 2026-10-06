@@ -4,6 +4,7 @@ mod commands;
 mod devserver;
 mod explainer;
 mod haven;
+mod history;
 mod state;
 
 use tauri::{Emitter, Manager};
@@ -72,6 +73,12 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            history::history_scan,
+            history::history_stats,
+            history::history_search,
+            history::history_read,
+            history::history_import,
+            history::history_open_original,
             commands::discover_environment,
             commands::list_backends,
             commands::get_config,

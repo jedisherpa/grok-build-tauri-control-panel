@@ -67,6 +67,20 @@ fn which(bin: &str) -> Option<PathBuf> {
     which::which(bin).ok()
 }
 
+/// Finder's PATH can omit nvm. Probe the same native CLI the adapter will run.
+fn vendor_cli(backend: Backend, cfg: &GrokConfig) -> Option<PathBuf> {
+    let (key, name) = match backend {
+        Backend::Claude => ("CLAUDE_CODE_EXECUTABLE", "claude"),
+        Backend::Codex => ("CODEX_PATH", "codex"),
+        Backend::Grok => return cfg.resolve_grok_binary().ok(),
+    };
+    cfg.backend_config(backend)
+        .and_then(|c| c.env.get(key))
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+        .or_else(|| which(name))
+}
+
 fn env_key(name: &str) -> bool {
     std::env::var(name).is_ok_and(|v| !v.trim().is_empty())
 }
@@ -142,7 +156,7 @@ pub async fn grok(cfg: &GrokConfig) -> BackendAuth {
         account: None,
         plan: None,
         message: String::new(),
-        login_command: auth_command(Backend::Grok, "login"),
+        login_command: configured_auth_command("grok", "login", cfg),
         in_app_login: true, // device-code flow, driven by the panel
     };
 
@@ -183,7 +197,7 @@ pub async fn grok(cfg: &GrokConfig) -> BackendAuth {
 
 pub async fn claude(cfg: &GrokConfig) -> BackendAuth {
     let (runnable, launch) = launchability(Backend::Claude, cfg);
-    let cli = which("claude");
+    let cli = vendor_cli(Backend::Claude, cfg);
     let base = BackendAuth {
         backend: "claude".into(),
         display_name: descriptor(Backend::Claude).display_name.into(),
@@ -195,7 +209,7 @@ pub async fn claude(cfg: &GrokConfig) -> BackendAuth {
         account: None,
         plan: None,
         message: String::new(),
-        login_command: auth_command(Backend::Claude, "login"),
+        login_command: configured_auth_command("claude", "login", cfg),
         in_app_login: false, // needs a TTY + browser: hand off to a terminal
     };
 
@@ -264,7 +278,7 @@ pub async fn claude(cfg: &GrokConfig) -> BackendAuth {
 
 pub async fn codex(cfg: &GrokConfig) -> BackendAuth {
     let (runnable, launch) = launchability(Backend::Codex, cfg);
-    let cli = which("codex");
+    let cli = vendor_cli(Backend::Codex, cfg);
     let base = BackendAuth {
         backend: "codex".into(),
         display_name: descriptor(Backend::Codex).display_name.into(),
@@ -276,7 +290,7 @@ pub async fn codex(cfg: &GrokConfig) -> BackendAuth {
         account: None,
         plan: None,
         message: String::new(),
-        login_command: auth_command(Backend::Codex, "login"),
+        login_command: configured_auth_command("codex", "login", cfg),
         in_app_login: false,
     };
 
@@ -369,9 +383,35 @@ pub fn logout_command(backend: &str) -> Option<String> {
     auth_command(Backend::from_key(backend)?, "logout")
 }
 
+/// Login/logout uses the configured native executable, matching status and ACP.
+pub fn configured_auth_command(backend: &str, verb: &str, cfg: &GrokConfig) -> Option<String> {
+    let b = Backend::from_key(backend)?;
+    if let Some(cli) = vendor_cli(b, cfg) {
+        let path = cli.to_string_lossy().replace('\'', "'\\''");
+        let sub = if b == Backend::Claude { format!("auth {verb}") } else { verb.into() };
+        return Some(format!("'{path}' {sub}"));
+    }
+    auth_command(b, verb)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configured_cli_is_used_for_status_and_login() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("native cli's binary");
+        std::fs::write(&path, "fixture").unwrap();
+        let mut cfg = GrokConfig::default();
+        let mut backend = grok_config::backends::BackendConfig::default();
+        backend.env.insert("CLAUDE_CODE_EXECUTABLE".into(), path.to_string_lossy().into());
+        cfg.backends.insert("claude".into(), backend);
+        assert_eq!(vendor_cli(Backend::Claude, &cfg), Some(path));
+        let command = configured_auth_command("claude", "login", &cfg).unwrap();
+        assert!(command.ends_with("' auth login"));
+        assert!(command.contains("'\\''"));
+    }
 
     #[test]
     fn auth_commands_cover_every_backend() {

@@ -550,6 +550,7 @@ function activateView(name) {
   const view = $(`view-${name}`);
   if (view) view.classList.add("active");
   // Per-view refresh hooks: data views load themselves on entry.
+  if (name === "history" && window.BombHistory) window.BombHistory.refresh();
   if (name === "worktrees") refreshWorktrees();
   if (name === "mcp") refreshMcpView();
   if (name === "memory") refreshMemoryView();
@@ -896,6 +897,7 @@ function renderTranscript() {
   const root = rootEl;
   const sid = state.selectedSession;
   if (!sid) {
+    if ($("technical-transcript")) $("technical-transcript").innerHTML = "";
     root.innerHTML = `<div class="welcome">
 <div class="welcome-hero">
   ${bombHtml("ready", "xl")}
@@ -904,7 +906,7 @@ function renderTranscript() {
   ╚══════════════════════════════════════╝</pre>
 </div>
 <p>Select a thread or start a new ACP session.</p>
-<p class="muted">Center column mirrors the live agent terminal stream.</p>
+<p class="muted">Conversation and explanations appear here; tool details stay to the side.</p>
 </div>`;
     $("composer-session").textContent = "no session";
     $("composer-model").textContent = "";
@@ -924,13 +926,14 @@ function renderTranscript() {
     (e) => state.showAcpLines || e.role !== "term"
   );
   if (!entries.length) {
+    if ($("technical-transcript")) $("technical-transcript").innerHTML = "";
     root.innerHTML = `<div class="welcome">
 <div class="welcome-hero">
   ${bombHtml("ready", "lg")}
   <pre class="banner">session ${escapeHtml(shortId(sid))}</pre>
 </div>
 <p class="muted">${escapeHtml(sess?.cwd || "")}</p>
-<p>Connected. Messages, tools, thoughts, and ACP lines stream here like a terminal.</p>
+<p>Connected. Your conversation and decisions appear here. Tool details stay to the side.</p>
 </div>`;
     updateBombChrome();
     return;
@@ -939,9 +942,7 @@ function renderTranscript() {
   // Terminal-style continuous log (mirrors CLI, not just chat bubbles).
   // Live turn status lives in the turn dock below — no in-transcript
   // duplicate bar (the old sticky LIVE card).
-  root.innerHTML =
-    entries
-      .map((e, idx) => {
+  const blocks = entries.map((e, idx) => {
         const role = e.role || "system";
         // Agent speech is labeled by which agent is talking, not a fixed "grok".
         const label = role === "agent" ? backendName : termPrefix(role);
@@ -1033,9 +1034,16 @@ function renderTranscript() {
   <div class="t-role"><span class="t-ts">${escapeHtml(shortTime(e.at || ""))}</span>${bombHtml(roleBombMood(role), "xs")}<span>${label}</span>${e.streaming ? '<span class="stream-caret" aria-hidden="true"></span>' : ""}${pin}</div>
   <div class="t-body">${body}</div>
 </div>`;
-      })
-      .join("");
-  root.querySelectorAll(".term-toggle").forEach((btn) => {
+      });
+  const technicalRoles = new Set(["tool", "term", "thought"]);
+  root.innerHTML = blocks.filter((_, i) => !technicalRoles.has(entries[i].role)).join("") || `<div class="empty-hint">The agent is working. Follow the explanation above; tool details are on the right.</div>`;
+  const technical = $("technical-transcript");
+  if (technical) {
+    const followTools = isNearBottom(technical);
+    technical.innerHTML = blocks.filter((_, i) => technicalRoles.has(entries[i].role)).join("") || `<div class="empty-hint">No tool activity in this thread.</div>`;
+    if (followTools || switchedSession) technical.scrollTop = technical.scrollHeight;
+  }
+  document.querySelectorAll("#transcript .term-toggle, #technical-transcript .term-toggle").forEach((btn) => {
     btn.onclick = (ev) => {
       ev.stopPropagation();
       const entry = entries[Number(btn.dataset.idx)];

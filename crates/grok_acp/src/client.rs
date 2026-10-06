@@ -728,6 +728,7 @@ impl AcpClient {
             }
             Err(e) => return Err(e),
         };
+        self.apply_advertised_model(&result, model).await?;
         self.capture_modes(&result).await;
         Ok(result
             .get("sessionId")
@@ -754,6 +755,7 @@ impl AcpClient {
         let result = self
             .request_timeout("session/resume", Some(params))
             .await?;
+        self.apply_advertised_model(&result, model).await?;
         self.capture_modes(&result).await;
         Ok(result
             .get("sessionId")
@@ -807,6 +809,7 @@ impl AcpClient {
             .map(|s| s.to_string())
             .unwrap_or_else(|| Uuid::new_v4().to_string());
 
+        self.apply_advertised_model(&result, model.as_deref()).await?;
         self.capture_modes(&result).await;
         *self.session_id.write().await = Some(sid.clone());
         info!(%sid, "ACP session/new complete");
@@ -817,6 +820,30 @@ impl AcpClient {
             bus.emit_status(self.control_session_id, SessionStatus::Idle)
                 .await;
         }
+        Ok(())
+    }
+
+    /// Current adapters advertise model configuration after creating a session;
+    /// they can ignore the legacy `model` field in session/new/load/resume.
+    async fn apply_advertised_model(&self, result: &Value, model: Option<&str>) -> Result<()> {
+        let Some(model) = model else { return Ok(()); };
+        let Some(options) = result.get("configOptions").and_then(Value::as_array) else {
+            return Ok(());
+        };
+        let Some(option) = options.iter().find(|o| {
+            o.get("id").and_then(Value::as_str) == Some("model")
+                || o.get("category").and_then(Value::as_str) == Some("model")
+        }) else { return Ok(()); };
+        if option.get("currentValue").and_then(Value::as_str) == Some(model) {
+            return Ok(());
+        }
+        let sid = result.get("sessionId").and_then(Value::as_str)
+            .ok_or_else(|| AcpError::Protocol("model configuration has no session ID".into()))?;
+        self.request_timeout("session/set_config_option", Some(json!({
+            "sessionId": sid,
+            "configId": option.get("id").and_then(Value::as_str).unwrap_or("model"),
+            "value": model,
+        }))).await?;
         Ok(())
     }
 
@@ -1673,8 +1700,6 @@ impl AcpClient {
                                 .unwrap_or(m),
                             if m.contains("create") {
                                 ToolCallStatus::Running
-                            } else if m.contains("wait") {
-                                ToolCallStatus::Completed
                             } else {
                                 ToolCallStatus::Completed
                             },

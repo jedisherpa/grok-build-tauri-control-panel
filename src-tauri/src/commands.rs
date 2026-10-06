@@ -145,12 +145,10 @@ pub async fn backend_auth_status(
 /// so we cannot run them headless the way we drive grok's device-code flow.
 /// The panel polls `backend_auth_status` afterwards to notice the result.
 #[tauri::command]
-pub async fn open_backend_login(backend: String, logout: bool) -> Result<(), String> {
-    let cmd = if logout {
-        grok_cli_wrapper::backend_auth::logout_command(&backend)
-    } else {
-        grok_cli_wrapper::backend_auth::login_command(&backend)
-    }
+pub async fn open_backend_login(state: State<'_, AppState>, backend: String, logout: bool) -> Result<(), String> {
+    let cfg = state.config.read().await.clone();
+    let cmd = grok_cli_wrapper::backend_auth::configured_auth_command(
+        &backend, if logout { "logout" } else { "login" }, &cfg)
     .ok_or_else(|| format!("no way to sign in to {backend}: install its CLI, or npx"))?;
 
     spawn_in_terminal(&cmd).map_err(|e| format!("could not open a terminal: {e}"))
@@ -175,7 +173,7 @@ fn spawn_in_terminal(cmd: &str) -> std::io::Result<()> {
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()?;
-        return Ok(());
+        Ok(())
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -719,6 +717,7 @@ pub async fn get_session_transcript(
 }
 
 #[tauri::command]
+#[allow(clippy::too_many_arguments)] // Existing desktop IPC contract.
 pub async fn send_prompt(
     state: State<'_, AppState>,
     id: String,
@@ -881,11 +880,13 @@ async fn resume_saved_session(
         ));
     }
 
-    let mut opts = SpawnOptions::default();
-    opts.mode = if rec.mode.eq_ignore_ascii_case("headless") {
-        grok_control_core::AgentMode::Headless
-    } else {
-        grok_control_core::AgentMode::Acp
+    let mut opts = SpawnOptions {
+        mode: if rec.mode.eq_ignore_ascii_case("headless") {
+            grok_control_core::AgentMode::Headless
+        } else {
+            grok_control_core::AgentMode::Acp
+        },
+        ..Default::default()
     };
     let recorded_backend = extract_backend_from_meta(&rec.metadata_json);
     opts.backend = override_backend.unwrap_or(recorded_backend);
@@ -1016,7 +1017,7 @@ fn emit_thread_label(state: &AppState, id: Uuid, label: &str) {
 pub(crate) fn project_memory_scope(project_root: &str) -> String {
     use std::hash::{Hash, Hasher};
     let clean = project_root.trim_end_matches('/');
-    let base = clean.split('/').filter(|s| !s.is_empty()).last().unwrap_or("project");
+    let base = clean.split('/').rfind(|s| !s.is_empty()).unwrap_or("project");
     let mut h = std::collections::hash_map::DefaultHasher::new();
     clean.hash(&mut h);
     format!("{base}-{:06x}", h.finish() & 0xff_ffff)

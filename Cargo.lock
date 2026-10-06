@@ -1281,7 +1281,7 @@ dependencies = [
 
 [[package]]
 name = "grok-build-control-panel"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1315,7 +1315,7 @@ dependencies = [
 
 [[package]]
 name = "grok_acp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1335,7 +1335,7 @@ dependencies = [
 
 [[package]]
 name = "grok_cli_wrapper"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "directories",
@@ -1353,7 +1353,7 @@ dependencies = [
 
 [[package]]
 name = "grok_config"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "directories",
@@ -1370,7 +1370,7 @@ dependencies = [
 
 [[package]]
 name = "grok_control_core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1391,7 +1391,7 @@ dependencies = [
 
 [[package]]
 name = "grok_diff"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "hex",
@@ -1407,7 +1407,7 @@ dependencies = [
 
 [[package]]
 name = "grok_events"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "serde",
@@ -1420,7 +1420,7 @@ dependencies = [
 
 [[package]]
 name = "grok_extensions"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "grok_cli_wrapper",
@@ -1436,7 +1436,7 @@ dependencies = [
 
 [[package]]
 name = "grok_mcp"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "grok_cli_wrapper",
@@ -1456,7 +1456,7 @@ dependencies = [
 
 [[package]]
 name = "grok_memory"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "grok_events",
@@ -1471,7 +1471,7 @@ dependencies = [
 
 [[package]]
 name = "grok_permissions"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "grok_config",
  "regex",
@@ -1483,7 +1483,7 @@ dependencies = [
 
 [[package]]
 name = "grok_persistence"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "rusqlite",
@@ -1497,7 +1497,7 @@ dependencies = [
 
 [[package]]
 name = "grok_scheduler"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "cron",
@@ -1512,7 +1512,7 @@ dependencies = [
 
 [[package]]
 name = "grok_worktree"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "anyhow",
  "chrono",

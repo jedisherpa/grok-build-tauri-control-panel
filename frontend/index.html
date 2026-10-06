@@ -23,6 +23,7 @@
           <button class="nav-item active" data-view="chat" title="Session">
             <span class="nav-icon">⌘</span> Session
           </button>
+          <button class="nav-item" data-view="history" title="History"><span class="nav-icon">◷</span> History</button>
           <button class="nav-item" data-view="mcp" title="MCP">
             <span class="nav-icon">⬡</span> MCP
           </button>
@@ -115,7 +116,37 @@
         </header>
 
         <!-- views -->
+        <section id="view-history" class="view">
+          <header class="history-header"><h1>History</h1><p>Search your conversations across tools. Original histories stay in their source apps.</p>
+            <div class="history-actions"><button id="history-scan" class="btn">Scan local histories</button><button id="history-import" class="btn ghost">Import ChatGPT / Claude export</button></div>
+            <div id="history-status" role="status">Loading library…</div>
+            <div class="history-search"><input id="history-query" type="search" placeholder="Search conversations and message text" aria-label="Search history" /><select id="history-source" aria-label="History source"><option value="">All sources</option><option value="codex">Codex</option><option value="claude_code">Claude Code</option><option value="grok">Grok</option><option value="chatgpt">ChatGPT</option><option value="claude">Claude app</option><option value="terminal">Terminal commands</option></select><label class="history-subagents"><input id="history-subagents" type="checkbox" /> Include subagents</label></div>
+          </header>
+          <div class="history-workspace"><div class="history-list-panel"><div id="history-list" class="history-list"></div><div class="history-pagination"><button id="history-prev" class="btn ghost">Previous</button><span id="history-count"></span><button id="history-next" class="btn ghost">Next</button></div></div>
+          <article class="history-reader"><div id="history-reader-head"><p>Select a conversation to read it.</p><p class="muted">Imported conversations are reference material. They carry no execution permissions or approval.</p></div><div id="history-messages"></div><button id="history-more" class="btn ghost" hidden>Load more messages</button></article></div>
+        </section>
         <section id="view-chat" class="view active">
+        <div class="narrative-panel">
+          <div class="section-label explain-header">
+            <span>What's happening</span><span class="narrator-label">AI activity explanation</span>
+            <span class="explain-header-actions">
+              <button id="explain-config" class="explain-gear" type="button"
+                title="Choose which provider/model narrates">⚙</button>
+              <button id="explain-toggle" class="explain-toggle on" type="button"
+                title="Toggle the plain-English narrator (uses a small side LLM call)">on</button>
+            </span>
+          </div>
+          <div id="explain-config-row" class="explain-config-row" style="display:none">
+            <select id="explain-backend" title="Narrator provider"></select>
+            <select id="explain-model" title="Narrator model"></select>
+            <button id="explain-apply" class="btn" type="button">Set</button>
+          </div>
+          <div id="explain-feed" class="explain-feed">
+            <div class="empty-hint">Select a thread and send a prompt — I'll explain what the agent is doing in plain English.</div>
+          </div>
+        </div>
+
+          <div class="conversation-label">Conversation &amp; decisions</div>
           <div id="transcript" class="transcript" aria-live="polite">
             <div class="welcome">
               <div class="welcome-hero">
@@ -447,24 +478,10 @@
           </div>
         </div>
 
-        <div class="right-block grow">
-          <div class="section-label explain-header">
-            <span>What's happening</span>
-            <span class="explain-header-actions">
-              <button id="explain-config" class="explain-gear" type="button"
-                title="Choose which provider/model narrates">⚙</button>
-              <button id="explain-toggle" class="explain-toggle on" type="button"
-                title="Toggle the plain-English narrator (uses a small side LLM call)">on</button>
-            </span>
-          </div>
-          <div id="explain-config-row" class="explain-config-row" style="display:none">
-            <select id="explain-backend" title="Narrator provider"></select>
-            <select id="explain-model" title="Narrator model"></select>
-            <button id="explain-apply" class="btn" type="button">Set</button>
-          </div>
-          <div id="explain-feed" class="explain-feed">
-            <div class="empty-hint">Select a thread and send a prompt — I'll explain what the agent is doing in plain English.</div>
-          </div>
+
+        <div class="right-block technical-panel">
+          <div class="section-label">Tool details</div>
+          <div id="technical-transcript" class="transcript technical-transcript" aria-label="Tool details"></div>
         </div>
 
         <div class="right-block">
@@ -517,5 +534,6 @@
     </div>
     <script src="presence.js"></script>
     <script src="app.js"></script>
+    <script src="history.js"></script>
   </body>
 </html>
