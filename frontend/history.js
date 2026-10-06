@@ -89,6 +89,7 @@
       if (P) state.presenceBySession.set(result.id, P.emptyPresence());
       await refreshSessions(); await selectSession(result.id);
       await loadTranscriptFromDb(result.id, { force: true }); renderTranscript();
+      if (P) commitPresence(result.id, P.emptyPresence());
       appendTranscript(result.id, 'system', result.brain_mode === 'full_brain'
         ? 'Native session loaded — original conversation and engine context restored. No prompt sent.'
         : 'New engine session — native loading was unavailable; the complete conversation reference is retained. No prompt sent.');
