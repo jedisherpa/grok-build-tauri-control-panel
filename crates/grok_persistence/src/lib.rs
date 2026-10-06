@@ -23,6 +23,8 @@ pub enum PersistenceError {
     Io(#[from] std::io::Error),
     #[error("not found: {0}")]
     NotFound(String),
+    #[error("unsupported conversation role: {0}")]
+    InvalidConversationRole(String),
 }
 
 pub type Result<T> = std::result::Result<T, PersistenceError>;
@@ -362,6 +364,31 @@ impl Persistence {
         Ok(seq)
     }
 
+    /// Import visible conversation messages atomically. Historical tool grants
+    /// and approval records are deliberately not valid input roles.
+    pub fn import_conversation(&self, session_id: Uuid, entries: &[TranscriptEntry]) -> Result<()> {
+        let _g = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let mut conn = self.conn()?;
+        if !self.ensure_session_row(&conn, session_id)? {
+            return Err(PersistenceError::NotFound(session_id.to_string()));
+        }
+        let tx = conn.transaction()?;
+        let mut seq: i64 = tx.query_row("SELECT COALESCE(MAX(seq),0) FROM transcripts WHERE session_id=?1",
+            [session_id.to_string()], |r| r.get(0))?;
+        for entry in entries {
+            let kind = match entry.role.as_str() {
+                "user" => "prompt",
+                "assistant" | "agent" => "agent",
+                _ => return Err(PersistenceError::InvalidConversationRole(entry.role.clone())),
+            };
+            seq += 1;
+            tx.execute("INSERT INTO transcripts (session_id,seq,kind,payload,at) VALUES (?1,?2,?3,?4,?5)",
+                params![session_id.to_string(),seq,kind,entry.body,entry.at])?;
+        }
+        tx.commit()?;
+        Ok(())
+    }
+
     /// Append a streamed chunk, concatenating onto the previous row when it
     /// has the same kind and arrived within `window_secs`. Keeps token-level
     /// streaming deltas from becoming one DB row (and one UI line) each.
@@ -550,6 +577,19 @@ fn parse_dt(s: &str) -> DateTime<Utc> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn conversation_import_is_complete_and_never_imports_approval_authority() {
+        let dir = tempdir().unwrap(); let db = Persistence::open(dir.path().join("m.db")).unwrap();
+        let id = Uuid::new_v4();
+        let entries = vec![TranscriptEntry { role: "user".into(), body: "prior request".into(), at: Utc::now().to_rfc3339(), seq: 0 },
+            TranscriptEntry { role: "assistant".into(), body: "prior reply".into(), at: Utc::now().to_rfc3339(), seq: 1 }];
+        db.import_conversation(id, &entries).unwrap();
+        assert_eq!(db.transcript_entries(id).unwrap().len(), 2);
+        let mut forbidden = entries.clone(); forbidden[1].role = "approval".into();
+        assert!(db.import_conversation(id, &forbidden).is_err());
+        assert_eq!(db.transcript_entries(id).unwrap().len(), 2, "failed import must roll back atomically");
+    }
 
     #[test]
     fn streamed_chunks_merge_into_one_row() {

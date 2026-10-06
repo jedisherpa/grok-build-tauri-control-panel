@@ -2083,7 +2083,7 @@ pub async fn shutdown_all(state: State<'_, AppState>) -> Result<(), String> {
     Ok(())
 }
 
-async fn persist_session(state: &AppState, id: Uuid) {
+pub(crate) async fn persist_session(state: &AppState, id: Uuid) {
     if let Ok(snap) = state.registry.get_snapshot(id) {
         let mode = match snap.metadata.mode {
             grok_control_core::AgentMode::Acp => "acp",

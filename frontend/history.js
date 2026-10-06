@@ -86,7 +86,12 @@
     try {
       const result = await invoke('history_continue_native', { id: t.id });
       setApprovalMode('plan');
+      if (P) state.presenceBySession.set(result.id, P.emptyPresence());
       await refreshSessions(); await selectSession(result.id);
+      await loadTranscriptFromDb(result.id, { force: true }); renderTranscript();
+      appendTranscript(result.id, 'system', result.brain_mode === 'full_brain'
+        ? 'Native session loaded — original conversation and engine context restored. No prompt sent.'
+        : 'New engine session — native loading was unavailable; the complete conversation reference is retained. No prompt sent.');
       $("prompt").value = '';
       // The existing resume ladder reports full native continuity or an honest
       // fresh-session fallback, retaining the complete reference file either way.

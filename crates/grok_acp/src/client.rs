@@ -218,6 +218,9 @@ pub struct AcpClient {
     pending_permissions: Mutex<HashMap<String, PendingPermission>>,
     /// Set during deliberate shutdown so process death isn't reported as failure.
     shutting_down: std::sync::atomic::AtomicBool,
+    /// Native load replay is already in durable conversation history. Keep it
+    /// out of the live stream until the next explicitly sent prompt.
+    historical_replay: std::sync::atomic::AtomicBool,
     /// Plan requested but the agent has no native plan mode: we set its most
     /// restrictive mode and inject planning instructions into each prompt.
     plan_emulation: std::sync::atomic::AtomicBool,
@@ -365,6 +368,7 @@ impl AcpClient {
             approval_mode: RwLock::new(opts.approval_mode),
             pending_permissions: Mutex::new(HashMap::new()),
             shutting_down: std::sync::atomic::AtomicBool::new(false),
+            historical_replay: std::sync::atomic::AtomicBool::new(false),
             plan_emulation: std::sync::atomic::AtomicBool::new(false),
             deny_patterns: opts.deny_patterns.clone(),
             allow_patterns: opts.allow_patterns.clone(),
@@ -424,6 +428,7 @@ impl AcpClient {
             approval_mode: RwLock::new(ApprovalMode::Ask),
             pending_permissions: Mutex::new(HashMap::new()),
             shutting_down: std::sync::atomic::AtomicBool::new(false),
+            historical_replay: std::sync::atomic::AtomicBool::new(false),
             plan_emulation: std::sync::atomic::AtomicBool::new(false),
             deny_patterns: Vec::new(),
             allow_patterns: Vec::new(),
@@ -708,6 +713,7 @@ impl AcpClient {
         if let Some(m) = model {
             params["model"] = json!(m);
         }
+        self.historical_replay.store(true, std::sync::atomic::Ordering::Release);
         let result = match self
             .request_timeout("session/load", Some(params.clone()))
             .await
@@ -728,7 +734,7 @@ impl AcpClient {
             }
             Err(e) => return Err(e),
         };
-        self.apply_advertised_model(&result, model).await?;
+        self.apply_advertised_model(&result, model, Some(session_id)).await?;
         self.capture_modes(&result).await;
         Ok(result
             .get("sessionId")
@@ -755,7 +761,7 @@ impl AcpClient {
         let result = self
             .request_timeout("session/resume", Some(params))
             .await?;
-        self.apply_advertised_model(&result, model).await?;
+        self.apply_advertised_model(&result, model, Some(session_id)).await?;
         self.capture_modes(&result).await;
         Ok(result
             .get("sessionId")
@@ -809,7 +815,7 @@ impl AcpClient {
             .map(|s| s.to_string())
             .unwrap_or_else(|| Uuid::new_v4().to_string());
 
-        self.apply_advertised_model(&result, model.as_deref()).await?;
+        self.apply_advertised_model(&result, model.as_deref(), None).await?;
         self.capture_modes(&result).await;
         *self.session_id.write().await = Some(sid.clone());
         info!(%sid, "ACP session/new complete");
@@ -825,7 +831,7 @@ impl AcpClient {
 
     /// Current adapters advertise model configuration after creating a session;
     /// they can ignore the legacy `model` field in session/new/load/resume.
-    async fn apply_advertised_model(&self, result: &Value, model: Option<&str>) -> Result<()> {
+    async fn apply_advertised_model(&self, result: &Value, model: Option<&str>, known_session_id: Option<&str>) -> Result<()> {
         let Some(model) = model else { return Ok(()); };
         let Some(options) = result.get("configOptions").and_then(Value::as_array) else {
             return Ok(());
@@ -837,7 +843,7 @@ impl AcpClient {
         if option.get("currentValue").and_then(Value::as_str) == Some(model) {
             return Ok(());
         }
-        let sid = result.get("sessionId").and_then(Value::as_str)
+        let sid = result.get("sessionId").and_then(Value::as_str).or(known_session_id)
             .ok_or_else(|| AcpError::Protocol("model configuration has no session ID".into()))?;
         self.request_timeout("session/set_config_option", Some(json!({
             "sessionId": sid,
@@ -979,6 +985,7 @@ impl AcpClient {
         if prompt.trim().is_empty() {
             return Err(AcpError::Protocol("empty prompt".into()));
         }
+        self.historical_replay.store(false, std::sync::atomic::Ordering::Release);
 
         // History-only: prepend transcript pack once.
         let mut text = prompt.to_string();
@@ -1869,6 +1876,9 @@ impl AcpClient {
 
         match notif.method.as_str() {
             "session/update" | "session/updateNotification" => {
+                if self.historical_replay.load(std::sync::atomic::Ordering::Acquire) {
+                    return;
+                }
                 self.map_session_update(bus, sid, &params).await;
             }
             m if m.contains("tool") => {
@@ -2659,6 +2669,25 @@ mod tests {
         let c = AcpClient::mock_for_tests("sess-1", None);
         let err = c.send_prompt("   ").await.unwrap_err();
         assert!(matches!(err, AcpError::Protocol(_)));
+    }
+
+    #[tokio::test]
+    async fn native_history_is_not_a_live_reply_and_next_prompt_still_streams() {
+        let bus = Arc::new(EventBus::new());
+        let mut events = bus.subscribe();
+        let c = AcpClient::mock_for_tests("old-session", Some(bus));
+        c.historical_replay.store(true, std::sync::atomic::Ordering::Release);
+        let notification = || JsonRpcNotification {
+            jsonrpc: "2.0".into(), method: "session/update".into(),
+            params: Some(json!({"sessionId":"old-session","update":{
+                "sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"reply"}}})),
+        };
+        c.handle_notification(notification()).await;
+        assert!(events.try_recv().is_err(), "old replay must not create live reply activity");
+        c.send_prompt("next task").await.unwrap();
+        while events.try_recv().is_ok() {}
+        c.handle_notification(notification()).await;
+        assert!(matches!(events.try_recv().unwrap(), ControlEvent::AgentMessage { text, .. } if text == "reply"));
     }
 
     #[test]

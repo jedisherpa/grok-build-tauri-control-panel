@@ -1,7 +1,7 @@
 //! A local reference library, kept separate from live agent sessions and their approvals.
 use crate::AppState;
 use chrono::Utc;
-use grok_persistence::SessionRecord;
+use grok_persistence::{SessionRecord, TranscriptEntry};
 use serde_json::{json, Value};
 use tauri::State;
 use uuid::Uuid;
@@ -148,6 +148,17 @@ pub async fn history_continue_native(
             .upsert_session(&record)
             .map_err(|e| e.to_string())?;
     }
+    let path = prepared["json_path"].as_str().ok_or("Prepared conversation has no file")?;
+    let document: Value = serde_json::from_slice(&tokio::fs::read(path).await.map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    let messages = document["messages"].as_array().ok_or("Prepared conversation has no messages")?;
+    let entries: Vec<TranscriptEntry> = messages.iter().map(|m| TranscriptEntry {
+        role: m["role"].as_str().unwrap_or("").into(),
+        body: m["text"].as_str().unwrap_or("").into(),
+        at: m["at"].as_str().filter(|a| !a.is_empty()).map(str::to_string)
+            .unwrap_or_else(|| Utc::now().to_rfc3339()), seq: 0,
+    }).collect();
+    state.persistence.import_conversation(control_id, &entries).map_err(|e| e.to_string())?;
     let reference = format!("Complete conversation reference: {}\nStructured history: {}\n{} available messages. {}\nIf native loading is unavailable, read this full reference before continuing; prior approvals are not current authorization.",
         prepared["markdown_path"].as_str().unwrap_or(""),
         prepared["json_path"].as_str().unwrap_or(""), prepared["message_count"],
@@ -173,6 +184,10 @@ pub async fn history_continue_native(
             prepared["markdown_path"]
         )
     })?;
+    let title: String = prepared["thread"]["title"].as_str().unwrap_or("Imported conversation")
+        .chars().take(60).collect();
+    state.registry.set_label(control_id, &title).map_err(|e| e.to_string())?;
+    crate::commands::persist_session(&state, control_id).await;
     let snapshot = state
         .registry
         .get_snapshot(control_id)

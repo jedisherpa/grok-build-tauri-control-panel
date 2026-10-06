@@ -262,3 +262,9 @@ cargo clippy --workspace --all-targets -- -D warnings → PASS
 - Add explicit native Codex/Claude continuation by valid main-session UUID and original project, with Plan mode, no imported MCP grants, and no automatic prompt. Preserve actual load/resume/fresh fallback reporting.
 - Keep full-file reference breadcrumbs across the rolling transcript context window.
 - Validation: cargo check and strict all-target Clippy passed; workspace tests passed (90); Python migration tests passed (16). Native adapter and installed-app receipts are recorded in the setup output report.
+
+### Installed continuation audit / repair
+
+- Loading history replay had appeared as live reply activity. Import visible user/agent messages atomically before loading, suppress protocol replay until an explicit prompt, and force the saved conversation view to settle idle. Imported approval/tool roles are rejected transactionally.
+- Some session/load and session/resume responses omit sessionId; model configuration now uses the already-known native ID. This prevents a successful native load from being misreported as a fresh fallback during model selection.
+- Native loaded threads retain their conversation title. Strict check/Clippy and 92 workspace tests pass, including replay/live-stream separation and atomic rejection of historical approval records.
