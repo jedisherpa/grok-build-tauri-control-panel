@@ -6,7 +6,7 @@
   function bounded(rect, bounds, collapsed = false) {
     const width = Math.max(160, bounds.width), height = Math.max(120, bounds.height);
     const w = Math.min(width - 36, Math.max(148, Number(rect.width) || 190));
-    const h = Math.min(height - 68, Math.max(collapsed ? 34 : 76, Number(rect.height) || 160));
+    const h = Math.min(height - 68, Math.max(collapsed ? 34 : 56, Number(rect.height) || 160));
     return { x: Math.min(width - w - 24, Math.max(12, Number(rect.x) || 12)), y: Math.min(height - h - 12, Math.max(48, Number(rect.y) || 48)), width: w, height: h };
   }
   function attach({ background, scene, document: doc = global.document }) {
@@ -30,10 +30,10 @@
       mask();
     }
     function expand(p, expanded, persist = true) {
-      if (p.expanded === expanded) return;
+      if (p.expanded === expanded) { p.body.hidden = !expanded; if (expanded && p.rect.height <= 34) { p.rect.height = Math.max(56, p.expandedHeight || 140); place(p); } return; }
       if (!expanded && p.rect.height > 34) p.expandedHeight = p.rect.height;
       p.expanded = expanded; p.body.hidden = !expanded;
-      p.rect.height = expanded ? Math.max(76, p.expandedHeight || 160) : 34;
+      p.rect.height = expanded ? Math.max(56, p.expandedHeight || 160) : 34;
       p.element.dataset.expanded = String(expanded);
       if (!p.nativeToggle) { p.fold.setAttribute("aria-expanded", String(expanded)); p.fold.textContent = expanded ? "−" : "+"; }
       place(p); if (persist) save();
@@ -80,11 +80,14 @@
       ["view", "View", "#view-options", "#view-toggle", 34], ["log", "Log", "#event-feed", "#log-toggle", 34],
       ["preview", "Live preview", ".dev-dock", null, 144],
     ];
-    const extra = Math.max(0, available - 96 - 68 - 5 * 76); let y = 64;
+    specs.forEach(spec => { if (spec[4] === 34 && doc.querySelector(spec[3])?.getAttribute("aria-expanded") === "true") spec[4] = 140; });
+    const collapsedCount = specs.filter(spec => spec[4] === 34).length;
+    const weight = specs.reduce((sum, spec) => sum + (spec[4] === 34 ? 0 : spec[4] - 56), 0);
+    const extra = Math.max(0, available - 96 - collapsedCount * 34 - (7 - collapsedCount) * 56); let y = 64;
     specs.forEach(([id, title, selector, toggleId, h], i) => {
       const child = right?.querySelector(selector), content = child?.closest(".right-block") || child;
-      const height = h === 34 ? 34 : 76 + Math.min(266, extra) * (h - 76) / 266;
-      cube(id, title, content, { x: win.innerWidth - 254 + (i % 2 ? 8 : 0), y, width: 214, height }, toggleId ? doc.querySelector(toggleId) : null, id === "now" ? [doc.getElementById("btn-refresh"), doc.getElementById("activity-bomb")] : []);
+      const height = h === 34 ? 34 : 56 + Math.min(weight, extra) * (h - 56) / weight;
+      cube(id, title, content, { x: win.innerWidth - 254 + (i % 2 ? 8 : 0), y, width: 214, height }, toggleId ? doc.querySelector(toggleId) : null, id === "now" ? [doc.getElementById("now-elapsed"), doc.getElementById("btn-refresh"), doc.getElementById("activity-bomb")] : []);
       y += height + 16;
     });
     const reset = doc.createElement("button"); reset.type = "button"; reset.className = "spatial-cubes-reset"; reset.textContent = "Reset cubes"; reset.title = "Restore the small cubes around your working surface"; layer.appendChild(reset);

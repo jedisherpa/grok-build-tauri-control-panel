@@ -33,3 +33,5 @@
 .spatial-cubes-reset { position: absolute; pointer-events: auto; left: 12px; bottom: 4px; border: 0; background: #101d30; color: var(--muted); font: 10px/1.4 var(--ui); cursor: pointer; }
 @media (max-width:1100px) { .has-panel-cubes #app { grid-template-columns: 214px minmax(0, 1fr) 246px; } }
 @media (prefers-reduced-motion:no-preference) { .spatial-panel-cube::before, .spatial-panel-cube::after { transition: background .15s; } .spatial-panel-cube:focus-within::before, .spatial-panel-cube:focus-within::after { background: #213b3c77; } }
+
+.spatial-panel-cube-body .threads-section > .section-label > span:first-child { display: none; }
