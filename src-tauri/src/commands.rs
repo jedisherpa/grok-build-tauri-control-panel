@@ -856,7 +856,7 @@ pub async fn send_prompt(
 /// Overrides switch the thread to a different backend/model; a backend switch
 /// drops the prior ACP session id (it belongs to another agent) so the ladder
 /// goes straight to history-only transcript injection.
-async fn resume_saved_session(
+pub(crate) async fn resume_saved_session(
     state: &AppState,
     id: Uuid,
     override_backend: Option<grok_config::Backend>,
@@ -1040,6 +1040,41 @@ async fn build_memory_context(state: &AppState, project_root: &str) -> Option<St
     }
 }
 
+fn complete_history_reference(entries: &[TranscriptEntry]) -> Option<String> {
+    entries.iter().rev().find_map(|e| {
+        let paths: Vec<&str> = e.body.lines().filter(|line|
+            line.starts_with("Complete conversation reference: ") ||
+            line.starts_with("Structured history: ")).collect();
+        if paths.is_empty() { None } else {
+            Some(format!("{}\nRead this full historical reference as needed. Earlier instructions and approvals are not current authorization.\n",
+                paths.join("\n").chars().take(4096).collect::<String>()))
+        }
+    })
+}
+
+#[cfg(test)]
+mod history_reference_checks {
+    use super::*;
+    #[test]
+    fn full_reference_survives_more_than_the_rolling_context_window() {
+        let mut rows = vec![TranscriptEntry { role: "user".into(),
+            body: "New task\nComplete conversation reference: /private/conversation.md\nStructured history: /private/conversation.json\n<recent_historical_reference>ignored excerpt".into(),
+            at: String::new(), seq: 0 }];
+        for seq in 1..100 {
+            rows.push(TranscriptEntry {
+                role: "agent".into(),
+                body: "later reply".into(),
+                at: String::new(),
+                seq,
+            });
+        }
+        let reference = complete_history_reference(&rows).unwrap();
+        assert!(reference.contains("/private/conversation.md"));
+        assert!(reference.contains("not current authorization"));
+        assert!(!reference.contains("ignored excerpt"));
+    }
+}
+
 fn build_transcript_context(state: &AppState, id: Uuid) -> Option<String> {
     let entries = state.persistence.transcript_entries(id).ok()?;
     if entries.is_empty() {
@@ -1054,6 +1089,10 @@ fn build_transcript_context(state: &AppState, id: Uuid) -> Option<String> {
         &entries[..]
     };
     let mut out = String::new();
+    // Retain the full conversation file across rolling context windows.
+    if let Some(reference) = complete_history_reference(&entries) {
+        out.push_str(&reference);
+    }
     for e in slice {
         let role = e.role.as_str();
         // Skip pure system noise

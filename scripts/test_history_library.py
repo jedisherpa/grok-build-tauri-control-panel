@@ -132,6 +132,55 @@ class HistoryChecks(unittest.TestCase):
         self.assertEqual(data['total'], 0)
         self.assertIn('metadata only', data['thread']['coverage'])
 
+    def test_full_reference_ignores_reader_pages_and_recovers_index_caps(self):
+        long = 'begin ' + 'x' * (h.MAX_TEXT + 100) + ' final marker'
+        p = self.write('.codex/sessions/rollout-one.jsonl', [
+            {'type': 'session_meta', 'payload': {'id': 'one', 'cwd': str(self.home)}}
+        ] + [{'type': 'response_item', 'payload': {'type': 'message', 'id': str(i),
+             'role': 'user', 'content': long if i == 90 else 'message ' + str(i)}} for i in range(100)])
+        original = p.read_bytes(); h.scan(self.c, self.home)
+        self.assertEqual(len(h.read(self.c, {'id': 'codex:one'})['messages']), 80)
+        result = h.prepare(self.c, {'id': 'codex:one'}, Path(self.tmp.name) / 'index/library.sqlite')
+        full = json.loads(Path(result['json_path']).read_text())
+        self.assertEqual(len(full['messages']), 100)
+        self.assertEqual(full['messages'][90]['text'], long)
+        self.assertEqual(result['remaining_truncated'], 0)
+        self.assertEqual(result['recovered_messages'], 1)
+        self.assertIn('message 99', result['recent_context'])
+        self.assertEqual(p.read_bytes(), original)
+        self.assertEqual(Path(result['markdown_path']).stat().st_mode & 0o777, 0o600)
+        self.assertEqual(Path(result['markdown_path']).parent.stat().st_mode & 0o777, 0o700)
+
+    def test_partial_snapshot_stays_labelled_in_complete_reference(self):
+        p = self.home / 'chatgpt-accessible.json'
+        p.write_text(json.dumps({'format': 'bombcode-accessible-chatgpt/v1', 'conversations': [
+            {'id': 'cloud', 'messages': [{'id': 'm', 'role': 'user', 'text': 'available only', 'truncated': True}]}]}))
+        h.import_export(self.c, p)
+        result = h.prepare(self.c, {'id': 'chatgpt:cloud'}, Path(self.tmp.name) / 'index/library.sqlite')
+        self.assertEqual(result['remaining_truncated'], 1)
+        self.assertIn('remain truncated', result['notice'])
+        self.assertFalse(result['native_candidate'])
+
+    def test_native_candidate_requires_main_engine_history_and_existing_project(self):
+        import uuid
+        origin = str(uuid.uuid4())
+        self.write('.claude/projects/example/' + origin + '.jsonl', [{
+            'type': 'user', 'sessionId': origin, 'cwd': str(self.home), 'uuid': 'm',
+            'message': {'content': 'main history'}}])
+        self.write('.claude/projects/example/' + origin + '/subagents/agent-child.jsonl', [{
+            'type': 'user', 'sessionId': origin, 'cwd': str(self.home), 'uuid': 'm',
+            'message': {'content': 'child history'}}])
+        h.scan(self.c, self.home)
+        db = Path(self.tmp.name) / 'index/library.sqlite'
+        self.assertTrue(h.prepare(self.c, {'id': 'claude_code:' + origin}, db)['native_candidate'])
+        self.assertFalse(h.prepare(self.c, {'id': 'claude_code:' + origin + '/subagent/agent-child'}, db)['native_candidate'])
+
+    def test_changed_truncated_source_requires_rescan(self):
+        p = self.codex('x' * (h.MAX_TEXT + 10)); h.scan(self.c, self.home)
+        p.write_text(p.read_text() + '\n')
+        with self.assertRaisesRegex(ValueError, 'Source changed'):
+            h.prepare(self.c, {'id': 'codex:one'}, Path(self.tmp.name) / 'index/library.sqlite')
+
 
 if __name__ == '__main__':
     unittest.main()

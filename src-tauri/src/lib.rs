@@ -77,6 +77,8 @@ pub fn run() {
             history::history_stats,
             history::history_search,
             history::history_read,
+            history::history_prepare,
+            history::history_continue_native,
             history::history_import,
             history::history_open_original,
             commands::discover_environment,

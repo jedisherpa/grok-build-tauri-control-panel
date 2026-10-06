@@ -253,3 +253,12 @@ cargo clippy --workspace --all-targets -- -D warnings → PASS
 ```
 
 **MCP auditor consensus: ALL PASS — zero Critical/High remaining.**
+
+
+## Local continuation phase — 2026-10-06
+
+- Prioritize complete conversation text over preservation of an agent process.
+- Replace the first-page, 24k-only draft with full private Markdown/JSON references and recent context. Recover indexed text caps from unchanged sources; retain explicit partial-source notices.
+- Add explicit native Codex/Claude continuation by valid main-session UUID and original project, with Plan mode, no imported MCP grants, and no automatic prompt. Preserve actual load/resume/fresh fallback reporting.
+- Keep full-file reference breadcrumbs across the rolling transcript context window.
+- Validation: cargo check and strict all-target Clippy passed; workspace tests passed (90); Python migration tests passed (16). Native adapter and installed-app receipts are recorded in the setup output report.

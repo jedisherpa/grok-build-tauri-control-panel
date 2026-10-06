@@ -1,6 +1,6 @@
 # Local primary coding interface — 2026-10-06
 
-Bomb Code 0.1.1 keeps the existing Tauri ACP cockpit and adds a local History reference library. The central workspace presents the AI activity explanation above conversation and decisions; technical tool, terminal, and thought rows appear in the narrower right inspector. Approvals and the composer remain in the main workspace.
+Bomb Code 0.1.2 keeps the existing Tauri ACP cockpit and adds a local History reference library. The central workspace presents the AI activity explanation above conversation and decisions; technical tool, terminal, and thought rows appear in the narrower right inspector. Approvals and the composer remain in the main workspace.
 
 Grok runs its native `agent stdio` endpoint. Claude and Codex run their own coding engines through pinned ACP adapters, rather than being model providers inside the Grok engine. `CLAUDE_CODE_EXECUTABLE` and `CODEX_PATH` select the native executables; login status uses those same paths even when Finder omits nvm from PATH. Current adapters configure the selected model through `session/set_config_option` when advertised.
 
@@ -8,7 +8,9 @@ The History bridge embeds `scripts/history_library.py` and uses local Python 3 a
 
 `Import ChatGPT / Claude export` accepts recognized JSON exports or ZIPs containing `conversations.json`; archives are read without extracting paths. ChatGPT exports retain all branches, displayed by timestamp. Text excerpts are capped and labelled; binary attachments, tool payloads, and hidden reasoning remain in their original sources. Saved shell commands cannot recover terminal output that was never recorded. Credential-shaped shell values receive best-effort redaction.
 
-`Draft a new coding thread` creates only a bounded composer draft in Plan mode. It explicitly marks imported text as historical reference, asks for the next task and project, and never automatically sends it or treats earlier approvals as current authorization. Cross-provider history reading is not native agent-session resumption.
+`Start new from full history` materializes all available conversation messages into private Markdown and JSON reference files, independently of loaded reader pages. Search-index caps are recovered from an unchanged source where possible; truncation in a partial source stays labelled. The unsent Plan draft includes these paths and recent context, and asks for the next task and project. The complete reference remains available beyond a model context window and the rolling transcript handoff. Earlier approvals are never fresh authorization.
+
+`Continue native session` explicitly loads eligible main Codex or Claude Code sessions by their original native UUID in their existing project. A new Bomb Code control record uses Plan mode, without copying previous MCP grants or sending a prompt. The existing resume ladder checks advertised capabilities, tries load/resume, and reports actual native continuity or a fresh-session fallback with the complete reference. Linked child/subagent records, metadata-only records, cloud chats, and missing projects are not eligible. A session already open in Bomb Code is not opened a second time. Existing native Grok threads continue from the Session sidebar; arbitrary Grok JSONL records are not assumed to be ACP session IDs.
 
 Validation: Python migration fixtures cover unchanged originals, idempotency, changed files, namespaces, subagent isolation, malformed records, all export branches, ZIP traversal avoidance, literal FTS queries, hidden-content exclusion, terminal redaction, and metadata-only scope. Rust workspace tests, strict Clippy, JS syntax checks, release build, provider connectivity, and installed UI smoke checks are recorded in the setup report.
 

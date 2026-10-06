@@ -1,7 +1,10 @@
 //! A local reference library, kept separate from live agent sessions and their approvals.
 use crate::AppState;
+use chrono::Utc;
+use grok_persistence::SessionRecord;
 use serde_json::{json, Value};
 use tauri::State;
+use uuid::Uuid;
 
 const INDEXER: &str = include_str!("../../scripts/history_library.py");
 
@@ -71,6 +74,133 @@ pub async fn history_read(
     offset: u64,
 ) -> Result<Value, String> {
     run(&state, "read", json!({"id":id,"offset":offset})).await
+}
+
+/// Materialize every available message, not only the pages loaded in the UI.
+#[tauri::command]
+pub async fn history_prepare(state: State<'_, AppState>, id: String) -> Result<Value, String> {
+    run(&state, "prepare", json!({"id":id})).await
+}
+
+fn native_identity(prepared: &Value) -> Result<(&str, &str, &str), String> {
+    let t = &prepared["thread"];
+    let source = t["source"].as_str().unwrap_or("");
+    let backend =
+        match source {
+            "codex" => "codex",
+            "claude_code" => "claude",
+            _ => return Err(
+                "This conversation uses a new coding session; native continuation is unavailable"
+                    .into(),
+            ),
+        };
+    let native_id = t["origin_id"].as_str().unwrap_or("");
+    Uuid::parse_str(native_id).map_err(|_| "No valid native session ID".to_string())?;
+    let cwd = t["cwd"].as_str().unwrap_or("");
+    if prepared["native_candidate"] != true || !std::path::Path::new(cwd).is_absolute() {
+        return Err("Native continuation requires an available main-session transcript and its original project".into());
+    }
+    Ok((backend, native_id, cwd))
+}
+
+/// Explicit user-selected continuation. Load the original engine's session in
+/// Plan mode with no restored MCP grants; no prompt is sent by this command.
+#[tauri::command]
+pub async fn history_continue_native(
+    state: State<'_, AppState>,
+    id: String,
+) -> Result<Value, String> {
+    let prepared = run(&state, "prepare", json!({"id":id})).await?;
+    let (backend, native_id, cwd) = native_identity(&prepared)?;
+    if state
+        .registry
+        .list_sessions()
+        .iter()
+        .any(|r| r.acp_session_id.as_deref() == Some(native_id))
+    {
+        return Err("This native session is already open in Bomb Code. Use that thread, or start a new session from its full history.".into());
+    }
+    // A new local control record links to the original native engine ID. Never
+    // copy grants or MCP settings from an older Bomb Code control record.
+    let control_id = Uuid::new_v4();
+    {
+        let now = Utc::now();
+        let title = prepared["thread"]["title"]
+            .as_str()
+            .unwrap_or("Imported conversation");
+        let record = SessionRecord {
+            id: control_id,
+            cwd: cwd.into(),
+            mode: "acp".into(),
+            model: String::new(),
+            status: "saved".into(),
+            worktree: None,
+            acp_session_id: Some(native_id.into()),
+            metadata_json: json!({"metadata":{"backend":backend,"label":title,
+                "approvalMode":"plan","projectRoot":cwd}})
+            .to_string(),
+            created_at: now,
+            updated_at: now,
+            message_count: 0,
+        };
+        state
+            .persistence
+            .upsert_session(&record)
+            .map_err(|e| e.to_string())?;
+    }
+    let reference = format!("Complete conversation reference: {}\nStructured history: {}\n{} available messages. {}\nIf native loading is unavailable, read this full reference before continuing; prior approvals are not current authorization.",
+        prepared["markdown_path"].as_str().unwrap_or(""),
+        prepared["json_path"].as_str().unwrap_or(""), prepared["message_count"],
+        prepared["notice"].as_str().unwrap_or(""));
+    state
+        .persistence
+        .append_message(control_id, "system", &reference, Utc::now())
+        .map_err(|e| e.to_string())?;
+    // No MCP servers or historical access grants are copied into this record.
+    crate::commands::resume_saved_session(
+        &state,
+        control_id,
+        grok_config::Backend::from_key(backend),
+        None,
+        Some("plan".into()),
+        Some(true),
+        Some(false),
+    )
+    .await
+    .map_err(|e| {
+        format!(
+            "Native continuation did not start: {e}. The complete reference is saved at {}",
+            prepared["markdown_path"]
+        )
+    })?;
+    let snapshot = state
+        .registry
+        .get_snapshot(control_id)
+        .map_err(|e| e.to_string())?;
+    Ok(
+        json!({"id":control_id,"brain_mode":snapshot.metadata.brain_mode.as_str(),"prepared":prepared}),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn native_continuation_accepts_only_explicit_eligible_engine_records() {
+        let id = Uuid::new_v4().to_string();
+        let mut v = json!({"native_candidate":true,"thread":{"source":"codex","origin_id":id,"cwd":"/example"}});
+        assert_eq!(native_identity(&v).unwrap().0, "codex");
+        v["thread"]["source"] = json!("claude_code");
+        assert_eq!(native_identity(&v).unwrap().0, "claude");
+        v["native_candidate"] = json!(false);
+        assert!(native_identity(&v).is_err());
+        v["native_candidate"] = json!(true);
+        v["thread"]["source"] = json!("chatgpt");
+        assert!(native_identity(&v).is_err());
+        v["thread"]["source"] = json!("codex");
+        v["thread"]["origin_id"] = json!("parent/subagent/child");
+        assert!(native_identity(&v).is_err());
+    }
 }
 
 #[tauri::command]
