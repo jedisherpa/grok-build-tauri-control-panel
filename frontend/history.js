@@ -11,7 +11,7 @@
     $("history-status").textContent = total
       ? `${total.toLocaleString()} records · ${stats.sources.map(s => `${names[s.source] || s.source}: ${s.threads}${s.subagents ? ` (${s.subagents} subagents)` : ""}${s.metadata_only ? ` (${s.metadata_only} metadata only)` : ""}`).join(" · ")}${errors}`
       : "Scan local histories or import a ChatGPT / Claude account export to begin.";
-    $("history-status").title = "Local text index. Attachments, hidden reasoning, and tool output stay in the original source. Cloud history completeness depends on the supplied export.";
+    $("history-status").title = "Local text index. Related child/subagent threads are hidden from the list until selected. Attachments, hidden reasoning, and tool output stay in the original source. Cloud history completeness depends on the supplied export.";
   }
 
   async function refreshList() {
@@ -29,7 +29,7 @@
   }
 
   function renderMessages() {
-    $("history-messages").innerHTML = H.messages.map(m => `<section class="history-message ${esc(m.role)}"><div class="history-message-role">${esc(m.role === "user" ? "You" : names[H.selected.source] || H.selected.source)} <time>${esc(m.at || "")}</time></div><div class="history-message-text">${esc(m.text)}</div>${m.truncated ? '<p class="history-notice">Indexed excerpt. The full record remains in the source file.</p>' : ""}</section>`).join("") || '<p class="empty-hint">No readable messages in this source. Use the original conversation or import its account export.</p>';
+    $("history-messages").innerHTML = H.messages.map(m => `<section class="history-message ${esc(m.role)}"><div class="history-message-role">${esc(m.role === "user" ? "You" : names[H.selected.source] || H.selected.source)} <time>${esc(m.at || "")}</time></div><div class="history-message-text">${esc(m.text)}</div>${m.truncated ? '<p class="history-notice">Indexed excerpt. Consult the original conversation or source transcript for full content.</p>' : ""}</section>`).join("") || '<p class="empty-hint">No readable messages in this source. Use the original conversation or import its account export.</p>';
     $("history-more").hidden = H.messages.length >= H.messageTotal;
     $("history-more").textContent = `Load more messages (${H.messages.length} of ${H.messageTotal})`;
   }

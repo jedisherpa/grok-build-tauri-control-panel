@@ -1,4 +1,4 @@
-//! A local reference library, separate from live agent sessions and their approvals.
+//! A local reference library, kept separate from live agent sessions and their approvals.
 use crate::AppState;
 use serde_json::{json, Value};
 use tauri::State;

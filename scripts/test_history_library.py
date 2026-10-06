@@ -103,6 +103,13 @@ class HistoryChecks(unittest.TestCase):
         self.assertEqual(h.search(self.c, {'query': 'alpha OR nonexistent'})['total'], 0)
         self.assertEqual(h.search(self.c, {'query': '***'})['total'], 0)
 
+    def test_related_threads_require_explicit_filter(self):
+        h.put_thread(self.c, 'codex', 'parent', title='Parent')
+        h.put_thread(self.c, 'codex', 'child', title='Child', parent_id='parent')
+        h.refresh_search(self.c); self.c.commit()
+        self.assertEqual(h.search(self.c, {})['total'], 1)
+        self.assertEqual(h.search(self.c, {'include_subagents': True})['total'], 2)
+
     def test_hidden_reasoning_and_binary_content_stay_in_source(self):
         self.assertEqual(h.content_text([{'type': 'thinking', 'text': 'private'},
             {'type': 'input_image', 'text': 'binary'}, {'type': 'text', 'text': 'visible'}]).strip(), 'visible')

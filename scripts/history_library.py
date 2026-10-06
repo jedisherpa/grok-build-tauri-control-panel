@@ -376,7 +376,7 @@ def search(c, payload):
     source=payload.get('source','')
     params=[];conditions=[]
     if not payload.get('include_subagents',False):
-        conditions.append("instr(t.origin_id,'/subagent/')=0")
+        conditions.append("instr(t.origin_id,'/subagent/')=0 AND t.parent_id=''")
     if source:
         conditions.append('t.source=?');params.append(source)
     if query:
