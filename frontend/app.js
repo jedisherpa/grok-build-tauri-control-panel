@@ -306,14 +306,14 @@ function updateBombChrome() {
     const meter = document.querySelector(".turn-dock-meter");
     const bar = $("turn-meter-bar");
     if (meter) meter.setAttribute("data-mode", view.meterMode);
+    const completion = $("turn-completion");
+    const workflow = window.BombBuilds?.sessionSummary(state.selectedSession);
+    if (completion) completion.textContent = workflow
+      ? `${workflow.text}${workflow.fresh ? '' : ' · last known snapshot'}`
+      : view.completionLabel;
     if (bar) {
-      if (view.meterMode === "progress" || view.meterMode === "tools") {
-        bar.style.width = `${Math.round(view.meterProgress * 100)}%`;
-        bar.style.transform = "none";
-      } else {
-        bar.style.width = "";
-        bar.style.transform = "";
-      }
+      bar.style.width = "";
+      bar.style.transform = "";
     }
   }
 
@@ -1420,11 +1420,13 @@ function renderAgents() {
           : "idle";
       const bombMood = moodFromStatus(status);
       const runCls = status.includes("run") ? "running" : "";
+      const workflow = window.BombBuilds?.sessionSummary(s.id);
       return `<div class="agent-card ${runCls}">
   <div class="name">${bombHtml(bombMood, "sm")}${escapeHtml(String(s.mode || "acp").toUpperCase())} · ${escapeHtml(shortId(s.id))}</div>
   <div class="meta"><span class="badge ${badgeCls}">${bombHtml(bombMood, "xs")}${escapeHtml(status)}</span>
   <span class="muted">${escapeHtml(s.model || "")}</span></div>
   <div class="path">${escapeHtml(s.cwd || "")}</div>
+  <div class="path">${workflow ? `${escapeHtml(workflow.role)} · build ${escapeHtml(shortId(workflow.id))} · ${escapeHtml(workflow.text)}${workflow.fresh ? '' : ' · last known snapshot'}` : 'Task completion unknown · no recorded build link'}</div>
   ${
     s.mcpServers?.length || s.mcp_servers?.length
       ? `<div class="path">mcp: ${escapeHtml((s.mcpServers || s.mcp_servers || []).join(", "))}</div>`
@@ -4794,7 +4796,7 @@ wireTranscriptFollow();
 boot();
 
 // Reviewed builds keep their role transcripts available in the native session view.
-window.BombBuildsHost = { openSession: async (id) => {
+window.BombBuildsHost = { refreshActivity: () => { renderAgents(); updateBombChrome(); }, openSession: async (id) => {
   await refreshSessions();
   await selectSession(id);
   await loadTranscriptFromDb(id, { force: true });

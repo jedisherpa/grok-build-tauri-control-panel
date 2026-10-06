@@ -2,6 +2,7 @@
 //! durable persistence and approval UI; this crate only makes transitions explicit.
 
 pub mod coordination;
+pub mod progress;
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

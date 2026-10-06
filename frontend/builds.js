@@ -1,6 +1,7 @@
 // Build output is evidence for human review; it is always rendered as text.
 (() => {
-  const B = { builds: [], selected: null, busy: false, loading: false, signature: '', dependencySignature: '', limit: 2, limitDirty: false };
+  const B = { builds: [], sessions: [], selected: null, busy: false, loading: false, signature: '', dependencySignature: '', limit: 2, limitDirty: false, fresh: false, sampledAt: null, graphPage: 0, edgePage: 0 };
+  const C = window.BombCollaboration;
   const esc = escapeHtml;
   const roles = ['planner', 'implementer', 'auditor', 'verifier'];
   const labels = { planning: 'Planning', awaiting_plan_approval: 'Plan approval needed', implementing: 'Implementing', auditing: 'Auditing', verifying: 'Verifying', ready_for_review: 'Ready for your review', accepted: 'Accepted by you', needs_changes: 'Repair limit reached', stalled: 'Repeated findings', cancelled: 'Cancelled', failed: 'Failed', interrupted: 'Interrupted after restart' };
@@ -16,7 +17,43 @@
   }
   $('builds-routes').innerHTML = roles.map(role => `<label>${title(role)}<select id="builds-${role}-engine" aria-label="${title(role)} engine"><option value="codex">Codex</option><option value="claude">Claude Code</option><option value="grok">Grok</option></select><input id="builds-${role}-model" type="text" maxlength="256" placeholder="Configured default model" aria-label="${title(role)} model" spellcheck="false" /></label>`).join('');
 
-  function selectBuild(id) { B.selected = id; renderList(); renderDetail(); }
+  function selectBuild(id) { B.selected = id; const index = B.builds.findIndex(w => w.id === id); if (index >= 0) B.graphPage = Math.floor(index / 24); renderList(); renderGraph(); renderDetail(); }
+  function checkpointText(w) {
+    const p = C.progress(w);
+    return p ? `${p.percent}% workflow checkpoints · ${p.completed}/${p.total} completed` : 'Workflow completion unknown';
+  }
+  function renderGraph() {
+    const viewport = $('collaboration-graph');
+    const position = [viewport.scrollLeft, viewport.scrollTop];
+    const fullGraph = C.buildGraph(B.builds);
+    const graph = C.graphPage(fullGraph, B.graphPage); B.graphPage = graph.page;
+    const nodeMap = new Map(graph.nodes.map(n => [n.id, n]));
+    const lines = graph.edges.map(e => {
+      const a = nodeMap.get(e.from), b = nodeMap.get(e.to);
+      const x = a.x + 252, y = a.y + 53, end = b.x - 6, targetY = b.y + 53;
+      return `<path d="M ${x} ${y} C ${x + 28} ${y}, ${end - 28} ${targetY}, ${end} ${targetY}" />`;
+    }).join('');
+    viewport.innerHTML = !B.builds.length ? '<p class="empty-hint">Submit a reviewed build to record a workflow. Separate sessions alone establish no collaboration edges.</p>' : `<div class="collaboration-canvas" style="width:${graph.width}px;height:${graph.height}px"><svg width="${graph.width}" height="${graph.height}" aria-hidden="true"><defs><marker id="collaboration-arrow" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto"><path d="M0,0 L6,3 L0,6" /></marker></defs><g class="collaboration-edges" marker-end="url(#collaboration-arrow)">${lines}</g></svg>${graph.nodes.map(n => n.kind === 'missing' ? `<div class="collaboration-node missing" style="left:${n.x}px;top:${n.y}px"><strong>Missing prerequisite</strong><span>${esc(n.id)}</span></div>` : `<button type="button" class="collaboration-node${n.id === B.selected ? ' selected' : ''}" data-graph-build="${esc(n.id)}" style="left:${n.x}px;top:${n.y}px" aria-pressed="${n.id === B.selected}"><span class="collaboration-node-id">${esc(n.id.slice(0, 8))} · ${esc(status(n.build.status))}</span><strong>${esc(n.label)}</strong><span>${esc(checkpointText(n.build))}</span></button>`).join('')}</div>`;
+    viewport.scrollLeft = position[0]; viewport.scrollTop = position[1];
+    viewport.querySelectorAll('[data-graph-build]').forEach(button => button.onclick = () => selectBuild(button.dataset.graphBuild));
+    const edgePages = Math.max(1, Math.ceil(fullGraph.edges.length / 20)); B.edgePage = Math.min(B.edgePage, edgePages - 1);
+    const edges = fullGraph.edges.slice(B.edgePage * 20, (B.edgePage + 1) * 20);
+    $('collaboration-links').innerHTML = `<div class="collaboration-pagination"><button type="button" class="btn ghost" id="graph-previous" ${graph.page ? '' : 'disabled'}>Previous builds</button><span>Graph page ${graph.page + 1}/${graph.pages} · ${graph.totalNodes} nodes · ${graph.edges.length}/${graph.totalEdges} edges shown</span><button type="button" class="btn ghost" id="graph-next" ${graph.page + 1 < graph.pages ? '' : 'disabled'}>Next builds</button></div><p class="builds-help">Edges crossing graph pages remain in the recorded prerequisite list.</p>${fullGraph.cycle ? '<p class="builds-failure">The stored dependency graph contains a cycle. Layout cannot represent a valid execution order.</p>' : ''}${fullGraph.edges.length ? `<details><summary>Recorded prerequisite edges · ${fullGraph.edges.length}</summary><div class="collaboration-pagination"><button type="button" class="btn ghost" id="edges-previous" ${B.edgePage ? '' : 'disabled'}>Previous edges</button><span>Edge page ${B.edgePage + 1}/${edgePages}</span><button type="button" class="btn ghost" id="edges-next" ${B.edgePage + 1 < edgePages ? '' : 'disabled'}>Next edges</button></div><ul>${edges.map(e => `<li><button class="btn ghost" data-graph-build="${esc(e.from)}">${esc(e.from.slice(0,8))}</button> → <button class="btn ghost" data-graph-build="${esc(e.to)}">${esc(e.to.slice(0,8))}</button> · acceptance required before start</li>`).join('')}</ul></details>` : '<p class="builds-help">No recorded prerequisites between these builds.</p>'}`;
+    $('graph-previous').onclick = () => { B.graphPage--; renderGraph(); };
+    $('graph-next').onclick = () => { B.graphPage++; renderGraph(); };
+    if ($('edges-previous')) $('edges-previous').onclick = () => { B.edgePage--; renderGraph(); };
+    if ($('edges-next')) $('edges-next').onclick = () => { B.edgePage++; renderGraph(); };
+    $('collaboration-links').querySelectorAll('[data-graph-build]').forEach(button => button.onclick = () => selectBuild(button.dataset.graphBuild));
+    const unlinked = B.sessions.filter(s => !C.sessionLink(B.builds, s.id));
+    $('collaboration-sessions').innerHTML = unlinked.length ? `<p class="builds-help">No recorded build links for these sessions. Completion unknown; shared names or folders do not establish collaboration.</p>${unlinked.map(s => `<button class="btn ghost builds-session" data-session="${esc(s.id)}">${esc(s.id.slice(0,8))} · ${esc(s.backend || s.mode || 'native')} · ${esc(s.status)} · completion unknown</button>`).join('')}` : '<p class="builds-help">No other live native sessions in this snapshot.</p>';
+    $('collaboration-sessions').querySelectorAll('[data-session]').forEach(button => button.onclick = () => window.BombBuildsHost.openSession(button.dataset.session).catch(e => notice(String(e), true)));
+  }
+  function renderProgress(w) {
+    const p = C.progress(w);
+    const graph = C.roleGraph(w);
+    const states = { complete: 'Recorded checkpoint complete', waiting: 'Waiting for you', active: 'Native session active', recorded: 'Report recorded; checkpoint not passed', pending: 'No completion evidence' };
+    return `<section class="build-progress" aria-label="Workflow completion"><div class="build-progress-heading"><strong>${esc(checkpointText(w))}</strong><span class="builds-help">repair ${w.round}</span></div>${p ? `<progress value="${p.completed}" max="${p.total}" aria-label="${esc(checkpointText(w))}"></progress>` : ''}<p class="builds-help">Six equally weighted checkpoints: plan, approval, implementation, audit, verification and acceptance. This measures recorded workflow completion; remaining time and progress within a role are unknown. Repairs reset implementation and review checkpoints.</p><h3>Role sessions and gates</h3><ol class="collaboration-role-flow" aria-label="Declared workflow order">${graph.nodes.map(n => `<li class="role-node ${n.state}${n.kind === 'human' ? ' human-gate' : ''}"><span class="role-node-title">${esc(n.label)}</span><span>${esc(states[n.state])}</span>${n.route ? `<span class="builds-help">${esc(n.route.backend)} · ${esc(n.route.model || 'configured model')}</span>` : ''}${n.session ? `<button type="button" class="btn ghost builds-session" data-session="${esc(n.session)}">Session ${esc(n.session.slice(0,8))}</button>` : ''}</li>`).join('')}</ol><p class="builds-help">Arrows show declared workflow order. Session links come from recorded role attempts in this repair round; earlier attempts remain in Role evidence below.</p></section>`;
+  }
   function refreshDependencies() {
     const signature = JSON.stringify(B.builds.map(w => [w.id, w.spec.objective, w.status]));
     if (signature === B.dependencySignature) return;
@@ -28,7 +65,7 @@
     select.disabled = !B.builds.length;
   }
   function renderList() {
-    $('builds-list').innerHTML = B.builds.map(w => `<button type="button" class="builds-row${w.id === B.selected ? ' selected' : ''}" data-id="${esc(w.id)}"><span class="builds-row-title">${esc(w.spec.objective)}</span><span class="builds-row-status">${esc(w.cleanup_pending && terminal.has(w.status) ? 'Native cleanup required' : w.queue_state && !['reserved', 'finished'].includes(w.queue_state) ? queueText(w.queue_state) : status(w.status))} · repair ${w.round}/${w.spec.max_repairs}</span><span class="builds-row-id">${esc(w.id.slice(0, 8))}</span><span class="builds-row-project">${esc(w.spec.project_root)}</span></button>`).join('') || '<p class="empty-hint">No builds yet. Start with a small change and specific write paths.</p>';
+    $('builds-list').innerHTML = B.builds.map(w => `<button type="button" class="builds-row${w.id === B.selected ? ' selected' : ''}" data-id="${esc(w.id)}"><span class="builds-row-title">${esc(w.spec.objective)}</span><span class="builds-row-status">${esc(w.cleanup_pending && terminal.has(w.status) ? 'Native cleanup required' : w.queue_state && !['reserved', 'finished'].includes(w.queue_state) ? queueText(w.queue_state) : status(w.status))} · repair ${w.round}/${w.spec.max_repairs}</span><span class="builds-row-progress">${esc(checkpointText(w))}</span><span class="builds-row-id">${esc(w.id.slice(0, 8))}</span><span class="builds-row-project">${esc(w.spec.project_root)}</span></button>`).join('') || '<p class="empty-hint">No builds yet. Start with a small change and specific write paths.</p>';
     $('builds-list').querySelectorAll('[data-id]').forEach(button => button.onclick = () => selectBuild(button.dataset.id));
   }
   function renderDetail() {
@@ -38,7 +75,7 @@
     const reviewing = w.status === 'ready_for_review';
     const approving = w.status === 'awaiting_plan_approval';
     const plan = w.plan == null ? `<p class="builds-help">${terminal.has(w.status) ? 'The build stopped before a plan was recorded.' : w.queue_state && w.queue_state !== 'reserved' ? esc(queueText(w.queue_state)) + '. Planning begins when the task is eligible.' : 'The planner is preparing the plan.'}</p>` : `<pre class="builds-output">${esc(w.plan)}</pre>`;
-    $('builds-detail').innerHTML = `<h2>${esc(w.spec.objective)}</h2><div class="builds-current">${esc(w.status === 'planning' && w.queue_state && !['reserved', 'finished'].includes(w.queue_state) ? 'Queued' : status(w.status))} · repair ${w.round}/${w.spec.max_repairs}</div><p class="builds-queue">${esc(queueText(w.queue_state))}</p>${cleanupRequired ? '<p class="builds-failure" role="status">Bomb Code could not confirm that the native session stopped. This build retains its concurrency slot and write paths until cleanup succeeds. Retry cleanup to release them; the worktree and evidence remain available.</p>' : ''}<dl class="builds-meta"><dt>Build ID</dt><dd><input class="builds-id" aria-label="Build ID" value="${esc(w.id)}" readonly /></dd><dt>Project</dt><dd>${esc(w.spec.project_root)}</dd><dt>Write paths</dt><dd>${esc(w.spec.write_set.join(', '))}</dd>${w.worktree ? `<dt>Worktree</dt><dd>${esc(w.worktree)} <button id="builds-folder" class="btn ghost" type="button">Reveal</button></dd>` : ''}${w.base_commit ? `<dt>Baseline</dt><dd>${esc(w.base_commit)}</dd>` : ''}</dl>${w.dependencies?.length ? `<section class="builds-prerequisites"><h3>Prerequisite builds</h3>${w.dependencies.map(id => { const dependency = B.builds.find(candidate => candidate.id === id); return `<button class="btn ghost builds-dependency" data-build="${esc(id)}" type="button">${esc(id.slice(0, 8))} · ${esc(dependency?.spec.objective || 'Unavailable prerequisite')} · ${esc(dependency ? status(dependency.status) : 'Missing')}</button>`; }).join('')}<p class="builds-help">Every prerequisite requires your acceptance before this build starts. Each result remains in its separate worktree.</p></section>` : ''}${w.error ? `<p class="builds-failure" role="status">${esc(w.error)}</p>` : ''}<div class="builds-actions">${cleanupRequired ? `<button id="builds-retry-cleanup" class="btn primary" type="button" ${B.busy ? 'disabled' : ''}>Retry native cleanup</button>` : ''}${w.active_session_id ? `<button class="btn ghost builds-session" data-session="${esc(w.active_session_id)}" type="button">Open active native session</button>` : ''}${approving ? `<button id="builds-approve" class="btn primary" type="button" ${B.busy || w.cleanup_pending || !w.approval_digest ? 'disabled' : ''}>Approve plan and implement</button>` : ''}${reviewing ? `<button id="builds-accept" class="btn primary" type="button" ${B.busy || w.cleanup_pending ? 'disabled' : ''}>Accept reviewed result</button>` : ''}${!terminal.has(w.status) ? `<button id="builds-cancel" class="btn ghost danger" type="button" ${B.busy ? 'disabled' : ''}>Cancel build</button>` : ''}</div>${approving ? '<p class="builds-help">Approval applies to this exact plan, task and checkout. Tool requests still use the native approval controls.</p>' : reviewing ? '<p class="builds-help">The agent checks passed. Inspect the worktree and verification evidence before accepting. Acceptance keeps the changes in their worktree.</p>' : w.status === 'accepted' ? '<p class="builds-help">You accepted this result. Changes remain available in the worktree.</p>' : ''}<section class="builds-plan"><h3>Plan</h3>${plan}</section>${w.findings ? `<details class="builds-evidence" open><summary>Latest repair findings</summary><pre class="builds-output">${esc(w.findings)}</pre></details>` : ''}<section class="builds-steps"><h3>Role evidence</h3>${w.steps.map((step, index) => `<details class="builds-evidence" ${index === w.steps.length - 1 ? 'open' : ''}><summary>${esc(title(step.role))} · repair ${step.round}</summary>${step.session_id ? `<button class="btn ghost builds-session" data-session="${esc(step.session_id)}" type="button">Open native session</button>` : ''}<pre class="builds-output">${esc(step.output)}</pre></details>`).join('') || '<p class="builds-help">Completed role outputs will appear here. Native tool approval requests appear in Session.</p>'}</section>`;
+    $('builds-detail').innerHTML = `<h2>${esc(w.spec.objective)}</h2><div class="builds-current">${esc(w.status === 'planning' && w.queue_state && !['reserved', 'finished'].includes(w.queue_state) ? 'Queued' : status(w.status))} · repair ${w.round}/${w.spec.max_repairs}</div><p class="builds-queue">${esc(queueText(w.queue_state))}</p>${renderProgress(w)}${cleanupRequired ? '<p class="builds-failure" role="status">Bomb Code could not confirm that the native session stopped. This build retains its concurrency slot and write paths until cleanup succeeds. Retry cleanup to release them; the worktree and evidence remain available.</p>' : ''}<dl class="builds-meta"><dt>Build ID</dt><dd><input class="builds-id" aria-label="Build ID" value="${esc(w.id)}" readonly /></dd><dt>Project</dt><dd>${esc(w.spec.project_root)}</dd><dt>Write paths</dt><dd>${esc(w.spec.write_set.join(', '))}</dd>${w.worktree ? `<dt>Worktree</dt><dd>${esc(w.worktree)} <button id="builds-folder" class="btn ghost" type="button">Reveal</button></dd>` : ''}${w.base_commit ? `<dt>Baseline</dt><dd>${esc(w.base_commit)}</dd>` : ''}</dl>${w.dependencies?.length ? `<section class="builds-prerequisites"><h3>Prerequisite builds</h3>${w.dependencies.map(id => { const dependency = B.builds.find(candidate => candidate.id === id); return `<button class="btn ghost builds-dependency" data-build="${esc(id)}" type="button">${esc(id.slice(0, 8))} · ${esc(dependency?.spec.objective || 'Unavailable prerequisite')} · ${esc(dependency ? status(dependency.status) : 'Missing')}</button>`; }).join('')}<p class="builds-help">Every prerequisite requires your acceptance before this build starts. Each result remains in its separate worktree.</p></section>` : ''}${w.error ? `<p class="builds-failure" role="status">${esc(w.error)}</p>` : ''}<div class="builds-actions">${cleanupRequired ? `<button id="builds-retry-cleanup" class="btn primary" type="button" ${B.busy ? 'disabled' : ''}>Retry native cleanup</button>` : ''}${w.active_session_id ? `<button class="btn ghost builds-session" data-session="${esc(w.active_session_id)}" type="button">Open active native session</button>` : ''}${approving ? `<button id="builds-approve" class="btn primary" type="button" ${B.busy || w.cleanup_pending || !w.approval_digest ? 'disabled' : ''}>Approve plan and implement</button>` : ''}${reviewing ? `<button id="builds-accept" class="btn primary" type="button" ${B.busy || w.cleanup_pending ? 'disabled' : ''}>Accept reviewed result</button>` : ''}${!terminal.has(w.status) ? `<button id="builds-cancel" class="btn ghost danger" type="button" ${B.busy ? 'disabled' : ''}>Cancel build</button>` : ''}</div>${approving ? '<p class="builds-help">Approval applies to this exact plan, task and checkout. Tool requests still use the native approval controls.</p>' : reviewing ? '<p class="builds-help">The agent checks passed. Inspect the worktree and verification evidence before accepting. Acceptance keeps the changes in their worktree.</p>' : w.status === 'accepted' ? '<p class="builds-help">You accepted this result. Changes remain available in the worktree.</p>' : ''}<section class="builds-plan"><h3>Plan</h3>${plan}</section>${w.findings ? `<details class="builds-evidence" open><summary>Latest repair findings</summary><pre class="builds-output">${esc(w.findings)}</pre></details>` : ''}<section class="builds-steps"><h3>Role evidence</h3>${w.steps.map((step, index) => `<details class="builds-evidence" ${index === w.steps.length - 1 ? 'open' : ''}><summary>${esc(title(step.role))} · repair ${step.round}</summary>${step.session_id ? `<button class="btn ghost builds-session" data-session="${esc(step.session_id)}" type="button">Open native session</button>` : ''}<pre class="builds-output">${esc(step.output)}</pre></details>`).join('') || '<p class="builds-help">Completed role outputs will appear here. Native tool approval requests appear in Session.</p>'}</section>`;
     if ($('builds-approve')) $('builds-approve').onclick = () => action('approve_build_plan', { id: w.id, digest: w.approval_digest });
     if ($('builds-accept')) $('builds-accept').onclick = () => action('accept_build', { id: w.id });
     if ($('builds-cancel')) $('builds-cancel').onclick = () => action('cancel_build', { id: w.id });
@@ -51,19 +88,29 @@
     if (B.loading) return;
     B.loading = true;
     try {
-      const [builds, limit] = await Promise.all([invoke('list_builds'), invoke('get_build_concurrency')]);
-      const signature = JSON.stringify(builds);
-      B.builds = builds;
-      B.limit = limit;
+      const [builds, limit, sessions] = await Promise.all([invoke('list_builds'), invoke('get_build_concurrency'), invoke('list_sessions')]);
+      if (!C.validSnapshot(builds, sessions) || !Number.isInteger(limit) || limit < 1 || limit > 4) throw new Error('Invalid collaboration snapshot');
+      const signature = JSON.stringify([builds, sessions]);
+      const previous = { builds: B.builds, sessions: B.sessions, limit: B.limit, selected: B.selected, signature: B.signature, dependencySignature: B.dependencySignature, sampledAt: B.sampledAt, graphPage: B.graphPage, edgePage: B.edgePage };
+      try {
+        B.builds = builds; B.sessions = sessions; B.limit = limit;
+        refreshDependencies();
+        if (signature !== B.signature) {
+          if (!B.selected && builds.length) B.selected = builds[0].id;
+          renderList(); renderGraph(); renderDetail();
+        }
+        B.signature = signature; B.sampledAt = Date.now(); B.fresh = true;
+      } catch (error) {
+        Object.assign(B, previous); B.signature = ''; B.fresh = false;
+        try { refreshDependencies(); renderList(); renderGraph(); renderDetail(); } catch (_) { /* Last-good data still retained; stale banner remains visible. */ }
+        throw error;
+      }
+      $('collaboration-snapshot').textContent = `Snapshot ${new Date(B.sampledAt).toLocaleTimeString()}`;
+      $('collaboration-snapshot').classList.remove('builds-error');
       $('builds-concurrency-current').textContent = `Current limit: ${B.limit}`;
       if (!B.limitDirty && document.activeElement !== $('builds-concurrency')) $('builds-concurrency').value = String(B.limit);
-      refreshDependencies();
-      if (signature !== B.signature) {
-        B.signature = signature;
-        if (!B.selected && builds.length) B.selected = builds[0].id;
-        renderList(); renderDetail();
-      }
-    } catch (e) { notice(`Builds unavailable: ${e}`, true); }
+      window.BombBuildsHost.refreshActivity();
+    } catch (e) { B.fresh = false; $('collaboration-snapshot').textContent = 'Refresh failed · graph and percentages are the last known snapshot'; $('collaboration-snapshot').classList.add('builds-error'); window.BombBuildsHost.refreshActivity(); notice(`Builds unavailable: ${e}`, true); }
     finally { B.loading = false; }
   }
   async function action(command, args) {
@@ -118,6 +165,9 @@
     finally { B.busy = false; $('builds-concurrency-save').disabled = false; }
   };
   $('builds-refresh').onclick = refresh;
-  window.BombBuilds = { refresh: async () => { if (!$('builds-project').value) $('builds-project').value = $('cwd').value; await refresh(); } };
-  setInterval(() => { if (visible() && !document.hidden && !B.busy) refresh(); }, 3000);
+  window.BombBuilds = { refresh: async () => { if (!$('builds-project').value) $('builds-project').value = $('cwd').value; await refresh(); }, sessionSummary: id => { const linked = C.sessionLink(B.builds, id); return linked ? { id: linked.build.id, role: linked.role, round: linked.round, text: checkpointText(linked.build), fresh: B.fresh && Date.now() - B.sampledAt < 15000 } : null; } };
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) refresh(); });
+  window.addEventListener('focus', refresh);
+  refresh();
+  setInterval(() => { if (!document.hidden && !B.busy && (visible() || B.sessions.length)) refresh(); }, 3000);
 })();
