@@ -10,6 +10,7 @@
   });
   host.setView("focus");
   BombSpatialFaces.attach({ host, background, getState: () => state, selectSession, activateView });
+  BombSpatialPanels.attach({ background, scene: host.scene });
   document.documentElement.dataset.view = "spatial";
   const motion = document.getElementById("toggle-visual-motion");
   const applyMotion = () => host.scene.setMotionPaused(motion?.checked === true);
