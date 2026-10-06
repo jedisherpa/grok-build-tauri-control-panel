@@ -43,7 +43,7 @@ const state = {
   showAcpLines: localStorage.getItem("bomb.showAcp") === "1",
   /** Sticky "follow the tail" — disarmed by scrolling up, re-armed at bottom. */
   followTail: true,
-  /** sessionId → ELI12 explainer cards for the right panel. */
+  /** sessionId → ELI12 explainer cards for the main reading panel. */
   explainBySession: new Map(),
   explainPending: false,
   explainerEnabled: true,
@@ -779,7 +779,7 @@ function roleBombMood(role) {
   return "idle";
 }
 
-// ── ELI12 explainer panel (right sidebar) ────────────────────────────────
+// ── ELI12 explainer panel (main workspace) ────────────────────────────────
 function explainListFor(sid) {
   if (!state.explainBySession.has(sid)) state.explainBySession.set(sid, []);
   return state.explainBySession.get(sid);

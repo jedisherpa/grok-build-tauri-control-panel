@@ -277,3 +277,9 @@ cargo clippy --workspace --all-targets -- -D warnings → PASS
 - Add a persistent visual-motion pause preference; hidden pages pause CSS animation and reduced-motion removes it. Execution and permissions are unaffected.
 - Update the local build to 0.1.3 and describe its native multi-engine capability in bundle metadata. Leave deferred cloud exports and source histories alone.
 - Validation before commit: workspace check and strict all-target Clippy pass; JS syntax and existing presence assertions pass; diff whitespace check passes. Main palette text contrasts exceed 5:1 on the four principal surfaces; native installed visual verification follows the build.
+
+### Installed appearance refinement
+
+- Native System review caught an unstyled allow-rule textarea and platform-gradient selects. Normalize both to the same navy form material while retaining native select behavior and keyboard access.
+- Correct the narrator tooltip to name its main explanation panel; keep keyboard focus visible even where legacy focus rules cleared outlines.
+- Installed first-pass Session/History/System checks passed, all three sign-ins remained available, and the motion-pause control toggled successfully. Final bundle rebuild and restart verifies persistence and the refined controls.

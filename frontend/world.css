@@ -6,7 +6,7 @@ button, input, textarea, select { font-family: var(--ui); }
 input::placeholder, textarea::placeholder { color: var(--dim); opacity: 1; }
 a { text-underline-offset: 3px; }
 :is(button, a, input, textarea, select, summary):focus-visible {
-  outline: 2px solid var(--warn); outline-offset: 3px;
+  outline: 2px solid var(--warn) !important; outline-offset: 3px;
 }
 input[type="checkbox"] { accent-color: var(--accent); }
 
@@ -144,3 +144,18 @@ input[type="checkbox"] { accent-color: var(--accent); }
   .brand { padding-block: 12px; }
   .nav-item { padding-block: 7px; }
 }
+
+/* Normalize native form chrome without changing its keyboard behavior. */
+select {
+  appearance: none; -webkit-appearance: none;
+  background-color: var(--bg-soft); color: var(--text);
+  background-image: url("assets/chevron.svg"); background-position: right 9px center;
+  background-repeat: no-repeat; background-size: 9px 6px;
+  border: 1px solid var(--border-hi); border-radius: 3px;
+  padding: 7px 26px 7px 9px; font: 400 12px/1.4 var(--ui);
+}
+.settings-field select { min-height: 36px; width: 100%; }
+.composer-agent select { padding: 5px 24px 5px 8px; border-color: var(--border); }
+.history-search select { padding-right: 26px; }
+.settings-field textarea { background: var(--bg); color: var(--text); border: 1px solid var(--border-hi); border-radius: 3px; padding: 8px; font: 12px/1.5 var(--font); resize: vertical; }
+.toggle { font-family: var(--ui); font-size: 12px; }
