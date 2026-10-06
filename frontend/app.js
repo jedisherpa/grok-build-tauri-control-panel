@@ -684,7 +684,7 @@ function wireTranscriptFollow() {
 }
 
 function patchLastTranscriptBody(entry) {
-  const root = $("transcript");
+  const root = $(entry.role === "term" || entry.role === "thought" ? "technical-transcript" : "transcript");
   if (!root) {
     renderTranscript();
     return;
@@ -694,9 +694,7 @@ function patchLastTranscriptBody(entry) {
   const last = blocks[blocks.length - 1];
   if (
     !last ||
-    (!last.classList.contains("agent") &&
-      !last.classList.contains("thought") &&
-      !last.classList.contains("term"))
+    !last.classList.contains(entry.role)
   ) {
     renderTranscript();
     return;
@@ -944,8 +942,9 @@ function renderTranscript() {
   // duplicate bar (the old sticky LIVE card).
   const blocks = entries.map((e, idx) => {
         const role = e.role || "system";
-        // Agent speech is labeled by which agent is talking, not a fixed "grok".
-        const label = role === "agent" ? backendName : termPrefix(role);
+        // Legacy agent rows do not record an author backend; switching providers
+        // must not relabel earlier replies as if the new provider wrote them.
+        const label = role === "agent" ? "Agent" : termPrefix(role);
         const streamCls = e.streaming ? " streaming" : "";
         // Agent-authored text renders markdown; everything else stays literal.
         // Plans are markdown documents (headers, lists) — render them fully.
