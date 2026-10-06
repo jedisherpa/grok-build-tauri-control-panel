@@ -1,5 +1,6 @@
 //! Tauri application library — state, commands, and event bridge.
 
+mod builds;
 mod commands;
 mod devserver;
 mod explainer;
@@ -73,6 +74,11 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            builds::list_builds,
+            builds::create_build,
+            builds::approve_build_plan,
+            builds::accept_build,
+            builds::cancel_build,
             history::history_scan,
             history::history_stats,
             history::history_search,

@@ -1051,6 +1051,7 @@ impl AcpClient {
                     ),
                     at: Utc::now(),
                 });
+                bus.emit(ControlEvent::PromptFinished { session_id: self.control_session_id, stop_reason: "mock".into(), at: Utc::now() });
                 bus.emit_status(self.control_session_id, SessionStatus::Idle)
                     .await;
             }
@@ -1097,7 +1098,7 @@ impl AcpClient {
                             .get("stopReason")
                             .or_else(|| result.get("stop_reason"))
                             .and_then(|v| v.as_str())
-                            .unwrap_or("end_turn");
+                            .unwrap_or("missing_stop_reason");
                         if let Some(bus) = &bus {
                             bus.emit(ControlEvent::Raw {
                                 session_id: Some(control_id),
@@ -1107,6 +1108,7 @@ impl AcpClient {
                                     "line": format!("← session/prompt complete · stopReason={stop}"),
                                 }),
                             });
+                            bus.emit(ControlEvent::PromptFinished { session_id: control_id, stop_reason: stop.into(), at: Utc::now() });
                             bus.emit_status(control_id, SessionStatus::Idle).await;
                         }
                     }

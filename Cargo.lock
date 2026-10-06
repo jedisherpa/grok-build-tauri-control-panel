@@ -1297,11 +1297,13 @@ dependencies = [
  "grok_permissions",
  "grok_persistence",
  "grok_scheduler",
+ "grok_workflows",
  "grok_worktree",
  "regex",
  "reqwest 0.12.28",
  "serde",
  "serde_json",
+ "sha2",
  "tauri",
  "tauri-build",
  "tauri-plugin-dialog",
@@ -1507,6 +1509,18 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "uuid",
+]
+
+[[package]]
+name = "grok_workflows"
+version = "0.1.3"
+dependencies = [
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
  "uuid",
 ]
 

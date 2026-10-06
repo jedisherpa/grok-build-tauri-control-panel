@@ -59,6 +59,12 @@ pub enum ControlEvent {
         session_id: Uuid,
         at: DateTime<Utc>,
     },
+    /// Emitted only for a real session/prompt response; Idle alone is not completion.
+    PromptFinished {
+        session_id: Uuid,
+        stop_reason: String,
+        at: DateTime<Utc>,
+    },
     ToolCall {
         session_id: Uuid,
         event: ToolCallEvent,
@@ -264,7 +270,9 @@ mod tests {
         bus.emit_session_created(id, "/tmp", "acp").await;
         let ev = rx.recv().await.unwrap();
         match ev {
-            ControlEvent::SessionCreated { session_id, cwd, .. } => {
+            ControlEvent::SessionCreated {
+                session_id, cwd, ..
+            } => {
                 assert_eq!(session_id, id);
                 assert_eq!(cwd, "/tmp");
             }

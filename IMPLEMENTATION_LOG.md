@@ -291,3 +291,9 @@ cargo clippy --workspace --all-targets -- -D warnings → PASS
 - Re-run required workspace check/strict Clippy, rebuild, and inspect both compact and normal installed windows. No agent prompt is sent by visual verification.
 
 - Compact installed verification confirmed the Folder control is reachable. Legacy background shorthands also reset the arrow tiling properties; preserve the entire arrow recipe together and reverify native dropdown rendering.
+
+## Reviewed builds phase 1 — 2026-10-06
+
+Added a pure reviewed-build state machine and a native ACP-backed Builds view. Dedicated retained worktrees pin clean Git baselines; full plan approval and final human acceptance are separate gates. Independent planner/implementer/auditor/verifier sessions run Plan/Ask modes. Exact reviewer findings drive bounded repair; repeated findings, malformed reports, abnormal completion, stream loss, cancellation, restart and scope changes stop execution. Completed prompts use explicit ACP stop reasons rather than Idle. Durable streamed checkout fingerprints bind evidence, approvals and acceptance, including staged/rename paths and repository identity; symlink and hidden-index escapes fail validation. Managed role prompts/modes remain controlled while native individual tool approvals stay available. Changes remain in their worktrees.
+
+Planning, implementation, architecture refinement, simplicity refinement and PM validation completed. Workspace tests: 115 passed, 2 existing dev-server fixtures ignored; final host refinement: 19 passed, 2 ignored (117 effective workspace tests). Workspace check and strict all-target Clippy passed; frontend syntax and diff whitespace checks passed. A streaming-buffer stack overflow discovered in validation was fixed by allocating bounded buffers on the heap and the host tests rerun. Installed native UI and fixture acceptance are final-delivery checks after phase 2.
