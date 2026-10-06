@@ -289,3 +289,5 @@ cargo clippy --workspace --all-targets -- -D warnings → PASS
 - Tested the native app at 960 × 670: composer and approval modes remained usable, but the taller inspector stack clipped the Folder control. Reduce inspector spacing/minimum tool height in short windows and allow inspector scrolling as a fallback.
 - Preserve the custom dropdown arrow across more specific legacy background rules.
 - Re-run required workspace check/strict Clippy, rebuild, and inspect both compact and normal installed windows. No agent prompt is sent by visual verification.
+
+- Compact installed verification confirmed the Folder control is reachable. Legacy background shorthands also reset the arrow tiling properties; preserve the entire arrow recipe together and reverify native dropdown rendering.
