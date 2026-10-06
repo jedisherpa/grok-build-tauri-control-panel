@@ -172,6 +172,8 @@ impl TerminalRegistry {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        #[cfg(unix)]
+        cmd.process_group(0);
 
         debug!(%command, cwd = %cwd.display(), "terminal/create spawn");
 
@@ -331,14 +333,14 @@ impl TerminalRegistry {
         };
         let mut child_guard = child.lock().await;
         if let Some(c) = child_guard.as_mut() {
-            let _ = c.kill().await;
+            crate::process::terminate(c).await?;
         }
         Ok(json!({}))
     }
 
     /// Kill every live terminal child (turn cancel) — best-effort; entries
     /// stay in the map so the agent's later output/release calls still work.
-    pub async fn kill_all(&self) {
+    pub async fn kill_all(&self) -> Result<()> {
         let children: Vec<_> = {
             let map = self.terminals.lock().await;
             map.values().map(|t| t.child.clone()).collect()
@@ -346,9 +348,10 @@ impl TerminalRegistry {
         for child in children {
             let mut guard = child.lock().await;
             if let Some(c) = guard.as_mut() {
-                let _ = c.kill().await;
+                crate::process::terminate(c).await?;
             }
         }
+        Ok(())
     }
 
     async fn release(&self, params: &Option<Value>) -> Result<Value> {
@@ -360,7 +363,7 @@ impl TerminalRegistry {
         if let Some(term) = term {
             let mut child_guard = term.child.lock().await;
             if let Some(mut child) = child_guard.take() {
-                let _ = child.kill().await;
+                crate::process::terminate(&mut child).await?;
             }
         }
         Ok(json!({}))

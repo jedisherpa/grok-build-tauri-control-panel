@@ -2,6 +2,7 @@
 //!
 //! Preferred path for interactive long-lived sessions (vs headless `-p`).
 
+mod process;
 mod client;
 mod error;
 mod messages;

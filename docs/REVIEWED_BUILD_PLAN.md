@@ -25,3 +25,7 @@ Baseline: e650aee6ddff60b73d6ba13400b0e82ea736db18, local 0.1.3 appearance/histo
 ## Local delivery
 
 Architecture and simplicity review follow implementation. Build a signed local 0.1.4 bundle; wait for the setup chat's installer to finish, preserve its completed 0.1.3 app and database before replacement, install with rollback on failure, and verify the installed UI and a bounded native fixture workflow. Save source, patch, verification and recovery artifacts in this chat's outputs. Historical governance records from the donor repository grant no authority here.
+
+## Phase 2 implementation decisions
+
+Concurrency is explicitly configurable from 1 to 4, initially 2. Prerequisites gate start order and require human acceptance. Builds retain separate checkouts at their own submitted baseline; accepted prerequisite checkout paths and evidence are provided as context. Source composition remains an explicit task within its own declared write paths. Cap and scope admission are persisted together before any native session starts. A cancelled or failed runner retains reservations until startup and process cleanup complete; unknown cleanup survives restart and requires successful cleanup retry. Lowering a cap below occupied reservations is rejected.

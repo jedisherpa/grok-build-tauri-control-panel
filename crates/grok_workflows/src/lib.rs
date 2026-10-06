@@ -1,6 +1,8 @@
 //! Reviewed builds stop at human review. The host owns execution, scope checks,
 //! durable persistence and approval UI; this crate only makes transitions explicit.
 
+pub mod coordination;
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::Path;

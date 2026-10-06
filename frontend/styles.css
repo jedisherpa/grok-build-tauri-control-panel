@@ -1337,3 +1337,13 @@ img.logo {
 .builds-evidence { padding: 12px 0; border-top: 1px solid var(--border); }
 .builds-evidence .builds-session { margin-top: 10px; font-size: 11px; }
 @media (max-width: 1100px) { .builds-header, .builds-new { padding-left: 18px; padding-right: 18px; } .builds-detail { padding: 18px; } .builds-form-columns { grid-template-columns: 1fr; } }
+.builds-coordination { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 12px; font-size: 11px; }
+.builds-coordination select { padding: 6px 8px; border-radius: 3px; background: var(--bg-soft); color: var(--text); border: 1px solid var(--border-hi); }
+.builds-coordination .btn { padding: 6px 8px; font-size: 11px; }
+.builds-coordination-note { margin: 8px 0 0; }
+#builds-dependencies { min-height: 92px; }
+.builds-row-id { font: 10px var(--font); color: var(--dim); }
+.builds-queue { font-size: 11px; color: var(--muted); margin: 8px 0; }
+.builds-id { width: 100%; padding: 5px 0; background: transparent; color: var(--muted); border: 0; font: 10px var(--font); }
+.builds-prerequisites { margin: 14px 0; }
+.builds-dependency { display: block; width: 100%; margin: 6px 0; text-align: left; white-space: normal; overflow-wrap: anywhere; font-size: 11px; line-height: 1.6; }

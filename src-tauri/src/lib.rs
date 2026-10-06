@@ -74,11 +74,14 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            builds::get_build_concurrency,
+            builds::set_build_concurrency,
             builds::list_builds,
             builds::create_build,
             builds::approve_build_plan,
             builds::accept_build,
             builds::cancel_build,
+            builds::retry_build_cleanup,
             history::history_scan,
             history::history_stats,
             history::history_search,

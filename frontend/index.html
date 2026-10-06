@@ -121,6 +121,8 @@
         <section id="view-builds" class="view">
           <header class="builds-header">
             <div class="builds-heading"><div><h1>Builds</h1><p>Plan, implement, audit and verify in separate native sessions. You approve the plan and accept the result.</p></div><button id="builds-refresh" class="btn ghost" type="button">Refresh</button></div>
+            <div class="builds-coordination"><label for="builds-concurrency">Maximum concurrent builds</label><select id="builds-concurrency"><option value="1">1</option><option value="2" selected>2</option><option value="3">3</option><option value="4">4</option></select><button id="builds-concurrency-save" class="btn ghost" type="button">Apply limit</button><span id="builds-concurrency-current" class="builds-help">Default: 2</span></div>
+            <p class="builds-help builds-coordination-note">Builds waiting for plan approval or result review retain their slot and write paths. Overlapping paths in the same repository run in sequence.</p>
             <div id="builds-status" role="status" aria-live="polite">Choose a clean Git project to begin.</div>
           </header>
           <div class="builds-content">
@@ -132,8 +134,9 @@
                 <label>What should be built?<textarea id="builds-objective" rows="4" maxlength="32768" placeholder="Describe the change and the checks that will demonstrate it works." required></textarea></label>
                 <div class="builds-form-columns"><label>Allowed write paths<textarea id="builds-scope" rows="3" placeholder="src/feature
 tests/feature" spellcheck="false" required></textarea><span class="builds-help">One relative file or folder per line. Enter . to permit the entire project.</span></label><label>Maximum repair rounds<input id="builds-repairs" type="number" min="0" max="10" value="2" required /><span class="builds-help">After the first attempt. Repeated findings stop the build early.</span></label></div>
+                <label>Prerequisite builds<select id="builds-dependencies" multiple size="4" aria-describedby="builds-dependencies-help"></select><span id="builds-dependencies-help" class="builds-help">Optional. Select with Command-click to add or remove prerequisites. This build starts after you accept every selected result. Dependencies govern start order; each build has its own worktree. Earlier worktrees and results are supplied as context; their code is not combined automatically.</span></label>
                 <details class="builds-routes"><summary>Role engines and models</summary><div id="builds-routes" class="builds-route-grid"></div><p class="builds-help">A blank model uses the engine's configured default. Reviewers use Plan mode; implementation uses Ask with native tool approvals.</p></details>
-                <div class="builds-submit"><button id="builds-create" class="btn primary" type="submit">Start planning</button><span class="builds-help">Creates a retained worktree. Implementation waits for your plan approval.</span></div>
+                <div class="builds-submit"><button id="builds-create" class="btn primary" type="submit">Submit reviewed build</button><span class="builds-help">Starts when its prerequisites, slot and write paths are available. Implementation waits for your plan approval.</span></div>
               </form>
             </details>
             <div class="builds-workspace"><div id="builds-list" class="builds-list" aria-label="Reviewed builds"></div><article id="builds-detail" class="builds-detail"><p class="empty-hint">Select a build to inspect its plan, checks and result.</p></article></div>

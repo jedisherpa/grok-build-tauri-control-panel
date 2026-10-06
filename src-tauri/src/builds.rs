@@ -6,6 +6,9 @@ use grok_config::Backend;
 use grok_control_core::{ApprovalMode, SessionRegistry, SpawnOptions};
 use grok_events::{ControlEvent, EventBus, SessionStatus};
 use grok_persistence::{Persistence, SessionRecord};
+use grok_workflows::coordination::{
+    queue_state, ready_tasks, validate_graph, CoordinationTask, QueueState,
+};
 use grok_workflows::{
     normalize_write_path, Role, Workflow, WorkflowSpec, WorkflowStatus, MAX_OUTPUT_BYTES,
 };
@@ -29,6 +32,20 @@ struct BuildRecord {
     /// Bound to the last durable role result; approvals must review these bytes.
     #[serde(default)]
     checkout_fingerprint: Option<String>,
+    #[serde(default)]
+    dependencies: Vec<String>,
+    #[serde(default)]
+    repository: String,
+    #[serde(default)]
+    reserved: bool,
+    #[serde(default)]
+    order: u64,
+    #[serde(default)]
+    submitted_commit: Option<String>,
+    #[serde(default)]
+    cleanup_pending: bool,
+    #[serde(default)]
+    cleanup_session: Option<Uuid>,
 }
 #[derive(Clone, Serialize)]
 pub struct BuildDto {
@@ -36,6 +53,10 @@ pub struct BuildDto {
     workflow: Workflow,
     approval_digest: Option<String>,
     active_session_id: Option<String>,
+    dependencies: Vec<String>,
+    queue_state: QueueState,
+    concurrency_limit: usize,
+    cleanup_pending: bool,
 }
 impl From<Workflow> for BuildDto {
     fn from(workflow: Workflow) -> Self {
@@ -46,11 +67,16 @@ impl From<Workflow> for BuildDto {
             workflow,
             approval_digest,
             active_session_id: None,
+            dependencies: Vec::new(),
+            queue_state: QueueState::Queued,
+            concurrency_limit: 2,
+            cleanup_pending: false,
         }
     }
 }
 pub struct BuildService {
     records: Mutex<BTreeMap<String, BuildRecord>>,
+    concurrency: Mutex<usize>,
     running: Mutex<HashSet<String>>,
     sessions: Mutex<HashMap<String, Uuid>>,
     registry: Arc<SessionRegistry>,
@@ -72,29 +98,136 @@ impl BuildService {
             .unwrap_or_default();
         for record in records.values_mut() {
             record.workflow.interrupt_on_restart();
+            record.reserved = record.cleanup_pending;
+            if record.repository.is_empty() {
+                // Phase 1 records predate coordination. Every runnable record is
+                // stopped above; unavailable historical projects cannot execute.
+                record.repository =
+                    legacy_repository_identity(Path::new(&record.workflow.spec.project_root));
+            }
+            if record.submitted_commit.is_none() {
+                record.submitted_commit = record.workflow.base_commit.clone();
+            }
         }
         db.set_kv(STORAGE, &serde_json::to_string(&records)?)?;
-        Ok(Arc::new(Self {
+        let concurrency = db
+            .get_kv("reviewed_build_concurrency")?
+            .map(|s| s.parse::<usize>())
+            .transpose()?
+            .unwrap_or(2);
+        if !(1..=4).contains(&concurrency) {
+            bail!("invalid stored build concurrency");
+        }
+        let restored_sessions = records
+            .iter()
+            .filter_map(|(id, r)| r.cleanup_session.map(|session| (id.clone(), session)))
+            .collect();
+        let service = Arc::new(Self {
+            concurrency: Mutex::new(concurrency),
             records: Mutex::new(records),
             running: Mutex::new(HashSet::new()),
-            sessions: Mutex::new(HashMap::new()),
+            sessions: Mutex::new(restored_sessions),
             registry,
             trees,
             db,
             bus,
-        }))
+        });
+        let weak = Arc::downgrade(&service);
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(1));
+            loop {
+                tick.tick().await;
+                let Some(service) = weak.upgrade() else {
+                    break;
+                };
+                if let Err(error) = service.dispatch().await {
+                    tracing::error!(%error, "build queue stopped");
+                }
+            }
+        });
+        Ok(service)
     }
-    pub async fn list(&self) -> Vec<BuildDto> {
+    pub async fn list(&self) -> Result<Vec<BuildDto>> {
+        let limit = *self.concurrency.lock().await;
+        let running = self.running.lock().await;
         let records = self.records.lock().await.clone();
+        let tasks = protected_coordination_tasks(&records, &running);
+        drop(running);
         let active = self.sessions.lock().await;
-        records
-            .into_values()
+        let mut ordered = records.into_values().collect::<Vec<_>>();
+        ordered.sort_by_key(|r| r.order);
+        ordered
+            .into_iter()
             .map(|record| {
                 let mut dto: BuildDto = record.workflow.into();
+                dto.queue_state = queue_state(&dto.workflow.id, &tasks, limit)?;
+                dto.dependencies = record.dependencies;
+                dto.concurrency_limit = limit;
+                dto.cleanup_pending = record.cleanup_pending;
                 dto.active_session_id = active.get(&dto.workflow.id).map(ToString::to_string);
-                dto
+                Ok(dto)
             })
             .collect()
+    }
+    pub async fn concurrency(&self) -> usize {
+        *self.concurrency.lock().await
+    }
+    pub async fn set_concurrency(self: &Arc<Self>, limit: usize) -> Result<usize> {
+        if !(1..=4).contains(&limit) {
+            bail!("concurrency must be 1..4");
+        }
+        let mut cap = self.concurrency.lock().await;
+        {
+            let running = self.running.lock().await;
+            let records = self.records.lock().await;
+            let occupied = protected_coordination_tasks(&records, &running)
+                .iter()
+                .filter(|t| t.reserved && !t.status.is_terminal())
+                .count();
+            if occupied > limit {
+                bail!(
+                    "wait for active reservations to finish before lowering concurrency to {limit}"
+                );
+            }
+        }
+        self.db
+            .set_kv("reviewed_build_concurrency", &limit.to_string())?;
+        *cap = limit;
+        drop(cap);
+        self.dispatch().await?;
+        Ok(limit)
+    }
+    async fn dispatch(self: &Arc<Self>) -> Result<()> {
+        for id in self.reserve_ready().await? {
+            self.start(id).await;
+        }
+        Ok(())
+    }
+    async fn reserve_ready(&self) -> Result<Vec<String>> {
+        // Cap, process ownership and durable reservations share this admission gate.
+        let cap = self.concurrency.lock().await;
+        let running = self.running.lock().await;
+        let selected = {
+            let mut guard = self.records.lock().await;
+            let selected = ready_tasks(&protected_coordination_tasks(&guard, &running), *cap)?;
+            if selected.is_empty() {
+                return Ok(Vec::new());
+            }
+            let mut candidate = guard.clone();
+            for id in &selected {
+                candidate
+                    .get_mut(id)
+                    .context("queue task disappeared")?
+                    .reserved = true;
+            }
+            self.db
+                .set_kv(STORAGE, &serde_json::to_string(&candidate)?)?;
+            *guard = candidate;
+            selected
+        };
+        drop(running);
+        drop(cap);
+        Ok(selected)
     }
     async fn get(&self, id: &str) -> Result<Workflow> {
         Ok(self.get_record(id).await?.workflow)
@@ -137,7 +270,11 @@ impl BuildService {
         *guard = candidate;
         Ok(out)
     }
-    pub async fn create(self: &Arc<Self>, mut spec: WorkflowSpec) -> Result<BuildDto> {
+    pub async fn create(
+        self: &Arc<Self>,
+        mut spec: WorkflowSpec,
+        dependencies: Vec<String>,
+    ) -> Result<BuildDto> {
         spec.validate()?;
         for role in [
             Role::Planner,
@@ -166,27 +303,49 @@ impl BuildService {
         for p in &spec.write_set {
             ensure_inside(&root, p)?;
         }
+        if dependencies.len() > 64 {
+            bail!("at most 64 prerequisites per task");
+        }
+        let repository = canonical_git_identity(&root)
+            .await?
+            .to_string_lossy()
+            .into_owned();
+        let submitted_commit = String::from_utf8(git(&root, &["rev-parse", "HEAD"]).await?)?
+            .trim()
+            .to_string();
         let workflow = Workflow::new(spec)?;
         let id = workflow.id.clone();
         {
             let mut guard = self.records.lock().await;
             let mut candidate = guard.clone();
+            let order = candidate.values().map(|r| r.order).max().unwrap_or(0) + 1;
             candidate.insert(
                 id.clone(),
                 BuildRecord {
                     workflow: workflow.clone(),
                     checkout_fingerprint: None,
+                    dependencies,
+                    repository,
+                    reserved: false,
+                    order,
+                    submitted_commit: Some(submitted_commit),
+                    cleanup_pending: false,
+                    cleanup_session: None,
                 },
             );
+            validate_graph(&coordination_tasks(&candidate))?;
             self.db
                 .set_kv(STORAGE, &serde_json::to_string(&candidate)?)?;
             *guard = candidate;
         }
-        self.start(id).await;
+        self.dispatch().await?;
         Ok(workflow.into())
     }
     pub async fn approve(self: &Arc<Self>, id: &str, digest: &str) -> Result<BuildDto> {
         let record = self.get_record(id).await?;
+        if !record.reserved {
+            bail!("plan approval requires a queue reservation");
+        }
         validate_review_snapshot(&record).await?;
         let out = self
             .update_snapshot(id, Some(record.workflow.revision), None, |w| {
@@ -197,8 +356,11 @@ impl BuildService {
         self.start(id.into()).await;
         Ok(out.into())
     }
-    pub async fn accept(&self, id: &str) -> Result<BuildDto> {
+    pub async fn accept(self: &Arc<Self>, id: &str) -> Result<BuildDto> {
         let record = self.get_record(id).await?;
+        if !record.reserved {
+            bail!("acceptance requires a queue reservation");
+        }
         validate_review_snapshot(&record).await?;
         Ok(self
             .update_snapshot(id, Some(record.workflow.revision), None, |w| {
@@ -208,7 +370,7 @@ impl BuildService {
             .await?
             .into())
     }
-    pub async fn cancel(&self, id: &str) -> Result<BuildDto> {
+    pub async fn cancel(self: &Arc<Self>, id: &str) -> Result<BuildDto> {
         let out = self
             .update(id, |w| {
                 w.cancel()?;
@@ -222,6 +384,39 @@ impl BuildService {
     }
     pub async fn is_managed(&self, session: Uuid) -> bool {
         self.sessions.lock().await.values().any(|id| *id == session)
+    }
+    async fn set_cleanup(&self, id: &str, session: Uuid, pending: bool) -> Result<()> {
+        let mut guard = self.records.lock().await;
+        let mut candidate = guard.clone();
+        let record = candidate.get_mut(id).context("unknown build")?;
+        if !pending && record.cleanup_session != Some(session) {
+            bail!("cleanup session changed");
+        }
+        record.cleanup_pending = pending;
+        record.cleanup_session = pending.then_some(session);
+        self.db
+            .set_kv(STORAGE, &serde_json::to_string(&candidate)?)?;
+        *guard = candidate;
+        Ok(())
+    }
+    pub async fn retry_cleanup(self: &Arc<Self>, id: &str) -> Result<BuildDto> {
+        let running = self.running.lock().await;
+        if running.contains(id) {
+            bail!("the active driver is still shutting down its native session");
+        }
+        let record = self.get_record(id).await?;
+        if !record.cleanup_pending {
+            bail!("no cleanup is pending");
+        }
+        let session = record
+            .cleanup_session
+            .context("cleanup has no recorded native session")?;
+        self.registry.get_snapshot(session).context("former native process has no live registry handle; cleanup cannot be verified after restart")?;
+        self.registry.remove_session(session).await?;
+        self.set_cleanup(id, session, false).await?;
+        self.sessions.lock().await.remove(id);
+        drop(running);
+        Ok(self.get(id).await?.into())
     }
     async fn start(self: &Arc<Self>, id: String) {
         if !self.running.lock().await.insert(id.clone()) {
@@ -263,18 +458,39 @@ impl BuildService {
     }
     async fn drive(&self, id: &str) -> Result<()> {
         loop {
-            let mut workflow = self.get(id).await?;
+            let record = self.get_record(id).await?;
+            if !record.reserved {
+                bail!("task lacks a durable queue reservation");
+            }
+            let mut workflow = record.workflow;
             let Some(role) = workflow.role_to_run() else {
                 return Ok(());
             };
             if workflow.worktree.is_none() {
                 let root = Path::new(&workflow.spec.project_root);
+                if canonical_git_identity(root).await?.to_string_lossy() != record.repository {
+                    bail!("project repository changed while queued");
+                }
                 if !git(root, &["status", "--porcelain"]).await?.is_empty() {
                     bail!("project changed before checkout creation");
                 }
-                let base = String::from_utf8(git(root, &["rev-parse", "HEAD"]).await?)?
-                    .trim()
-                    .to_string();
+                let base = record
+                    .submitted_commit
+                    .clone()
+                    .context("missing submitted baseline")?;
+                let head = String::from_utf8(git(root, &["rev-parse", "HEAD"]).await?)?;
+                if head.trim() != base {
+                    bail!("project HEAD changed while task queued; submit a new build");
+                }
+                for dependency in &record.dependencies {
+                    let prerequisite = self.get_record(dependency).await?;
+                    if prerequisite.workflow.status != WorkflowStatus::Accepted {
+                        bail!("prerequisite is not human accepted");
+                    }
+                    validate_review_snapshot(&prerequisite)
+                        .await
+                        .context("accepted prerequisite changed")?;
+                }
                 let tree = self
                     .trees
                     .create(
@@ -310,13 +526,28 @@ impl BuildService {
             let before = checkout_fingerprint(root).await?;
             let revision = workflow.revision;
             let session = Uuid::new_v4();
+            // Survives a crash from startup until native shutdown is confirmed.
+            self.set_cleanup(id, session, true).await?;
             self.sessions.lock().await.insert(id.into(), session);
             let result = self.run_role(&workflow, role, session).await;
             let persisted = self.persist_session(session);
-            let _ = self.registry.remove_session(session).await;
+            self.registry
+                .remove_session(session)
+                .await
+                .context("native cleanup failed; reservation remains protected")?;
+            self.set_cleanup(id, session, false).await?;
             self.sessions.lock().await.remove(id);
             let output = result?;
             persisted?;
+            for dependency in &record.dependencies {
+                let prerequisite = self.get_record(dependency).await?;
+                if prerequisite.workflow.status != WorkflowStatus::Accepted {
+                    bail!("prerequisite no longer accepted");
+                }
+                validate_review_snapshot(&prerequisite)
+                    .await
+                    .context("accepted prerequisite changed during role")?;
+            }
             validate_checkout(&workflow).await?;
             let after = checkout_fingerprint(root).await?;
             if role != Role::Implementer && before != after {
@@ -385,7 +616,18 @@ impl BuildService {
         .await
         .context("native session startup timed out")??;
         self.persist_session(session)?;
-        let prompt = role_prompt(workflow, role);
+        let mut prompt = role_prompt(workflow, role);
+        let dependencies = self.get_record(&workflow.id).await?.dependencies;
+        for dependency in dependencies {
+            let prerequisite = self.get_record(&dependency).await?;
+            if prerequisite.workflow.status != WorkflowStatus::Accepted {
+                bail!("prerequisite no longer accepted");
+            }
+            validate_review_snapshot(&prerequisite)
+                .await
+                .context("accepted prerequisite changed")?;
+            prompt.push_str(&format!("\nAccepted prerequisite {}: {}\nRetained reference checkout: {}\nDependency gates start order. This build's checkout has its own submitted baseline. Inspect the reference as needed; any changes you incorporate must stay within this task's declared write paths.\n", dependency, prerequisite.workflow.spec.objective, prerequisite.workflow.worktree.as_deref().unwrap_or("unavailable")));
+        }
         let mut rx = self.bus.subscribe();
         {
             // Cancellation and prompt submission share the record lock: once a
@@ -448,6 +690,66 @@ fn apply_role_result(w: &mut Workflow, role: Role, output: String, session: Uuid
         w.link_latest_session(session.to_string())?;
     }
     Ok(())
+}
+fn coordination_tasks(records: &BTreeMap<String, BuildRecord>) -> Vec<CoordinationTask> {
+    records
+        .values()
+        .map(|r| CoordinationTask {
+            id: r.workflow.id.clone(),
+            dependencies: r.dependencies.clone(),
+            repository: r.repository.clone(),
+            write_set: r.workflow.spec.write_set.clone(),
+            status: r.workflow.status,
+            reserved: r.reserved,
+            order: r.order,
+        })
+        .collect()
+}
+fn protected_coordination_tasks(
+    records: &BTreeMap<String, BuildRecord>,
+    running: &HashSet<String>,
+) -> Vec<CoordinationTask> {
+    let mut tasks = coordination_tasks(records);
+    for task in &mut tasks {
+        // Cancellation is durable immediately, but scope releases only after the
+        // native driver has shut its process down and relinquished ownership.
+        if task.reserved
+            && task.status.is_terminal()
+            && (running.contains(&task.id)
+                || records.get(&task.id).is_some_and(|r| r.cleanup_pending))
+        {
+            task.status = WorkflowStatus::Implementing;
+        }
+    }
+    tasks
+}
+#[tauri::command]
+pub async fn get_build_concurrency(
+    state: tauri::State<'_, crate::state::AppState>,
+) -> Result<usize, String> {
+    Ok(state.builds.concurrency().await)
+}
+#[tauri::command]
+pub async fn set_build_concurrency(
+    state: tauri::State<'_, crate::state::AppState>,
+    limit: usize,
+) -> Result<usize, String> {
+    state
+        .builds
+        .set_concurrency(limit)
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+#[tauri::command]
+pub async fn retry_build_cleanup(
+    state: tauri::State<'_, crate::state::AppState>,
+    id: String,
+) -> Result<BuildDto, String> {
+    state
+        .builds
+        .retry_cleanup(&id)
+        .await
+        .map_err(|e| format!("{e:#}"))
 }
 #[derive(Default)]
 struct TurnCollector {
@@ -634,6 +936,18 @@ async fn validate_review_snapshot(record: &BuildRecord) -> Result<()> {
             .as_deref()
             .context("missing checkout")?,
     );
+    if !record.repository.is_empty()
+        && canonical_git_identity(root).await?.to_string_lossy() != record.repository
+    {
+        bail!("checkout repository differs from its submitted identity");
+    }
+    if record
+        .submitted_commit
+        .as_ref()
+        .is_some_and(|submitted| record.workflow.base_commit.as_ref() != Some(submitted))
+    {
+        bail!("checkout baseline differs from its submitted commit");
+    }
     let expected = record
         .checkout_fingerprint
         .as_ref()
@@ -642,6 +956,23 @@ async fn validate_review_snapshot(record: &BuildRecord) -> Result<()> {
         bail!("checkout changed since the last role reviewed it; create a new reviewed task");
     }
     Ok(())
+}
+fn legacy_repository_identity(root: &Path) -> String {
+    let resolved = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .and_then(|path| std::fs::canonicalize(path.trim()).ok());
+    // This fallback is for stopped historical records only; runnable submissions
+    // must resolve the actual common directory through canonical_git_identity.
+    resolved
+        .unwrap_or_else(|| root.join(".git"))
+        .to_string_lossy()
+        .into_owned()
 }
 async fn canonical_git_identity(root: &Path) -> Result<std::path::PathBuf> {
     let common = String::from_utf8(
@@ -780,16 +1111,17 @@ async fn checkout_fingerprint(root: &Path) -> Result<String> {
 pub async fn list_builds(
     state: tauri::State<'_, crate::state::AppState>,
 ) -> Result<Vec<BuildDto>, String> {
-    Ok(state.builds.list().await)
+    state.builds.list().await.map_err(|e| format!("{e:#}"))
 }
 #[tauri::command]
 pub async fn create_build(
     state: tauri::State<'_, crate::state::AppState>,
     spec: WorkflowSpec,
+    dependencies: Option<Vec<String>>,
 ) -> Result<BuildDto, String> {
     state
         .builds
-        .create(spec)
+        .create(spec, dependencies.unwrap_or_default())
         .await
         .map_err(|e| format!("{e:#}"))
 }
@@ -958,6 +1290,13 @@ mod tests {
         let mut record = BuildRecord {
             workflow: workflow.clone(),
             checkout_fingerprint: Some(snapshot),
+            dependencies: vec![],
+            repository: String::new(),
+            reserved: false,
+            order: 0,
+            submitted_commit: None,
+            cleanup_pending: false,
+            cleanup_session: None,
         };
         validate_review_snapshot(&record).await.unwrap();
         std::fs::write(fixture.0.join("src/in.txt"), "changed after plan\n").unwrap();
@@ -1078,6 +1417,13 @@ mod tests {
         let record = BuildRecord {
             workflow: w,
             checkout_fingerprint: Some("snapshot".into()),
+            dependencies: vec![],
+            repository: String::new(),
+            reserved: false,
+            order: 0,
+            submitted_commit: None,
+            cleanup_pending: false,
+            cleanup_session: None,
         };
         let restored: BuildRecord =
             serde_json::from_str(&serde_json::to_string(&record).unwrap()).unwrap();
@@ -1100,5 +1446,195 @@ mod tests {
         let legacy: BuildRecord =
             serde_json::from_str(&serde_json::to_string(&restored.workflow).unwrap()).unwrap();
         assert!(legacy.checkout_fingerprint.is_none());
+    }
+
+    fn coordination_record(w: &Workflow, id: &str, scope: &str, order: u64) -> BuildRecord {
+        let mut workflow = w.clone();
+        workflow.id = id.into();
+        workflow.status = WorkflowStatus::Planning;
+        workflow.spec.write_set = vec![scope.into()];
+        BuildRecord {
+            submitted_commit: workflow.base_commit.clone(),
+            repository: legacy_repository_identity(Path::new(&workflow.spec.project_root)),
+            workflow,
+            checkout_fingerprint: None,
+            dependencies: vec![],
+            reserved: false,
+            order,
+            cleanup_pending: false,
+            cleanup_session: None,
+        }
+    }
+    fn service_without_timer(root: &Path, records: Vec<BuildRecord>) -> Arc<BuildService> {
+        let bus = grok_events::shared_bus();
+        let cli = Arc::new(grok_cli_wrapper::GrokCli::new("/bin/true"));
+        let registry = SessionRegistry::new(
+            bus.clone(),
+            Arc::new(tokio::sync::RwLock::new(grok_config::GrokConfig::default())),
+            cli.clone(),
+        );
+        let db = Arc::new(Persistence::open(root.join("queue.sqlite")).unwrap());
+        let records: BTreeMap<_, _> = records
+            .into_iter()
+            .map(|r| (r.workflow.id.clone(), r))
+            .collect();
+        db.set_kv(STORAGE, &serde_json::to_string(&records).unwrap())
+            .unwrap();
+        Arc::new(BuildService {
+            records: Mutex::new(records),
+            concurrency: Mutex::new(2),
+            running: Mutex::new(HashSet::new()),
+            sessions: Mutex::new(HashMap::new()),
+            registry,
+            trees: Arc::new(WorktreeManager::new(cli, root.join("trees"))),
+            db,
+            bus,
+        })
+    }
+
+    #[tokio::test]
+    async fn parallel_queue_admissions_atomically_persist_slots_and_scopes() {
+        let (fixture, workflow) = fixture().await;
+        let service = service_without_timer(
+            &fixture.0,
+            vec![
+                coordination_record(&workflow, "first000", "src", 1),
+                coordination_record(&workflow, "overlap0", "src/a", 2),
+                coordination_record(&workflow, "third000", "tests", 3),
+            ],
+        );
+        let (left, right, another) = tokio::join!(
+            service.reserve_ready(),
+            service.reserve_ready(),
+            service.reserve_ready()
+        );
+        let all: Vec<_> = [left.unwrap(), right.unwrap(), another.unwrap()]
+            .into_iter()
+            .flatten()
+            .collect();
+        assert_eq!(all, vec!["first000", "third000"]);
+        let stored: BTreeMap<String, BuildRecord> =
+            serde_json::from_str(&service.db.get_kv(STORAGE).unwrap().unwrap()).unwrap();
+        assert_eq!(stored.values().filter(|r| r.reserved).count(), 2);
+        assert!(!stored["overlap0"].reserved);
+        assert!(service.set_concurrency(1).await.is_err());
+        assert_eq!(service.concurrency().await, 2);
+    }
+
+    #[tokio::test]
+    async fn cancelled_driver_and_failed_cleanup_keep_scope_until_verified_shutdown() {
+        let (fixture, workflow) = fixture().await;
+        let mut first = coordination_record(&workflow, "first000", "src", 1);
+        first.reserved = true;
+        first.workflow.status = WorkflowStatus::Implementing;
+        let service = service_without_timer(
+            &fixture.0,
+            vec![
+                first,
+                coordination_record(&workflow, "second00", "src/a", 2),
+            ],
+        );
+        service.running.lock().await.insert("first000".into());
+        service.cancel("first000").await.unwrap();
+        assert!(service.reserve_ready().await.unwrap().is_empty());
+        let session = Uuid::new_v4();
+        service
+            .set_cleanup("first000", session, true)
+            .await
+            .unwrap();
+        service.running.lock().await.remove("first000");
+        assert!(service.reserve_ready().await.unwrap().is_empty());
+        assert!(service.retry_cleanup("first000").await.is_err());
+        assert!(
+            service
+                .get_record("first000")
+                .await
+                .unwrap()
+                .cleanup_pending
+        );
+        // Simulate positively confirmed native shutdown at the cleanup boundary.
+        service
+            .set_cleanup("first000", session, false)
+            .await
+            .unwrap();
+        assert_eq!(service.reserve_ready().await.unwrap(), vec!["second00"]);
+    }
+
+    #[tokio::test]
+    async fn blocked_dependencies_do_not_prevent_independent_host_admission() {
+        let (fixture, workflow) = fixture().await;
+        let mut failed = coordination_record(&workflow, "failed00", "src", 1);
+        failed.workflow.status = WorkflowStatus::Failed;
+        let mut child = coordination_record(&workflow, "child000", "tests", 2);
+        child.dependencies = vec!["failed00".into()];
+        let service = service_without_timer(
+            &fixture.0,
+            vec![
+                failed,
+                child,
+                coordination_record(&workflow, "free0000", "src", 3),
+            ],
+        );
+        assert_eq!(service.reserve_ready().await.unwrap(), vec!["free0000"]);
+        let list = service.list().await.unwrap();
+        assert_eq!(
+            list.iter()
+                .find(|r| r.workflow.id == "child000")
+                .unwrap()
+                .queue_state,
+            QueueState::BlockedDependencies
+        );
+    }
+
+    #[tokio::test]
+    async fn reservation_persistence_failure_does_not_start_or_reserve_tasks() {
+        let (fixture, workflow) = fixture().await;
+        let service = service_without_timer(
+            &fixture.0,
+            vec![coordination_record(&workflow, "first000", "src", 1)],
+        );
+        let dbpath = fixture.0.join("queue.sqlite");
+        std::fs::rename(&dbpath, fixture.0.join("queue-backup.sqlite")).unwrap();
+        std::fs::create_dir(&dbpath).unwrap();
+        assert!(service.reserve_ready().await.is_err());
+        assert!(!service.get_record("first000").await.unwrap().reserved);
+        assert!(service.running.lock().await.is_empty());
+        assert_eq!(service.registry.session_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn restart_durably_interrupts_unaccepted_tasks_but_preserves_cleanup_guards() {
+        let (fixture, workflow) = fixture().await;
+        let mut pending = coordination_record(&workflow, "pending0", "src", 1);
+        pending.reserved = true;
+        pending.workflow.status = WorkflowStatus::ReadyForReview;
+        let mut cleanup = coordination_record(&workflow, "cleanup0", "tests", 2);
+        cleanup.reserved = true;
+        cleanup.workflow.status = WorkflowStatus::Cancelled;
+        cleanup.cleanup_pending = true;
+        cleanup.cleanup_session = Some(Uuid::new_v4());
+        let mut legacy = coordination_record(&workflow, "legacy00", "docs", 3);
+        legacy.repository.clear();
+        legacy.workflow.status = WorkflowStatus::Accepted;
+        let service = service_without_timer(&fixture.0, vec![pending, cleanup, legacy]);
+        let restarted = BuildService::open(
+            service.registry.clone(),
+            service.trees.clone(),
+            service.db.clone(),
+            service.bus.clone(),
+        )
+        .unwrap();
+        let stored: BTreeMap<String, BuildRecord> =
+            serde_json::from_str(&service.db.get_kv(STORAGE).unwrap().unwrap()).unwrap();
+        assert_eq!(
+            stored["pending0"].workflow.status,
+            WorkflowStatus::Interrupted
+        );
+        assert!(!stored["pending0"].reserved);
+        assert!(stored["cleanup0"].cleanup_pending && stored["cleanup0"].reserved);
+        assert_eq!(stored["legacy00"].workflow.status, WorkflowStatus::Accepted);
+        assert!(!stored["legacy00"].repository.is_empty());
+        validate_graph(&protected_coordination_tasks(&stored, &HashSet::new())).unwrap();
+        assert!(restarted.retry_cleanup("cleanup0").await.is_err());
     }
 }

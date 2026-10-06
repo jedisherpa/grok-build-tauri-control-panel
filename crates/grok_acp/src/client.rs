@@ -281,6 +281,9 @@ impl AcpClient {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
+        #[cfg(unix)]
+        cmd.process_group(0);
+
         // GUI apps need an explicit PATH so grok can find tools/npx/git.
         // Prefer full inheritance; still force PATH/HOME for Finder launches.
         cmd.env("PATH", std::env::var("PATH").unwrap_or_else(|_| {
@@ -1175,7 +1178,7 @@ impl AcpClient {
             }
             // The agent should wind down its tool calls, but the commands run
             // in OUR terminal host — kill them so Stop actually stops work.
-            self.terminals.kill_all().await;
+            self.terminals.kill_all().await?;
         }
         if let Some(bus) = &self.event_bus {
             bus.emit_status(self.control_session_id, SessionStatus::Cancelled)
@@ -2633,10 +2636,12 @@ impl AcpClient {
             .store(true, std::sync::atomic::Ordering::Relaxed);
         self.drain_pending_permissions().await;
         let _ = self.cancel().await;
+        self.terminals.kill_all().await?;
         let mut child_guard = self.child.lock().await;
-        if let Some(mut child) = child_guard.take() {
-            let _ = child.kill().await;
+        if let Some(child) = child_guard.as_mut() {
+            crate::process::terminate(child).await?;
         }
+        child_guard.take();
         *self.transport.write().await = None;
         Ok(())
     }
