@@ -4,13 +4,13 @@
    ═══════════════════════════════════════════════════════════════════════════ */
 
 :root {
-  --bomb-fuse: #fb923c;
-  --bomb-fuse-hot: #fde047;
-  --bomb-smoke: #94a3b8;
-  --bomb-boom: #f97316;
-  --bomb-ok: #4ade80;
-  --bomb-err: #fb7185;
-  --bomb-wait: #fbbf24;
+  --bomb-fuse: #eed8b5;
+  --bomb-fuse-hot: #ffe6ad;
+  --bomb-smoke: #9cabbc;
+  --bomb-boom: #eed8b5;
+  --bomb-ok: #b7e3ce;
+  --bomb-err: #eab1ba;
+  --bomb-wait: #eed8b5;
 }
 
 /* ── Sprite base ─────────────────────────────────────────────────────────── */
@@ -155,7 +155,7 @@
   animation: fuse-spark 0.45s steps(3) infinite;
 }
 .px-bomb.mood-thinking::after {
-  background: #fff7ed;
+  background: #f7e5c8;
   box-shadow: 0 0 4px var(--bomb-fuse-hot);
   animation: spark-rise 0.75s linear infinite;
 }
@@ -192,7 +192,7 @@
   animation: fuse-spark 0.55s steps(3) infinite;
 }
 .px-bomb.mood-tooling::after {
-  background: #fff7ed;
+  background: #f7e5c8;
   box-shadow: -6px 10px 0 color-mix(in srgb, var(--tool) 80%, transparent);
   animation: spark-rise 0.85s linear infinite;
 }
@@ -211,7 +211,7 @@
   animation: fuse-spark 0.5s steps(3) infinite;
 }
 .px-bomb.mood-stream::after {
-  background: #e0f2fe;
+  background: #c4b5dd;
   animation: spark-rise 0.7s linear infinite;
 }
 
@@ -272,7 +272,7 @@
   animation: fuse-twinkle 0.7s steps(2) infinite;
 }
 .px-bomb.mood-wait::after {
-  background: #fffbeb;
+  background: #f7e5c8;
   animation: spark-rise 1.1s linear infinite;
 }
 
@@ -375,7 +375,7 @@
   flex-shrink: 0;
   margin: 0 12px 8px;
   padding: 12px 14px 10px;
-  border-radius: 12px;
+  border-radius: 3px;
   border: 1px solid var(--border);
   background: var(--bg-soft);
   box-shadow: inset 0 0 0 1px color-mix(in srgb, #000 30%, transparent);
@@ -486,18 +486,18 @@
   padding: 4px 2px;
   border-radius: 6px;
   color: var(--dim);
-  background: #000000;
+  background: var(--bg);
   border: 1px solid transparent;
 }
 .turn-stages .stage.done {
   color: var(--ok);
   border-color: color-mix(in srgb, var(--ok) 30%, transparent);
-  background: color-mix(in srgb, var(--ok) 8%, #000000);
+  background: color-mix(in srgb, var(--ok) 8%, var(--bg));
 }
 .turn-stages .stage.active {
   color: var(--bomb-fuse-hot);
   border-color: color-mix(in srgb, var(--bomb-fuse) 45%, transparent);
-  background: color-mix(in srgb, var(--bomb-fuse) 12%, #000000);
+  background: color-mix(in srgb, var(--bomb-fuse) 12%, var(--bg));
   animation: stage-pulse 1.4s ease-in-out infinite;
 }
 .turn-stages .stage.error {
@@ -507,14 +507,14 @@
 .turn-dock-meter {
   height: 3px;
   border-radius: 2px;
-  background: #000000;
+  background: var(--bg);
   overflow: hidden;
 }
 .turn-dock-meter > i {
   display: block;
   height: 100%;
   width: 40%;
-  background: linear-gradient(90deg, var(--bomb-fuse), var(--bomb-fuse-hot), #fff7ed);
+  background: linear-gradient(90deg, var(--bomb-fuse), var(--bomb-fuse-hot), #f7e5c8);
   box-shadow: 0 0 8px var(--bomb-fuse);
   transition: width 0.25s ease-out;
 }

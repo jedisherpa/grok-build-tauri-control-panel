@@ -899,11 +899,9 @@ function renderTranscript() {
     root.innerHTML = `<div class="welcome">
 <div class="welcome-hero">
   ${bombHtml("ready", "xl")}
-  <pre class="banner">  ╔══════════════════════════════════════╗
-  ║              bomb code               ║
-  ╚══════════════════════════════════════╝</pre>
+  <h2 class="welcome-title">A place to build.</h2>
 </div>
-<p>Select a thread or start a new ACP session.</p>
+<p>Choose your project, select an engine, and begin with a plan.</p>
 <p class="muted">Conversation and explanations appear here; tool details stay to the side.</p>
 </div>`;
     $("composer-session").textContent = "no session";

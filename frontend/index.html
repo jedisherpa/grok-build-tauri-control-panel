@@ -6,6 +6,7 @@
     <title>Bomb Code</title>
     <link rel="stylesheet" href="styles.css" />
     <link rel="stylesheet" href="bombs.css" />
+    <link rel="stylesheet" href="world.css" />
   </head>
   <body>
     <div id="app">
@@ -128,7 +129,7 @@
         <section id="view-chat" class="view active">
         <div class="narrative-panel">
           <div class="section-label explain-header">
-            <span>What's happening</span><span class="narrator-label">AI activity explanation</span>
+            <span class="explain-heading">What's happening</span><span class="narrator-label">AI activity explanation</span>
             <span class="explain-header-actions">
               <button id="explain-config" class="explain-gear" type="button"
                 title="Choose which provider/model narrates">⚙</button>
@@ -151,12 +152,10 @@
             <div class="welcome">
               <div class="welcome-hero">
                 <span class="px-bomb xl mood-ready" aria-hidden="true"><img src="assets/logo.png" alt="" /></span>
-                <pre class="banner">  ╔══════════════════════════════════════╗
-  ║              bomb code               ║
-  ╚══════════════════════════════════════╝</pre>
+                <h2 class="welcome-title">A place to build.</h2>
               </div>
-              <p>Select a thread or start a new ACP session.</p>
-              <p class="muted">Pixel bombs track thinking, tools, and turn status while you wait.</p>
+              <p>Choose your project, select an engine, and begin with a plan.</p>
+              <p class="muted">Your conversation stays here. Tool activity stays to the side.</p>
             </div>
           </div>
           <!-- Primary turn status: one dock, facts first, bomb flavor second -->
@@ -494,6 +493,7 @@
               <input type="checkbox" id="toggle-acp-lines" />
               <span>Show ACP protocol lines in threads</span>
             </label>
+            <label class="view-setting"><input type="checkbox" id="toggle-visual-motion" /><span>Pause visual motion</span></label>
           </div>
         </div>
 
@@ -532,6 +532,7 @@
         </div>
       </aside>
     </div>
+    <script src="world.js"></script>
     <script src="presence.js"></script>
     <script src="app.js"></script>
     <script src="history.js"></script>

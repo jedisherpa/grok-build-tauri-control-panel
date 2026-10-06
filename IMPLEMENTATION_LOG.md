@@ -268,3 +268,12 @@ cargo clippy --workspace --all-targets -- -D warnings → PASS
 - Loading history replay had appeared as live reply activity. Import visible user/agent messages atomically before loading, suppress protocol replay until an explicit prompt, and force the saved conversation view to settle idle. Imported approval/tool roles are rejected transactionally.
 - Some session/load and session/resume responses omit sessionId; model configuration now uses the already-known native ID. This prevents a successful native load from being misreported as a fresh fallback during model selection.
 - Native loaded threads retain their conversation title. Strict check/Clippy and 92 workspace tests pass, including replay/live-stream separation and atomic rejection of historical approval records.
+
+## Cloud World appearance phase — 2026-10-06
+
+- Adapt the supplied palette/type/material handoff to the desktop workspace: midnight navy, cream reading text, mint actions and selections, lavender orientation, parchment focus, small corners and editorial settings/list rows. Keep the explanation-first layout and native engine controls.
+- Add an original static faceted workshop landmark only to the empty explanation state. Retain Bomb Code identity and status indicators.
+- Keep body/composer text in local sans fonts, display headings in Georgia, and terminal/code/provenance in monospace. No font service or external asset dependency.
+- Add a persistent visual-motion pause preference; hidden pages pause CSS animation and reduced-motion removes it. Execution and permissions are unaffected.
+- Update the local build to 0.1.3 and describe its native multi-engine capability in bundle metadata. Leave deferred cloud exports and source histories alone.
+- Validation before commit: workspace check and strict all-target Clippy pass; JS syntax and existing presence assertions pass; diff whitespace check passes. Main palette text contrasts exceed 5:1 on the four principal surfaces; native installed visual verification follows the build.

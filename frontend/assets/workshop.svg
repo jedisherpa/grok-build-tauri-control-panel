@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 340 204" fill="none">
+  <!-- Original small faceted workshop, drawn from the supplied visual system. -->
+  <path d="M14 179c20-17 41-18 61-4 13-20 40-20 60 0 20-11 48-3 58 14H14Z" fill="#657b92" opacity=".13"/>
+  <path d="m29 124 123-40 164 43-93 39-151-13Z" fill="#789e9c"/>
+  <path d="m29 124 43 29 16 26 19-20 43 22 39-20 34 25v-20Z" fill="#40576d"/>
+  <path d="m223 166 93-39-21 32-30 11-16 17Z" fill="#537782"/>
+  <path d="m29 124 122-40 165 43-93 39-151-13Z" fill="#6f9993" stroke="#a7c7b8" stroke-width="1.5"/>
+  <path d="m56 125 96-30 136 34-67 27-141-15Z" fill="#a7c7b8" opacity=".35"/>
+  <path d="m89 137 80-25 84 21" stroke="#e4dec1" stroke-width="8" opacity=".55"/>
+  <ellipse cx="166" cy="116" rx="40" ry="9" fill="#182a44" opacity=".16"/>
+  <path d="M134 81v29l32 13 32-16V80" fill="#e0cfaf"/>
+  <path d="m166 94 32-14v27l-32 16Z" fill="#a7c7b8"/>
+  <path d="m126 79 42-36 38 34-40 18Z" fill="#e4d5b9"/>
+  <path d="m168 43 38 34-40 18Z" fill="#847ba5"/>
+  <path d="m126 79 40 16 40-18v5l-40 18-40-16Z" fill="#c4b5dd"/>
+  <path d="M168 43V29l23 5-23 8" fill="#c4b5dd"/>
+  <path d="m144 91 12 5v15l-12-5Z" fill="#172941"/>
+  <path d="m177 96 11-5v10l-11 5Z" fill="#f7e5c8"/>
+  <path d="M66 120V87m199 54v-30m-36-2V78" stroke="#40576d" stroke-width="3"/>
+  <path d="m47 99 19-43 19 43Z" fill="#8bbbaf"/>
+  <path d="m66 56 19 43H66Z" fill="#4b7e78"/>
+  <path d="m250 117 15-34 15 34Z" fill="#baabd4"/>
+  <path d="m265 83 15 34h-15Z" fill="#766998"/>
+  <path d="m214 87 15-35 16 35Z" fill="#8bbbaf"/>
+  <path d="m229 52 16 35h-16Z" fill="#4b7e78"/>
+  <path d="M113 115v13m111 7v11" stroke="#40576d" stroke-width="2"/>
+  <path d="m109 106-2 10h12l-2-10Zm111 20-2 10h12l-2-10Z" fill="#ffe6ad"/>
+  <path d="m84 25 2-5 2 5 5 2-5 2-2 5-2-5-5-2Zm185 13 1-4 2 4 4 1-4 2-2 4-1-4-4-2Z" fill="#c1cbd5" opacity=".35"/>
+</svg>
