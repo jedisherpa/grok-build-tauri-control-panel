@@ -506,6 +506,15 @@ fn structured_reader_args<'a>(prompt: &'a str, model: &'a str) -> Vec<&'a str> {
     ]
 }
 
+fn clip(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    let clipped: String = s.chars().take(max).collect();
+    format!("{clipped}…")
+}
+
+
 #[cfg(test)]
 mod structured_reader_tests {
     use super::*;
@@ -519,12 +528,4 @@ mod structured_reader_tests {
         assert!(args.contains(&"--verbatim"));
         assert!(!args.contains(&"--always-approve"));
     }
-}
-
-fn clip(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        return s.to_string();
-    }
-    let clipped: String = s.chars().take(max).collect();
-    format!("{clipped}…")
 }
