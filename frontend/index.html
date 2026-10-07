@@ -250,12 +250,12 @@ tests/feature" spellcheck="false" required></textarea><span class="builds-help">
               <span id="composer-session" class="muted">no session</span>
               <span id="composer-phase" class="composer-phase" style="display:none"></span>
               <span id="composer-model" class="muted"></span>
-              <span id="thread-git-row" class="thread-git-row" style="display:none">
-                <span id="thread-branch" class="thread-branch muted"></span>
+              <span id="thread-git-row" class="thread-git-row" style="display:none" role="group" aria-label="Bring worktree changes into the project">
+                <span id="thread-branch" class="thread-branch muted" title="This thread writes in an isolated worktree, not the project folder"></span>
                 <button id="btn-sync-thread" class="btn ghost" type="button"
-                  title="Merge the project's latest changes into this thread's worktree">⟳ Sync</button>
-                <button id="btn-land-thread" class="btn" type="button"
-                  title="Merge this thread's work back into the project">⬆ Land</button>
+                  title="Pull the project branch into this worktree (resolve conflicts here, then Land)">⟳ Sync from project</button>
+                <button id="btn-land-thread" class="btn primary" type="button"
+                  title="Commit worktree changes and merge them into the project folder — use this instead of copying files by hand">⬆ Land into project</button>
               </span>
             </div>
             <div id="composer-gate-hint" class="composer-gate-hint" style="display:none" role="status" aria-live="polite"></div>
@@ -338,6 +338,7 @@ tests/feature" spellcheck="false" required></textarea><span class="builds-help">
               <button id="btn-wt-refresh" class="btn">↻ Refresh</button>
               <span class="muted">Worktrees across your projects — 🌱 rows belong to threads.</span>
             </div>
+            <p class="builds-help" id="wt-land-help">Agent edits stay in the thread worktree until you <strong>Land into project</strong> (composer or row button). That commits + merges into the project folder — no hand-copying. Use <strong>Sync from project</strong> first if Land reports conflicts.</p>
             <div id="wt-list" class="wt-list">
               <div class="empty-hint">No projects yet — add one from the sidebar.</div>
             </div>

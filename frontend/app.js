@@ -583,6 +583,12 @@ async function askConfirm(message, { title = "Bomb Code", kind = "warning" } = {
   return window.confirm(message);
 }
 
+function toastOk(msg) {
+  try {
+    pushEvent(String(msg || ""), "ok", null, { force: true });
+  } catch (_) {}
+}
+
 function toastError(e) {
   const msg = e?.message || String(e);
   pushEvent(msg, "err", "error", { force: true, milestone: true });
@@ -1497,48 +1503,66 @@ function updateThreadGitRow(sess) {
   const isolated = !!(sess && (sess.projectRoot || sess.project_root));
   row.style.display = isolated ? "" : "none";
   if (isolated) {
-    $("thread-branch").textContent = `🌱 ${sess.worktree || "worktree"}`;
+    $("thread-branch").textContent = `🌱 ${sess.worktree || "worktree"} · land to merge into project`;
   }
 }
 
-async function landThread() {
-  const id = state.selectedSession;
+async function landThread(sessionId) {
+  const id = (typeof sessionId === "string" && sessionId) || state.selectedSession;
   if (!id) return;
   const btn = $("btn-land-thread");
+  const rowBtns = [...document.querySelectorAll(".wt-land")].filter((b) => b.dataset.id === id);
   if (btn) btn.disabled = true;
+  rowBtns.forEach((b) => { b.disabled = true; });
   try {
     const res = await invoke("land_thread", { id });
     const sess = state.sessions.find((s) => s.id === id);
     if (res.status === "landed") {
       if (sess) sess.needsSync = false;
-      pushEvent(`⬆ landed into ${res.targetBranch}`, "ok", "boom", { force: true, milestone: true });
+      const where = res.targetBranch || "project";
+      pushEvent(
+        `⬆ Landed into project (${where}) — worktree changes are now in the project folder`,
+        "ok",
+        "boom",
+        { force: true, milestone: true }
+      );
+      toastOk(`Landed into ${where}. Open the project folder to use the files — no manual copy needed.`);
     } else {
       if (sess) sess.needsSync = true;
       pushEvent(
-        `landing conflicted (${(res.files || []).join(", ")}) — hit Sync, let the agent resolve, land again`,
+        `Land hit conflicts (${(res.files || []).join(", ")}) — Sync from project, let this thread's agent resolve, then Land again`,
         "err",
         "wait",
         { force: true, milestone: true }
       );
     }
     renderThreads();
+    if ($("view-worktrees")?.classList.contains("active")) refreshWorktrees();
   } catch (e) {
     toastError(e);
   } finally {
     if (btn) btn.disabled = false;
+    rowBtns.forEach((b) => { b.disabled = false; });
   }
 }
 
-async function syncThread() {
-  const id = state.selectedSession;
+async function syncThread(sessionId) {
+  const id = (typeof sessionId === "string" && sessionId) || state.selectedSession;
   if (!id) return;
   const btn = $("btn-sync-thread");
+  const rowBtns = [...document.querySelectorAll(".wt-sync")].filter((b) => b.dataset.id === id);
   if (btn) btn.disabled = true;
+  rowBtns.forEach((b) => { b.disabled = true; });
   try {
+    // Open the owning thread so conflict prompts land in the right composer.
+    if (sessionId && state.selectedSession !== id) {
+      try { await selectSession(id); } catch (_) {}
+    }
     const res = await invoke("sync_thread", { id });
     const sess = state.sessions.find((s) => s.id === id);
     if (res.status === "synced") {
-      pushEvent(`⟳ synced from ${res.targetBranch}`, "ok", null, { force: true });
+      pushEvent(`⟳ Synced project (${res.targetBranch}) into this worktree`, "ok", null, { force: true });
+      toastOk(`Synced from ${res.targetBranch}. Worktree is up to date with the project.`);
     } else {
       // Conflicts live in the worktree now — prefill a resolution prompt so
       // one click + send puts this thread's own agent on conflict duty.
@@ -1547,17 +1571,19 @@ async function syncThread() {
       if (promptBox && !promptBox.value.trim()) {
         promptBox.value = `Merge conflicts from ${res.targetBranch} were left in this worktree (${files}). Resolve them, keeping both sides' intent, then commit the result.`;
       }
-      pushEvent(`sync left conflicts in ${files} — prompt prefilled, send it to let the agent resolve`, "err", "wait", {
+      pushEvent(`Sync left conflicts in ${files} — prompt prefilled; Send so this thread's agent can resolve, then Land into project`, "err", "wait", {
         force: true,
         milestone: true,
       });
     }
     if (sess && res.status === "synced") sess.needsSync = false;
     renderThreads();
+    if ($("view-worktrees")?.classList.contains("active")) refreshWorktrees();
   } catch (e) {
     toastError(e);
   } finally {
     if (btn) btn.disabled = false;
+    rowBtns.forEach((b) => { b.disabled = false; });
   }
 }
 
@@ -3920,8 +3946,8 @@ $("btn-dev-server").onclick = startDevServer;
 $("btn-dev-stop").onclick = stopDevServer;
 $("btn-dev-open").onclick = openDevServer;
 $("btn-dev-folder").onclick = revealProject;
-$("btn-land-thread") && ($("btn-land-thread").onclick = landThread);
-$("btn-sync-thread") && ($("btn-sync-thread").onclick = syncThread);
+$("btn-land-thread") && ($("btn-land-thread").onclick = () => landThread());
+$("btn-sync-thread") && ($("btn-sync-thread").onclick = () => syncThread());
 // Send doubles as Stop while a turn is running.
 $("btn-send").onclick = () => {
   if (turnActive() && state.selectedSession) {
@@ -4478,9 +4504,14 @@ async function refreshWorktrees() {
           isThread ? `<span class="badge branch">🌱 thread</span>` : "",
           w.locked ? `<span class="badge needs-sync">locked</span>` : "",
         ].join("");
+        const landSync = owner
+          ? `<button class="btn primary wt-land" data-id="${escapeHtml(owner.id)}" title="Commit + merge this worktree into the project folder">⬆ Land into project</button>
+             <button class="btn ghost wt-sync" data-id="${escapeHtml(owner.id)}" title="Pull project branch into this worktree">⟳ Sync</button>`
+          : "";
         const actions = isPrimary
           ? ""
-          : `<button class="btn ghost wt-diff" data-path="${escapeHtml(String(w.path))}">Diff</button>
+          : `${landSync}
+             <button class="btn ghost wt-diff" data-path="${escapeHtml(String(w.path))}">Diff</button>
              <button class="btn ghost danger wt-remove" data-repo="${escapeHtml(repo)}" data-path="${escapeHtml(String(w.path))}">Remove</button>`;
         return `<div class="wt-row">
   <div class="wt-row-main">
@@ -4504,6 +4535,12 @@ async function refreshWorktrees() {
 
   root.querySelectorAll(".wt-open-thread").forEach((el) => {
     el.onclick = () => selectSession(el.dataset.id);
+  });
+  root.querySelectorAll(".wt-land").forEach((el) => {
+    el.onclick = () => landThread(el.dataset.id);
+  });
+  root.querySelectorAll(".wt-sync").forEach((el) => {
+    el.onclick = () => syncThread(el.dataset.id);
   });
   root.querySelectorAll(".wt-diff").forEach((el) => {
     el.onclick = async () => {
