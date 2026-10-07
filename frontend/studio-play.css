@@ -1,0 +1,128 @@
+/* Play surface stays off the working desk.
+   It does not dim the center column or draw a control on the thread. */
+html.is-studio-play #composer,
+html.is-studio-play #studio-invitation {
+  display: none;
+}
+
+#studio-play {
+  position: fixed;
+  z-index: 80;
+  left: var(--left, 240px);
+  right: var(--right, 310px);
+  top: 76px;
+  bottom: 44px;
+  display: grid;
+  place-items: center;
+  pointer-events: none;
+  background: transparent;
+  container-type: size;
+}
+
+.has-panel-cubes #studio-play {
+  left: 228px;
+  right: 256px;
+}
+
+@media (max-width: 1100px) {
+  .has-panel-cubes #studio-play {
+    left: 214px;
+    right: 246px;
+  }
+}
+
+#studio-play::before {
+  content: none;
+}
+
+#studio-play[hidden] { display: none; }
+
+#studio-play-word {
+  display: none;
+  position: relative;
+  z-index: 1;
+  margin: 0;
+  max-width: 100%;
+  pointer-events: none;
+  font: 400 32px/1.1 var(--display, Georgia, "Iowan Old Style", serif);
+  color: #f4efe6;
+  letter-spacing: -0.035em;
+  text-align: center;
+  white-space: nowrap;
+  text-shadow:
+    0 1px 0 rgba(6, 10, 18, 0.65),
+    0 22px 48px rgba(6, 10, 18, 0.55);
+  user-select: none;
+}
+
+#studio-play-word.is-hit { animation: studio-play-hit 10s cubic-bezier(.16, .84, .32, 1) both; }
+#studio-play-word.is-miss { animation: studio-play-miss 10s ease-out both; }
+
+@keyframes studio-play-hit {
+  0% { transform: scale(1.7); color: #e6c27a; letter-spacing: 0.08em; }
+  100% { transform: scale(1); color: #f4efe6; letter-spacing: -0.035em; }
+}
+
+@keyframes studio-play-miss {
+  0% { opacity: 0.28; transform: translateY(48px) rotate(-8deg); color: #8ea0b4; }
+  100% { opacity: 1; transform: none; color: #f4efe6; }
+}
+
+#studio-silence {
+  display: none;
+  position: absolute;
+  z-index: 1;
+  left: 50%;
+  bottom: 18px;
+  width: 64px;
+  height: 64px;
+  margin: 0;
+  transform: translateX(-50%);
+  border: 1px solid rgba(255, 236, 204, 0.9);
+  border-radius: 999px;
+  background: #e6c27ad4;
+  box-shadow:
+    inset 0 1px 0 rgba(255, 248, 232, 0.55),
+    0 8px 20px rgba(3, 7, 14, 0.35);
+  cursor: pointer;
+}
+
+#studio-silence[aria-pressed="true"] {
+  background: rgba(141, 147, 160, 0.24);
+  border-color: rgba(196, 206, 220, 0.72);
+}
+
+#studio-silence:focus-visible {
+  outline: 2px solid #eed8b5;
+  outline-offset: 3px;
+}
+
+.studio-verbs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+.studio-verbs button {
+  font: 14px/1.3 ui-sans-serif, system-ui, sans-serif;
+  padding: 8px 12px;
+  border-radius: 4px;
+  border: 1px solid #c4a574;
+  background: #182838;
+  color: inherit;
+  cursor: pointer;
+}
+
+@media (max-width: 900px) {
+  #studio-play,
+  .has-panel-cubes #studio-play {
+    left: var(--left, 200px);
+    right: 16px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  #studio-play-word.is-hit,
+  #studio-play-word.is-miss { animation-duration: 1s; }
+}

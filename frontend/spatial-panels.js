@@ -2,7 +2,9 @@
    Move original elements; never clone controls or dispatch coding commands. */
 (function (global) {
   "use strict";
-  const STORAGE = "bomb-code:panel-cubes:v3";
+  const STORAGE = "bomb-code:panel-cubes:v4";
+  /** Navigate must show every destination. Ten rows need more than the old 260px face. */
+  const LEFT_COLUMN = Object.freeze({ nav: 380, projects: 240, services: 130 });
   function bounded(rect, bounds, collapsed = false) {
     const width = Math.max(160, bounds.width), height = Math.max(120, bounds.height);
     const w = Math.min(width - 36, Math.max(148, Number(rect.width) || 190));
@@ -88,9 +90,9 @@
     function defaultRects() {
       const available = win.innerHeight - 76, leftScale = Math.min(1, (available - 36) / 740);
       const rects = new Map([
-        ["navigation", { x: 12, y: 64, width: 180, height: 260 * leftScale }],
-        ["projects", { x: 22, y: 82 + 260 * leftScale, width: 180, height: 330 * leftScale }],
-        ["services", { x: 12, y: 100 + 590 * leftScale, width: 190, height: 150 * leftScale }],
+        ["navigation", { x: 12, y: 64, width: 190, height: LEFT_COLUMN.nav * leftScale }],
+        ["projects", { x: 22, y: 76 + LEFT_COLUMN.nav * leftScale, width: 190, height: LEFT_COLUMN.projects * leftScale }],
+        ["services", { x: 12, y: 88 + (LEFT_COLUMN.nav + LEFT_COLUMN.projects) * leftScale, width: 190, height: LEFT_COLUMN.services * leftScale }],
       ]);
       const heights = specs.map(([id, , , toggleId, h]) => {
         const panel = panels.find(p => p.id === id);
@@ -181,6 +183,6 @@
     const observer = new win.ResizeObserver(mask); panels.forEach(p => observer.observe(p.element)); cleanup.push(() => observer.disconnect());
     return { elements: () => panels.map(p => p.element), destroy() { if (destroyed) return; destroyed = true; cleanup.forEach(fn => fn()); panels.forEach(p => { p.extraAnchors.forEach(([node, marker]) => marker.replaceWith(node)); if (p.toggleAnchor) p.toggleAnchor.replaceWith(p.fold); p.anchor.replaceWith(p.content); }); if (brand) { brand.classList.remove("spatial-floating-brand"); left.prepend(brand); } layer.remove(); doc.documentElement.classList.remove("has-panel-cubes"); background?.setExclusionElements?.([], "panel-cubes"); scene?.setExclusionElements?.([], "panel-cubes"); } };
   }
-  const api = Object.freeze({ attach, bounded }); global.BombSpatialPanels = api;
+  const api = Object.freeze({ attach, bounded, LEFT_COLUMN }); global.BombSpatialPanels = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(typeof window !== "undefined" ? window : globalThis);

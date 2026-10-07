@@ -24,6 +24,7 @@
   host.setView("focus");
   const faces = BombSpatialFaces.attach({ host, background, getState: () => state, selectSession, activateView });
   BombSpatialPanels.attach({ background, scene: host.scene });
+  BombSheetSurfaces.attach(document);
   const joe = BombJoeCompanion.attach({ getState: () => state, cube: true });
   const flags = () => {
     const active = document.activeElement;
@@ -95,4 +96,5 @@
   }
   if (motionToggle?.checked) host.scene.setMotionPaused(true);
   syncClock();
+  activateView("builds");
 })();

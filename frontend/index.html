@@ -13,6 +13,7 @@
     <link rel="stylesheet" href="spatial-panels.css" />
     <link rel="stylesheet" href="joe-companion.css" />
     <link rel="stylesheet" href="studio-entry.css" />
+    <link rel="stylesheet" href="studio-play.css" />
     <link rel="stylesheet" href="word-shapes.css" />
     <link rel="stylesheet" href="meaning-memory.css" />
     <script type="module" src="vendor/model-viewer.min.js"></script>
@@ -23,7 +24,7 @@
       <!-- LEFT: threads + menus -->
       <aside class="col col-left">
         <header class="col-header brand" id="brand-header">
-          <img class="logo" src="assets/logo.png" alt="See Cubed" width="28" height="28" />
+          <model-viewer class="logo bomb-solid" src="assets/platonic-icosahedron.glb" alt="See Cubed" environment-image="neutral" auto-rotate rotation-per-second="12deg" interaction-prompt="none" shadow-intensity="0" exposure="1.1" disable-zoom disable-pan disable-tap touch-action="none" tabindex="-1"></model-viewer>
           <div>
             <div class="title">See Cubed <span class="brand-mark">C³</span></div>
             <div class="sub" id="brand-sub"></div>
@@ -71,7 +72,7 @@
           <div id="auth-box" class="auth-box">
             <div class="section-label services-label">
               <span id="status-bomb" class="px-bomb md mood-idle tier-satellite" title="Starting…">
-                <img class="bomb-face" src="assets/platonic-solids-poster.png" alt="" /><model-viewer class="bomb-solid" src="assets/platonic-solids.glb" poster="assets/platonic-solids-poster.png" alt="" auto-rotate rotation-per-second="18deg" interaction-prompt="none" shadow-intensity="0.2" exposure="1.05" disable-zoom disable-pan disable-tap touch-action="none" tabindex="-1"></model-viewer>
+                <model-viewer class="bomb-solid" src="assets/platonic-tetrahedron.glb" poster="assets/platonic-solids-poster.png" alt="" environment-image="neutral" auto-rotate rotation-per-second="18deg" interaction-prompt="none" shadow-intensity="0.2" exposure="1.05" disable-zoom disable-pan disable-tap touch-action="none" tabindex="-1"></model-viewer>
               </span>
               <span>Services</span>
               <button id="btn-refresh-services" class="icon-btn" title="Re-check sign-in status">⟳</button>
@@ -135,7 +136,7 @@
         <section id="view-spatial" class="view active" aria-label="Spatial workspace"></section>
         <section id="view-builds" class="view">
           <header class="builds-header">
-            <div class="builds-heading"><div><h1>Builds</h1><p>Plan, implement, audit and verify in separate native sessions. You approve the plan and accept the result.</p></div><button id="builds-refresh" class="btn ghost" type="button">Refresh</button></div>
+            <div class="builds-heading"><div><h1>Builds</h1><p>Paste the work. Number the parts (<code>1.</code> <code>2.</code> <code>3.</code>) when it is a sequence. A role line such as <code>implementer: claude / claude-opus-4.5</code> names who runs. Preview starts nobody. You approve each plan before any edit, and you accept each result before the next part starts.</p></div><button id="builds-refresh" class="btn ghost" type="button">Refresh</button></div>
             <div class="builds-coordination"><label for="builds-concurrency">Maximum concurrent builds</label><select id="builds-concurrency"><option value="1">1</option><option value="2" selected>2</option><option value="3">3</option><option value="4">4</option></select><button id="builds-concurrency-save" class="btn ghost" type="button">Apply limit</button><span id="builds-concurrency-current" class="builds-help">Default: 2</span></div>
             <p class="builds-help builds-coordination-note">Builds waiting for plan approval or result review retain their slot and write paths. Overlapping paths in the same repository run in sequence.</p>
             <div id="builds-status" role="status" aria-live="polite">Choose a clean Git project to begin.</div>
@@ -144,17 +145,22 @@
             <details id="builds-new" class="builds-new" open>
               <summary>New reviewed build</summary>
               <form id="builds-form" class="builds-form">
+                <label>What should be built?<textarea id="builds-objective" rows="6" maxlength="32768" placeholder="1. First part&#10;What it changes, and the check that shows it works.&#10;2. Next part&#10;Starts after you accept part 1.&#10;implementer: claude / claude-opus-4.5" required></textarea></label>
+                <ul id="builds-bindings" class="builds-bindings" aria-label="Who runs"></ul>
+                <ol id="builds-sequence" class="builds-sequence" hidden></ol>
+                <details id="builds-setup">
+                <summary>Project, write paths, and engines</summary>
                 <label>Project folder<input id="builds-project" type="text" placeholder="/absolute/project/path" spellcheck="false" required /></label>
                 <button id="builds-use-project" class="btn ghost" type="button">Use selected project</button>
-                <label>What should be built?<textarea id="builds-objective" rows="4" maxlength="32768" placeholder="Describe the change and the checks that will demonstrate it works." required></textarea></label>
                 <div class="builds-form-columns"><label>Allowed write paths<textarea id="builds-scope" rows="3" placeholder="src/feature
 tests/feature" spellcheck="false" required></textarea><span class="builds-help">One relative file or folder per line. Enter . to permit the entire project.</span></label><label>Maximum repair rounds<input id="builds-repairs" type="number" min="0" max="10" value="2" required /><span class="builds-help">After the first attempt. Repeated findings stop the build early.</span></label></div>
                 <label>Prerequisite builds<select id="builds-dependencies" multiple size="4" aria-describedby="builds-dependencies-help"></select><span id="builds-dependencies-help" class="builds-help">Optional. Select with <span data-mod-click>Ctrl-click</span> to add or remove prerequisites. This build starts after you accept every selected result. Dependencies govern start order; each build has its own worktree. Earlier worktrees and results are supplied as context; their code is not combined automatically.</span></label>
-                <details class="builds-routes"><summary>Role engines and models</summary><div id="builds-routes" class="builds-route-grid"></div><p class="builds-help">A blank model uses the engine's configured default. Reviewers use Plan mode; implementation uses Ask with native tool approvals.</p></details>
+                <details class="builds-routes"><summary>Role engines and models</summary><div id="builds-routes" class="builds-route-grid"></div><p class="builds-help">A blank model uses the engine's configured default. A role line in the box above replaces these fields. Reviewers use Plan mode; implementation uses Ask with native tool approvals.</p></details>
+                </details>
                 <div class="builds-submit">
                   <button id="builds-preview" class="btn ghost" type="button">Preview dry run</button>
                   <button id="builds-create" class="btn primary" type="submit">Submit reviewed build</button>
-                  <span class="builds-help">Preview validates the form and predicted queue without saving a build or starting agents. Submit starts when its prerequisites, slot and write paths are available; implementation still waits for your plan approval.</span>
+                  <span id="builds-submit-help" class="builds-help">Preview checks the queue and starts nobody. Submit starts the planner. You approve the plan before any edit.</span>
                 </div>
                 <div id="builds-preview-panel" class="builds-preview-panel" hidden aria-live="polite"></div>
               </form>
@@ -236,7 +242,7 @@ tests/feature" spellcheck="false" required></textarea><span class="builds-help">
           <div id="transcript" class="transcript" aria-live="polite">
             <div class="welcome">
               <div class="welcome-hero">
-                <span class="px-bomb xl mood-ready" aria-hidden="true"><img class="bomb-face" src="assets/platonic-solids-poster.png" alt="" /><model-viewer class="bomb-solid" src="assets/platonic-solids.glb" poster="assets/platonic-solids-poster.png" alt="" auto-rotate rotation-per-second="18deg" interaction-prompt="none" shadow-intensity="0.2" exposure="1.05" disable-zoom disable-pan disable-tap touch-action="none" tabindex="-1"></model-viewer></span>
+                <span class="px-bomb xl mood-ready" aria-hidden="true"><model-viewer class="bomb-solid" src="assets/platonic-octahedron.glb" poster="assets/platonic-solids-poster.png" alt="" environment-image="neutral" auto-rotate rotation-per-second="18deg" interaction-prompt="none" shadow-intensity="0.2" exposure="1.05" disable-zoom disable-pan disable-tap touch-action="none" tabindex="-1"></model-viewer></span>
                 <h2 class="welcome-title">A place to build.</h2>
               </div>
               <p>Choose your project, select an engine, and begin with a plan.</p>
@@ -247,7 +253,7 @@ tests/feature" spellcheck="false" required></textarea><span class="builds-help">
           <div id="turn-dock" class="turn-dock" aria-hidden="true">
             <div class="turn-dock-main">
               <span id="turn-bomb" class="px-bomb lg mood-idle tier-dock" aria-hidden="true">
-                <img class="bomb-face" src="assets/platonic-solids-poster.png" alt="" /><model-viewer class="bomb-solid" src="assets/platonic-solids.glb" poster="assets/platonic-solids-poster.png" alt="" auto-rotate rotation-per-second="18deg" interaction-prompt="none" shadow-intensity="0.2" exposure="1.05" disable-zoom disable-pan disable-tap touch-action="none" tabindex="-1"></model-viewer>
+                <model-viewer class="bomb-solid" src="assets/platonic-cube.glb" poster="assets/platonic-solids-poster.png" alt="" environment-image="neutral" auto-rotate rotation-per-second="18deg" interaction-prompt="none" shadow-intensity="0.2" exposure="1.05" disable-zoom disable-pan disable-tap touch-action="none" tabindex="-1"></model-viewer>
               </span>
               <div class="turn-dock-copy">
                 <div class="turn-dock-title-row">
@@ -623,7 +629,7 @@ tests/feature" spellcheck="false" required></textarea><span class="builds-help">
         <header class="col-header">
           <div class="title">
             <span id="activity-bomb" class="px-bomb md mood-idle" aria-hidden="true">
-              <img class="bomb-face" src="assets/platonic-solids-poster.png" alt="" /><model-viewer class="bomb-solid" src="assets/platonic-solids.glb" poster="assets/platonic-solids-poster.png" alt="" auto-rotate rotation-per-second="18deg" interaction-prompt="none" shadow-intensity="0.2" exposure="1.05" disable-zoom disable-pan disable-tap touch-action="none" tabindex="-1"></model-viewer>
+              <model-viewer class="bomb-solid" src="assets/platonic-dodecahedron.glb" poster="assets/platonic-solids-poster.png" alt="" environment-image="neutral" auto-rotate rotation-per-second="18deg" interaction-prompt="none" shadow-intensity="0.2" exposure="1.05" disable-zoom disable-pan disable-tap touch-action="none" tabindex="-1"></model-viewer>
             </span>
             Activity
           </div>
@@ -737,7 +743,9 @@ tests/feature" spellcheck="false" required></textarea><span class="builds-help">
     <script src="spatial-host.js"></script>
     <script src="spatial-faces.js"></script>
     <script src="spatial-panels.js"></script>
+    <script src="sheet-surfaces.js"></script>
     <script src="joe-companion.js"></script>
     <script src="spatial-shell.js"></script>
+    <script src="studio-play.js"></script>
   </body>
 </html>

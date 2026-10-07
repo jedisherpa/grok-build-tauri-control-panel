@@ -3,14 +3,12 @@
 .has-panel-cubes .col-left, .has-panel-cubes .col-right { display: none; }
 .has-panel-cubes .col-center { grid-column: 2; border: 0; }
 .spatial-floating-brand { position: fixed; z-index: 4; top: 0; left: 9px; height: 48px; padding: 8px 10px; border: 0; background: transparent; pointer-events: none; }
-.spatial-floating-brand .logo { width: 23px; height: 23px; }
+.spatial-floating-brand .logo { width: 23px; height: 23px; min-width: 0; min-height: 0; }
 .spatial-floating-brand .sub { font-size: 9px; }
 .spatial-panel-cubes { position: fixed; inset: 0; z-index: 3; pointer-events: none; }
-.spatial-panel-cube { position: absolute; display: flex; flex-direction: column; background: #101d30f5; border: 1px solid #91bcae99; color: var(--text); pointer-events: auto; isolation: isolate; }
-.spatial-panel-cube::before, .spatial-panel-cube::after { content: ""; position: absolute; pointer-events: none; border: 1px solid #91bcae70; background: #1729415c; z-index: -1; }
-.spatial-panel-cube::before { left: -1px; right: -1px; height: 12px; top: -13px; transform-origin: bottom left; transform: skewX(-36deg); }
-.spatial-panel-cube::after { top: -1px; bottom: -1px; right: -10px; width: 9px; transform-origin: bottom left; transform: skewY(-54deg); }
-.spatial-panel-cube-header { display: flex; flex: 0 0 32px; align-items: center; gap: 3px; padding: 3px 6px 3px 10px; border-bottom: 1px solid #657b923d; background: #14243ae8; }
+.spatial-panel-cube { position: absolute; display: flex; flex-direction: column; background: rgba(8, 15, 27, 0.32); border: 0; color: var(--text); pointer-events: auto; isolation: isolate; box-shadow: inset 0 0 0 0.6px rgba(231, 242, 255, 0.22); }
+.spatial-panel-cube::before, .spatial-panel-cube::after { content: none; }
+.spatial-panel-cube-header { display: flex; flex: 0 0 32px; align-items: center; gap: 3px; padding: 3px 22px 3px 10px; border-bottom: 1px solid rgba(231, 242, 255, 0.12); background: transparent; }
 .spatial-panel-cube-move { flex: 1; min-width: 0; background: transparent; color: var(--text); border: 0; padding: 0; text-align: left; font: 400 16px/1.15 var(--display); cursor: grab; touch-action: none; }
 .spatial-panel-cube-move:active { cursor: grabbing; }
 .spatial-panel-cube-fold { flex: 0 0 22px; width: 22px; height: 24px; min-height: 0; padding: 0; border: 0; background: transparent; color: var(--muted); font: 16px/1 var(--ui); cursor: pointer; }

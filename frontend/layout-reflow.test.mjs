@@ -1,5 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { createRequire } from "node:module";
+
+const require = createRequire(import.meta.url);
+const panels = require("./spatial-panels.js");
 
 /** Mirror of spatial-panels clampAboveComposer y adjustment */
 function clampAboveComposer(rect, boundsHeight) {
@@ -46,6 +50,22 @@ function tuckRect(bounds, index) {
 test("tucked context face stays above composer band at 670px", () => {
   const r = tuckRect({ width: 960, height: 670 }, 0);
   assert.ok(r.y + r.height < 670 - 100, "face must not cover sticky composer");
+});
+
+test("navigate cube fits Home through System at the 900px desk", () => {
+  const inner = 900;
+  const leftScale = Math.min(1, (inner - 76 - 36) / 740);
+  const nav = panels.LEFT_COLUMN.nav * leftScale;
+  const projectsTop = 76 + nav;
+  const projects = panels.LEFT_COLUMN.projects * leftScale;
+  const servicesTop = 88 + nav + projects;
+  const services = panels.LEFT_COLUMN.services * leftScale;
+  const header = 32;
+  const row = 30;
+  assert.ok(nav - header >= 10 * row, `nav body ${nav - header} must hold 10 destinations`);
+  assert.ok(projectsTop >= 64 + nav);
+  assert.ok(servicesTop >= projectsTop + projects);
+  assert.ok(servicesTop + services < inner);
 });
 
 test("enlarge should recompute default x for left and right rails", () => {

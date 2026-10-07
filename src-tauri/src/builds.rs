@@ -441,7 +441,7 @@ impl BuildService {
         .collect();
         let mut notes = vec![
             "Dry run only: nothing was saved and no native agents were started.".into(),
-            "Submit reviewed build still requires a clean Git checkout and your later plan approval.".into(),
+            "This checkout is clean. Queue saves the builds and starts only the first planner. You still approve the plan before any edit.".into(),
         ];
         if !dep_rows.is_empty() {
             notes.push(

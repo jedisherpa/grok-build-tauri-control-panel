@@ -1,5 +1,5 @@
 /* ═══════════════════════════════════════════════════════════════════════════
-   Bomb Code — pixel-bomb visual language
+   See Cubed — platonic-solid marks
    Moods: idle · ready · thinking · running · tooling · stream · boom · error · wait
    ═══════════════════════════════════════════════════════════════════════════ */
 
@@ -13,11 +13,9 @@
   --bomb-wait: #eed8b5;
 }
 
-/* ── Sprite base ─────────────────────────────────────────────────────────── */
+/* ── Solid base ──────────────────────────────────────────────────────────── */
 .px-bomb {
   --bomb-size: 22px;
-  --wick-x: 14%;
-  --wick-y: 2%;
   position: relative;
   display: inline-flex;
   align-items: center;
@@ -26,12 +24,9 @@
   height: var(--bomb-size);
   flex-shrink: 0;
   vertical-align: middle;
-  image-rendering: pixelated;
-  image-rendering: crisp-edges;
   user-select: none;
   pointer-events: none;
-  /* room for wick sparks above the icon */
-  overflow: visible;
+  overflow: hidden;
 }
 .px-bomb img,
 .px-bomb .bomb-face,
@@ -40,8 +35,7 @@
   height: 100%;
   object-fit: contain;
   display: block;
-  image-rendering: pixelated;
-  image-rendering: crisp-edges;
+  image-rendering: auto;
   filter: drop-shadow(0 0 0 transparent);
   transform-origin: 50% 70%;
 }
@@ -69,28 +63,17 @@
   --bomb-size: 52px;
 }
 
-/* Wick / fuse sparks (::before = flame core, ::after = rising ember) */
+/* No flame. ::before/::after stay off so a mood cannot relight a wick. */
 .px-bomb::before,
 .px-bomb::after {
-  content: "";
-  position: absolute;
-  opacity: 0;
-  pointer-events: none;
-  image-rendering: pixelated;
-  z-index: 2;
+  content: none;
 }
 
-/* Intensity tiers:
-   - dock: full body + wick
-   - ambient: soft breathe + faint wick when armed
-   - satellite: larger icon, static body; wick only on armed moods
-*/
+/* Intensity tiers: dock and ambient may move; satellites stay still. */
 .px-bomb.tier-satellite img,
 .px-bomb.tier-satellite model-viewer.bomb-solid {
   animation: none !important;
 }
-/* satellites still get wick when mood is armed (see .wick-on rules below) */
-
 .px-bomb.tier-ambient img,
 .px-bomb.tier-ambient model-viewer.bomb-solid {
   animation: bomb-breathe 3.6s ease-in-out infinite;
@@ -103,137 +86,45 @@
   animation: bomb-mood-enter 0.35s ease-out both !important;
 }
 
-/* ── Shared wick geometry (top-right fuse of the logo) ───────────────────── */
-.px-bomb.wick-on::before,
-.px-bomb.mood-thinking::before,
-.px-bomb.mood-running::before,
-.px-bomb.mood-tooling::before,
-.px-bomb.mood-stream::before,
-.px-bomb.mood-wait::before,
-.px-bomb.mood-ready::before {
-  /* flame core at fuse tip */
-  width: max(4px, calc(var(--bomb-size) * 0.14));
-  height: max(4px, calc(var(--bomb-size) * 0.14));
-  top: calc(var(--wick-y) - 8%);
-  right: var(--wick-x);
-  border-radius: 1px;
-  opacity: 1;
-}
-.px-bomb.wick-on::after,
-.px-bomb.mood-thinking::after,
-.px-bomb.mood-running::after,
-.px-bomb.mood-tooling::after,
-.px-bomb.mood-stream::after,
-.px-bomb.mood-wait::after {
-  /* rising spark */
-  width: max(2px, calc(var(--bomb-size) * 0.08));
-  height: max(2px, calc(var(--bomb-size) * 0.08));
-  top: calc(var(--wick-y) - 18%);
-  right: calc(var(--wick-x) - 4%);
-  opacity: 0.95;
-}
-
 /* ── Mood: idle ──────────────────────────────────────────────────────────── */
 .px-bomb.mood-idle img,
 .px-bomb.mood-idle model-viewer.bomb-solid {
   animation: bomb-breathe 3.2s ease-in-out infinite;
   opacity: 0.9;
 }
-/* no wick when cold */
-
-/* ── Mood: ready (soft fuse glow) ────────────────────────────────────────── */
+/* ── Mood: ready ─────────────────────────────────────────────────────────── */
 .px-bomb.mood-ready img,
 .px-bomb.mood-ready model-viewer.bomb-solid {
   animation: bomb-breathe 2.4s ease-in-out infinite;
   filter: drop-shadow(0 0 5px color-mix(in srgb, var(--ok) 45%, transparent));
 }
-.px-bomb.mood-ready::before {
-  background: var(--bomb-fuse);
-  box-shadow:
-    1px 0 0 var(--bomb-fuse-hot),
-    0 -1px 0 var(--bomb-fuse),
-    0 0 6px var(--bomb-fuse);
-  animation: fuse-twinkle 1.4s steps(2) infinite;
-}
 
-/* ── Mood: thinking — lit wick burning down the fuse ─────────────────────── */
+/* ── Mood: thinking ──────────────────────────────────────────────────────── */
 .px-bomb.mood-thinking img,
 .px-bomb.mood-thinking model-viewer.bomb-solid {
   animation: bomb-think-bounce 1.25s ease-in-out infinite;
   filter: drop-shadow(0 0 8px color-mix(in srgb, var(--bomb-fuse) 55%, transparent));
 }
-.px-bomb.mood-thinking::before {
-  background: var(--bomb-fuse-hot);
-  box-shadow:
-    0 0 0 1px var(--bomb-fuse),
-    2px -1px 0 var(--bomb-fuse),
-    -1px -2px 0 var(--bomb-fuse-hot),
-    3px -3px 0 color-mix(in srgb, var(--bomb-fuse) 55%, transparent),
-    0 0 10px var(--bomb-fuse-hot);
-  animation: fuse-spark 0.45s steps(3) infinite;
-}
-.px-bomb.mood-thinking::after {
-  background: #f7e5c8;
-  box-shadow: 0 0 4px var(--bomb-fuse-hot);
-  animation: spark-rise 0.75s linear infinite;
-}
 
-/* ── Mood: running / stall — fuse still lit, calmer ──────────────────────── */
+/* ── Mood: running ───────────────────────────────────────────────────────── */
 .px-bomb.mood-running img,
 .px-bomb.mood-running model-viewer.bomb-solid {
   animation: bomb-breathe 1.5s ease-in-out infinite;
   filter: drop-shadow(0 0 7px color-mix(in srgb, var(--bomb-fuse) 50%, transparent));
 }
-.px-bomb.mood-running::before {
-  background: var(--bomb-fuse);
-  box-shadow:
-    0 0 0 1px var(--bomb-fuse-hot),
-    2px -2px 0 var(--bomb-fuse),
-    0 0 8px var(--bomb-fuse);
-  animation: fuse-spark 0.7s steps(2) infinite;
-}
-.px-bomb.mood-running::after {
-  background: var(--bomb-fuse-hot);
-  animation: spark-rise 0.9s linear infinite;
-}
 
-/* ── Mood: tooling — wick + work chips ───────────────────────────────────── */
+/* ── Mood: tooling ───────────────────────────────────────────────────────── */
 .px-bomb.mood-tooling img,
 .px-bomb.mood-tooling model-viewer.bomb-solid {
   animation: bomb-tool-nod 1.3s ease-in-out infinite;
   filter: drop-shadow(0 0 7px color-mix(in srgb, var(--tool) 50%, transparent));
 }
-.px-bomb.mood-tooling::before {
-  background: var(--bomb-fuse-hot);
-  box-shadow:
-    0 0 0 1px var(--tool),
-    2px -1px 0 var(--bomb-fuse),
-    0 0 8px var(--bomb-fuse);
-  animation: fuse-spark 0.55s steps(3) infinite;
-}
-.px-bomb.mood-tooling::after {
-  background: #f7e5c8;
-  box-shadow: -6px 10px 0 color-mix(in srgb, var(--tool) 80%, transparent);
-  animation: spark-rise 0.85s linear infinite;
-}
 
-/* ── Mood: stream — productive burn ──────────────────────────────────────── */
+/* ── Mood: stream ────────────────────────────────────────────────────────── */
 .px-bomb.mood-stream img,
 .px-bomb.mood-stream model-viewer.bomb-solid {
   animation: bomb-stream-glow 1.6s ease-in-out infinite;
   filter: drop-shadow(0 0 8px color-mix(in srgb, var(--agent) 55%, transparent));
-}
-.px-bomb.mood-stream::before {
-  background: var(--bomb-fuse-hot);
-  box-shadow:
-    0 0 0 1px var(--agent),
-    2px -2px 0 var(--bomb-fuse),
-    0 0 10px var(--agent);
-  animation: fuse-spark 0.5s steps(3) infinite;
-}
-.px-bomb.mood-stream::after {
-  background: #c4b5dd;
-  animation: spark-rise 0.7s linear infinite;
 }
 
 /* ── Mood: boom / success ────────────────────────────────────────────────── */
@@ -242,85 +133,21 @@
   animation: bomb-boom-pop 0.55s cubic-bezier(0.2, 1.4, 0.4, 1) both;
   filter: drop-shadow(0 0 12px color-mix(in srgb, var(--bomb-ok) 70%, transparent));
 }
-.px-bomb.mood-boom::before,
-.px-bomb.mood-boom::after {
-  opacity: 1;
-  width: max(4px, calc(var(--bomb-size) * 0.12));
-  height: max(4px, calc(var(--bomb-size) * 0.12));
-  top: 40%;
-  left: 50%;
-  right: auto;
-  background: var(--bomb-ok);
-  animation: boom-bits 0.55s ease-out both;
-}
-.px-bomb.mood-boom::after {
-  background: var(--bomb-fuse-hot);
-  animation-delay: 0.04s;
-}
 
-/* ── Mood: error / fail — smoke from snuffed wick ────────────────────────── */
+/* ── Mood: error ─────────────────────────────────────────────────────────── */
 .px-bomb.mood-error img,
 .px-bomb.mood-error model-viewer.bomb-solid {
   animation: bomb-error-wobble 0.45s ease-in-out 2;
   filter: drop-shadow(0 0 6px color-mix(in srgb, var(--bomb-err) 55%, transparent))
     grayscale(0.25);
 }
-.px-bomb.mood-error::before {
-  width: max(6px, calc(var(--bomb-size) * 0.16));
-  height: max(4px, calc(var(--bomb-size) * 0.1));
-  top: 0;
-  right: 10%;
-  background: var(--bomb-smoke);
-  opacity: 0.8;
-  border-radius: 1px;
-  animation: smoke-puff 1.4s ease-out infinite;
-  box-shadow: none;
-}
-.px-bomb.mood-error::after {
-  opacity: 0;
-}
 
-/* ── Mood: wait / approval — amber fuse holding ──────────────────────────── */
+/* ── Mood: wait ──────────────────────────────────────────────────────────── */
 .px-bomb.mood-wait img,
 .px-bomb.mood-wait model-viewer.bomb-solid {
   animation: bomb-breathe 2.2s ease-in-out infinite;
   filter: drop-shadow(0 0 8px color-mix(in srgb, var(--bomb-wait) 60%, transparent));
   opacity: 0.98;
-}
-.px-bomb.mood-wait::before {
-  background: var(--bomb-wait);
-  box-shadow:
-    0 0 0 1px var(--bomb-fuse-hot),
-    1px -2px 0 var(--bomb-wait),
-    0 0 10px var(--bomb-wait);
-  animation: fuse-twinkle 0.7s steps(2) infinite;
-}
-.px-bomb.mood-wait::after {
-  background: #f7e5c8;
-  animation: spark-rise 1.1s linear infinite;
-}
-
-/* Satellites: body static, wick still burns when armed */
-.px-bomb.tier-satellite.mood-thinking::before,
-.px-bomb.tier-satellite.mood-thinking::after,
-.px-bomb.tier-satellite.mood-stream::before,
-.px-bomb.tier-satellite.mood-stream::after,
-.px-bomb.tier-satellite.mood-tooling::before,
-.px-bomb.tier-satellite.mood-tooling::after,
-.px-bomb.tier-satellite.mood-wait::before,
-.px-bomb.tier-satellite.mood-wait::after,
-.px-bomb.tier-satellite.mood-ready::before,
-.px-bomb.tier-satellite.mood-running::before,
-.px-bomb.tier-satellite.mood-running::after {
-  /* keep wick animations even when body is frozen */
-  opacity: 1;
-}
-.px-bomb.tier-ambient.mood-thinking::before,
-.px-bomb.tier-ambient.mood-stream::before,
-.px-bomb.tier-ambient.mood-tooling::before,
-.px-bomb.tier-ambient.mood-wait::before,
-.px-bomb.tier-ambient.mood-ready::before {
-  opacity: 0.85;
 }
 
 /* ── Keyframes ───────────────────────────────────────────────────────────── */
@@ -359,20 +186,6 @@
   0%, 100% { opacity: 0.9; }
   50% { opacity: 1; }
 }
-@keyframes fuse-spark {
-  0% { transform: scale(1) translate(0, 0); opacity: 1; }
-  33% { transform: scale(1.35) translate(1px, -2px); opacity: 1; }
-  66% { transform: scale(0.95) translate(-1px, -1px); opacity: 0.75; }
-  100% { transform: scale(1.15) translate(0, -3px); opacity: 0.55; }
-}
-@keyframes fuse-twinkle {
-  0%, 100% { opacity: 0.4; transform: scale(0.9); }
-  50% { opacity: 1; transform: scale(1.2); }
-}
-@keyframes spark-rise {
-  0% { transform: translate(0, 0) scale(1); opacity: 1; }
-  100% { transform: translate(4px, -12px) scale(0.6); opacity: 0; }
-}
 @keyframes stream-dot {
   0% { transform: translateX(0); opacity: 0; }
   30% { opacity: 1; }
@@ -382,15 +195,6 @@
   0%, 100% { opacity: 0.3; transform: scale(0.8); }
   50% { opacity: 1; transform: scale(1.2); }
 }
-@keyframes boom-bits {
-  0% { transform: translate(-50%, -50%) scale(0.5); opacity: 1; }
-  100% { transform: translate(calc(-50% + 10px), calc(-50% - 12px)) scale(0); opacity: 0; }
-}
-@keyframes smoke-puff {
-  0% { transform: translateY(0) scale(0.6); opacity: 0.6; }
-  100% { transform: translateY(-8px) scale(1.4); opacity: 0; }
-}
-
 /* ── Turn dock — one primary status surface (facts first) ────────────────── */
 .turn-dock {
   display: none;
@@ -750,22 +554,18 @@
 #turn-bomb {
   margin-top: 0;
   margin-right: 2px;
-  /* 52px set via .tier-dock; keep wick sparks visible */
-  overflow: visible;
+  overflow: hidden;
 }
 
-/* ── Brand logo — ambient only when live ─────────────────────────────────── */
+/* ── Brand mark — a slow breathe while a turn is live ────────────────────── */
 .brand.live .logo {
   animation: bomb-breathe 3.2s ease-in-out infinite;
-  filter: drop-shadow(0 0 4px color-mix(in srgb, var(--bomb-fuse) 35%, transparent));
 }
 
 /* ── Reduced motion ──────────────────────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
   .px-bomb img,
   .px-bomb model-viewer.bomb-solid,
-  .px-bomb::before,
-  .px-bomb::after,
   .px-bomb.is-entering img,
   .px-bomb.is-entering model-viewer.bomb-solid,
   .thinking-strip,

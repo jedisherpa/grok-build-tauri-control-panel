@@ -98,3 +98,118 @@ assert.ok(element('builds-preview-panel').innerHTML.includes('Dry-run preview'))
 assert.ok(element('builds-preview-panel').innerHTML.includes('No agents were started'));
 assert.ok(element('builds-status').textContent.includes('Dry run ok'));
 console.log('builds.test.mjs: dry-run preview path passed');
+
+element('builds-objective').value = 'planner: grok\nimplementer: claude / claude-opus-4.5\nauditor: claude code\nverifier: codex / gpt-5.4\nnot a role: nope';
+element('builds-objective').oninput();
+assert.equal(element('builds-planner-engine').value, 'grok');
+assert.equal(element('builds-implementer-engine').value, 'claude');
+assert.equal(element('builds-implementer-model').value, 'claude-opus-4.5');
+assert.equal(element('builds-auditor-engine').value, 'claude');
+assert.equal(element('builds-verifier-model').value, 'gpt-5.4');
+assert.match(element('builds-bindings').innerHTML, /Implementer · claude · claude-opus-4\.5/);
+assert.match(element('builds-bindings').innerHTML, /Auditor · claude · configured default/);
+console.log('builds.test.mjs: spoken role lines set the engines before submit');
+
+element('builds-objective').value = `Ship the desk.
+1. Parse a numbered plan into parts
+Each part is its own reviewed build.
+2. Queue the parts in order
+The next part waits for acceptance.
+planner: grok
+implementer: claude / claude-opus-4.5`;
+element('builds-objective').oninput();
+assert.equal(element('builds-sequence').hidden, false);
+assert.match(element('builds-sequence').innerHTML, /Parse a numbered plan into parts/);
+assert.match(element('builds-sequence').innerHTML, /Starts after you accept part 1/);
+assert.equal(element('builds-implementer-model').value, 'claude-opus-4.5');
+assert.match(element('builds-submit-help').textContent, /queues 2 builds/);
+assert.equal(element('builds-create').textContent, 'Queue 2 builds');
+let previewObjective = '';
+let previewDependencies = null;
+const sequenceInvoke = sandbox.invoke;
+sandbox.invoke = async (command, args) => {
+  if (command === 'preview_build') {
+    previewObjective = args.spec.objective;
+    previewDependencies = Array.from(args.dependencies);
+  }
+  if (command === 'create_build') throw new Error('preview must not create');
+  return sequenceInvoke(command, args);
+};
+await element('builds-preview').onclick();
+assert.match(previewObjective, /Ship the desk/);
+assert.match(previewObjective, /Parse a numbered plan/);
+assert.doesNotMatch(previewObjective, /planner: grok/);
+assert.deepEqual(previewDependencies, []);
+assert.match(element('builds-preview-panel').innerHTML, /Sequence · 2 parts/);
+assert.match(element('builds-preview-panel').innerHTML, /No agents were started/);
+assert.match(element('builds-status').textContent, /nothing submitted/);
+assert.match(element('builds-status').textContent, /starts the first planner/);
+console.log('builds.test.mjs: a numbered plan previews as a sequence and starts nobody');
+
+element('builds-scope').value = 'greeting.py';
+element('builds-objective').value = '1. Rename the greeting in greeting.py\nCheck it.\n2. Add one sentence to README.md\nCheck the sentence.';
+element('builds-objective').oninput();
+assert.match(element('builds-sequence').innerHTML, /README.md is not a write path/);
+assert.doesNotMatch(element('builds-sequence').innerHTML, /greeting.py is not a write path/);
+await element('builds-preview').onclick();
+assert.match(element('builds-preview-panel').innerHTML, /README.md is not a write path/);
+assert.match(element('builds-status').textContent, /README.md is not a write path/);
+console.log('builds.test.mjs: a later part names a file outside the write paths');
+
+element('builds-scope').value = 'greeting.py\nREADME.md';
+element('builds-objective').value = 'I opened this folder because the greeting a person sees is wrong.\n1. Fix the spelling in greeting.py\nDo not edit test_greeting.py to force a pass. python3 -m unittest -v is the check.\n2. Rewrite the README opening after I accept that result\nREADME.md should tell a new reader that greet says Hello.';
+element('builds-objective').oninput();
+assert.match(element('builds-sequence').innerHTML, /Fix the spelling in greeting.py/);
+assert.match(element('builds-sequence').innerHTML, /Rewrite the README opening/);
+assert.doesNotMatch(element('builds-sequence').innerHTML, /test_greeting.py is not a write path/);
+assert.doesNotMatch(element('builds-sequence').innerHTML, /greeting.py is not a write path/);
+assert.doesNotMatch(element('builds-sequence').innerHTML, /README.md is not a write path/);
+console.log('builds.test.mjs: a realistic note can name a test file without making it a write path');
+
+element('builds-objective').value = `Ship the desk.
+1. Parse a numbered plan into parts
+Each part is its own reviewed build.
+2. Queue the parts in order
+The next part waits for acceptance.
+planner: grok
+implementer: claude / claude-opus-4.5`;
+element('builds-objective').oninput();
+const calls = [];
+sandbox.invoke = async (command, args) => {
+  if (command === 'create_build') {
+    const id = `part-${calls.length + 1}`;
+    calls.push({ id, objective: args.spec.objective, dependencies: Array.from(args.dependencies) });
+    return { id, status: 'planning' };
+  }
+  return sequenceInvoke(command, args);
+};
+await element('builds-form').onsubmit({ preventDefault() {} });
+assert.equal(calls.length, 2);
+assert.match(calls[0].objective, /Parse a numbered plan/);
+assert.deepEqual(calls[0].dependencies, []);
+assert.match(calls[1].objective, /Queue the parts in order/);
+assert.deepEqual(calls[1].dependencies, ['part-1']);
+assert.match(element('builds-status').textContent, /Queued 2 builds/);
+assert.match(element('builds-status').textContent, /Approve each plan/);
+console.log('builds.test.mjs: submit queues the parts and chains acceptance');
+
+element('builds-project').value = '';
+element('builds-scope').value = '';
+await element('builds-preview').onclick();
+assert.equal(element('builds-setup').open, true);
+assert.match(element('builds-status').textContent, /one write path/);
+assert.match(element('builds-status').textContent, /starts nobody/);
+element('builds-objective').value = '## Draw the lattice\nHang the sheets.\n## Name the corners\nEach corner is one control.';
+element('builds-objective').oninput();
+assert.match(element('builds-sequence').innerHTML, /Draw the lattice/);
+assert.match(element('builds-sequence').innerHTML, /Name the corners/);
+assert.match(element('builds-sequence').innerHTML, /Starts after you accept part 1/);
+assert.equal(element('builds-create').textContent, 'Queue 2 builds');
+console.log('builds.test.mjs: headings split the same way, and a preview without a project opens the setup');
+
+element('builds-status').textContent = 'Dry run ok — 2 parts, nothing submitted.';
+response = [null];
+await api.refresh();
+assert.match(element('builds-status').textContent, /nothing submitted/);
+assert.match(element('collaboration-snapshot').textContent, /Refresh failed/);
+console.log('builds.test.mjs: a failed refresh keeps the preview message');

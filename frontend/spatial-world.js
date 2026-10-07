@@ -99,6 +99,88 @@
   function formatAge(ms) { const s = Math.floor(ms / 1000); return s < 60 ? `${s}s` : s < 3600 ? `${Math.floor(s / 60)}m ${s % 60}s` : `${Math.floor(s / 3600)}h`; }
   function smooth(t) { const x = clamp(t, 0, 1); return x * x * (3 - 2 * x); }
 
+  /** The four corners of a flat sheet. Threads meet these, not an extruded wing. */
+  function panelCorners(rect) {
+    const x = rect?.x, y = rect?.y, width = rect?.width, height = rect?.height;
+    if (![x, y, width, height].every(Number.isFinite) || width <= 0 || height <= 0) return [];
+    const right = x + width, bottom = y + height;
+    return [
+      { x, y },
+      { x: right, y },
+      { x: right, y: bottom },
+      { x, y: bottom },
+    ];
+  }
+
+  function faceCorners(face) {
+    if (Array.isArray(face?.corners) && face.corners.length) return face.corners.filter(p => Number.isFinite(p?.x) && Number.isFinite(p?.y));
+    return [
+      { x: face.x, y: face.y },
+      { x: face.x + face.width, y: face.y },
+      { x: face.x + face.width, y: face.y + face.height },
+      { x: face.x, y: face.y + face.height },
+    ];
+  }
+
+  /** One lattice segment per corner. A path that misses every face wins; otherwise the nearest point outside. */
+  function cornerLinks(points, faces) {
+    const nodes = (Array.isArray(points) ? points : []).filter(p => Number.isFinite(p?.x) && Number.isFinite(p?.y));
+    const boxes = (Array.isArray(faces) ? faces : []).filter(r => [r?.x, r?.y, r?.width, r?.height].every(Number.isFinite) && r.width > 0 && r.height > 0);
+    const inside = (p, r) => p.x > r.x && p.x < r.x + r.width && p.y > r.y && p.y < r.y + r.height;
+    const orient = (a, b, c) => (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+    const crosses = (a, b, c, d) => {
+      const a1 = orient(a, b, c), a2 = orient(a, b, d), a3 = orient(c, d, a), a4 = orient(c, d, b);
+      return ((a1 > 0 && a2 < 0) || (a1 < 0 && a2 > 0)) && ((a3 > 0 && a4 < 0) || (a3 < 0 && a4 > 0));
+    };
+    const hits = (a, b, r) => {
+      const p = [{ x: r.x, y: r.y }, { x: r.x + r.width, y: r.y }, { x: r.x + r.width, y: r.y + r.height }, { x: r.x, y: r.y + r.height }];
+      return crosses(a, b, p[0], p[1]) || crosses(a, b, p[1], p[2]) || crosses(a, b, p[2], p[3]) || crosses(a, b, p[3], p[0]);
+    };
+    const outside = nodes.filter(p => !boxes.some(r => inside(p, r)));
+    const links = [];
+    boxes.forEach(face => {
+      faceCorners(face).forEach(corner => {
+        const ranked = outside.map(p => ({ p, d: Math.hypot(p.x - corner.x, p.y - corner.y) })).filter(o => o.d > 8).sort((a, b) => a.d - b.d);
+        const chosen = ranked.find(o => !boxes.some(r => hits(corner, o.p, r))) || ranked[0];
+        if (chosen) links.push({ x1: chosen.p.x, y1: chosen.p.y, x2: corner.x, y2: corner.y });
+      });
+    });
+    return links;
+  }
+
+  /** Pieces of a segment that stay out of every face interior. Boundary pixels remain so a corner joint is kept. */
+  function outsideSegments(x1, y1, x2, y2, faces) {
+    if (![x1, y1, x2, y2].every(Number.isFinite)) return [];
+    const boxes = (Array.isArray(faces) ? faces : []).filter(r => [r?.x, r?.y, r?.width, r?.height].every(Number.isFinite) && r.width > 0 && r.height > 0);
+    let spans = [[0, 1]];
+    const dx = x2 - x1, dy = y2 - y1;
+    const openSpan = (min, max, a, d) => {
+      if (!(max > min)) return null;
+      if (Math.abs(d) < 1e-9) return (a > min && a < max) ? [-Infinity, Infinity] : null;
+      let ta = (min - a) / d, tb = (max - a) / d;
+      if (ta > tb) { const swap = ta; ta = tb; tb = swap; }
+      return [ta, tb];
+    };
+    boxes.forEach(r => {
+      const tx = openSpan(r.x, r.x + r.width, x1, dx), ty = openSpan(r.y, r.y + r.height, y1, dy);
+      if (!tx || !ty) return;
+      const lo = Math.max(tx[0], ty[0], 0), hi = Math.min(tx[1], ty[1], 1);
+      if (!(hi > lo)) return;
+      const next = [];
+      spans.forEach(([a, b]) => {
+        if (hi <= a || lo >= b) { next.push([a, b]); return; }
+        if (lo > a) next.push([a, Math.min(lo, b)]);
+        if (hi < b) next.push([Math.max(hi, a), b]);
+      });
+      spans = next;
+    });
+    return spans.flatMap(([t0, t1]) => {
+      if (!(t1 > t0)) return [];
+      const seg = { x1: x1 + dx * t0, y1: y1 + dy * t0, x2: x1 + dx * t1, y2: y1 + dy * t1 };
+      return Math.hypot(seg.x2 - seg.x1, seg.y2 - seg.y1) >= 0.5 ? [seg] : [];
+    });
+  }
+
   function normalizeExclusions(rects, width, height) {
     return (Array.isArray(rects) ? rects : []).flatMap(r => {
       const x = r?.x ?? r?.left, y = r?.y ?? r?.top, w = r?.width ?? (r?.right - x), h = r?.height ?? (r?.bottom - y);
@@ -140,7 +222,7 @@
     let displayPose = null;
     let aperture = view === "focus" ? 1 : 0, transition = null, userPaused = options.paused === true;
     let sprite = null, spriteImage = null, spriteLoaded = false, spriteGeneration = 0, spriteTime = 0, lastFrame = null;
-    let drag = null, lastPointerX = 0, lastPointerY = 0, showAll = false, telemetryAvailable = true;
+    let drag = null, lastPointerX = 0, lastPointerY = 0, showAll = false, telemetryAvailable = true, tether = null;
     const reduced = win.matchMedia("(prefers-reduced-motion: reduce)");
 
     function element(tag, cls, value, parent = root) { const e = doc.createElement(tag); if (cls) e.className = cls; if (value) e.textContent = value; parent.appendChild(e); return e; }
@@ -231,7 +313,7 @@
       if (view === "focus" && !options.backgroundOnly) exclusionElements.set(primaryExclusionOwner,[workspace]); else exclusionElements.delete(primaryExclusionOwner);
       if (options.backgroundScene?.setExclusionElements) options.backgroundScene.setExclusionElements(view === "focus" ? [workspace] : [], primaryExclusionOwner);
       resizeHandle.hidden = options.backgroundOnly || view !== "focus";
-      heading.querySelector("h2").textContent = view === "focus" ? "Petrie Loom" : "Strata Observatory";
+      heading.querySelector("h2").textContent = view === "focus" ? "C³" : "Strata Observatory";
       root.classList.toggle("spatial-all-threads", showAll);
       empty.hidden = sessions.length > 0;
       const visible = showAll ? sessions : sessions.slice(0, 6);
@@ -433,18 +515,7 @@
         ctx.strokeStyle = PALETTE[stableIndex(s.id, 3)]; ctx.globalAlpha = .23 * (1 - aperture); ctx.setLineDash([2, 7]); ctx.beginPath(); ctx.moveTo(rect.right - origin.left + 6, rect.top - origin.top + 20); ctx.lineTo(p.x, p.y); ctx.stroke(); ctx.setLineDash([]);
         ctx.globalAlpha = .9; ctx.beginPath(); ctx.arc(p.x, p.y, 5, 0, Math.PI * 2); ctx.stroke();
       }); ctx.globalAlpha = 1;
-      if (!options.backgroundOnly && aperture > 0) {
-        // Cube faces and inward reach are UI presentation geometry, never E8 facets.
-        const face = readingFace(), progress = smooth(aperture), hinge = 16 + progress * Math.min(58, width * .075);
-        const corners = [{x:face.left,y:face.top},{x:face.right,y:face.top},{x:face.right,y:face.bottom},{x:face.left,y:face.bottom}];
-        const faces = [corners, [corners[0],corners[1],{x:face.right-hinge*.45,y:face.top-hinge*.48},{x:face.left+hinge*.35,y:face.top-hinge*.48}], [corners[1],corners[2],{x:face.right+hinge*.65,y:face.bottom-hinge*.40},{x:face.right+hinge*.65,y:face.top+hinge*.18}]];
-        faces.forEach((polygon, i) => { ctx.beginPath(); polygon.forEach((p,j) => j ? ctx.lineTo(p.x,p.y) : ctx.moveTo(p.x,p.y)); ctx.closePath(); ctx.fillStyle = "rgba(20,36,58,.055)"; ctx.fill(); ctx.strokeStyle = PALETTE[i]; ctx.globalAlpha = .16 + progress * .12; ctx.lineWidth = .65; ctx.stroke(); });
-        corners.forEach((corner,i) => {
-          const nearest = points.map((p,index) => ({p,index,d:Math.hypot(p.x-corner.x,p.y-corner.y)})).sort((a,b) => a.d-b.d).filter(a => a.d > 18).slice(0,3);
-          nearest.forEach(({p}) => { ctx.globalAlpha = .12 + .14 * progress; ctx.strokeStyle = PALETTE[i%3]; ctx.setLineDash([2,5]); ctx.beginPath(); ctx.moveTo(p.x,p.y); ctx.lineTo(p.x+(corner.x-p.x)*(.35+.65*progress),p.y+(corner.y-p.y)*(.35+.65*progress)); ctx.stroke(); });
-          ctx.setLineDash([]); ctx.globalAlpha = .55; ctx.fillStyle = PALETTE[i%3]; ctx.beginPath(); ctx.arc(corner.x,corner.y,2.5,0,Math.PI*2); ctx.fill();
-        }); ctx.globalAlpha = 1;
-      }
+      // The working surface is a sheet. Its hem is the element, not an extruded wing.
       // Only source-supplied fine coordinates appear as semantic centers.
       (Array.isArray(raw.activations) ? raw.activations : []).forEach(a => {
         const v = a?.position8 || a?.placement?.position8;
@@ -458,8 +529,74 @@
         const p = points[stableIndex(s.id)], r = 4.5 + (Math.sin(clock / 450 + stableIndex(s.id, 13)) + 1) * 1.25;
         ctx.strokeStyle = PALETTE[stableIndex(s.id, 3)]; ctx.globalAlpha = 0.5; ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2); ctx.stroke(); ctx.globalAlpha = 1;
       });
-      // Erase every registered working area. ClearRect unions overlap safely.
-      maskRects().forEach(r => ctx.clearRect(r.x,r.y,r.width,r.height));
+      // Sheets are veils. The lattice stays under them instead of being cut into a hard hole.
+      if (options.backgroundOnly) paintCornerLinks(points);
+    }
+
+    function clearTether() {
+      if (!tether) return;
+      const tctx = tether.getContext("2d"); if (!tctx) return;
+      tctx.setTransform(1, 0, 0, 1, 0, 0); tctx.clearRect(0, 0, tether.width, tether.height);
+    }
+    function visibleFace(node, kind) {
+      if (!node?.isConnected || !node.getClientRects().length) return null;
+      const style = win.getComputedStyle(node);
+      if (style.display === "none" || style.visibility === "hidden") return null;
+      const b = node.getBoundingClientRect();
+      if (b.width < 28 || b.height < 28) return null;
+      const face = { x: b.left, y: b.top, width: b.width, height: b.height, kind };
+      const marks = node.querySelectorAll(":scope > .sheet-corner");
+      if (marks.length >= 4) {
+        face.corners = [...marks].slice(0, 4).map(mark => {
+          const box = mark.getBoundingClientRect();
+          return { x: box.left + box.width / 2, y: box.top + box.height / 2 };
+        });
+      } else if (kind === "panel") face.corners = panelCorners(face);
+      return face;
+    }
+    function informationFaces() {
+      const faces = [];
+      doc.querySelectorAll(".spatial-panel-cube").forEach(node => { const face = visibleFace(node, "panel"); if (face) faces.push(face); });
+      doc.querySelectorAll(".spatial-workspace, .spatial-thread-face, .joe-companion:not([data-state='hidden']) .joe-companion-button, .joe-companion-drawer:not([hidden]), #studio-invitation").forEach(node => {
+        const face = visibleFace(node, "face"); if (face) faces.push(face);
+      });
+      return faces;
+    }
+    // Joints are a layer above the cubes. The lattice canvas sits under the wings, so a line drawn there stops short of the visible corner.
+    function paintCornerLinks(points) {
+      if (!doc.body) return;
+      if (!tether || !tether.isConnected) {
+        tether = doc.createElement("canvas");
+        tether.className = "spatial-corner-links";
+        tether.setAttribute("aria-hidden", "true");
+        Object.assign(tether.style, { position: "fixed", inset: "0", width: "100%", height: "100%", zIndex: "1000000", pointerEvents: "none", background: "transparent" });
+        doc.body.appendChild(tether);
+      }
+      const ratio = Math.min(win.devicePixelRatio || 1, 2);
+      const viewW = Math.max(1, win.innerWidth), viewH = Math.max(1, win.innerHeight);
+      const bitmapW = Math.round(viewW * ratio), bitmapH = Math.round(viewH * ratio);
+      if (tether.width !== bitmapW || tether.height !== bitmapH) { tether.width = bitmapW; tether.height = bitmapH; }
+      const tctx = tether.getContext("2d"); if (!tctx) return;
+      tctx.setTransform(ratio, 0, 0, ratio, 0, 0);
+      tctx.clearRect(0, 0, viewW, viewH);
+      if (!Array.isArray(points) || !points.length) return;
+      const origin = root.getBoundingClientRect();
+      const faces = informationFaces();
+      const nodes = points.map(p => ({ x: p.x + origin.left, y: p.y + origin.top }));
+      tctx.save();
+      tctx.lineWidth = 0.45;
+      tctx.lineCap = "round";
+      tctx.strokeStyle = "#d5e4f4";
+      tctx.globalAlpha = 0.28;
+      cornerLinks(nodes, faces).forEach(link => {
+        outsideSegments(link.x1, link.y1, link.x2, link.y2, faces).forEach(seg => {
+          tctx.beginPath();
+          tctx.moveTo(seg.x2, seg.y2);
+          tctx.lineTo(seg.x1, seg.y1);
+          tctx.stroke();
+        });
+      });
+      tctx.restore();
     }
 
     function validateSprite(config) {
@@ -602,12 +739,12 @@
       element: root, workspace,
       update: refresh, setView, setSprite, setMotionPaused, mountContent, detachContent, getRootPositions, getPointPosition, setProjection, setDisplayOrientation, setExclusionElements, setExclusions, refreshExclusions:requestDraw, requestDraw, getWorkspaceRect, setWorkspaceRect, resetWorkspaceRect,
       getState: () => ({ view, selectedSessionId: selectedId, paused: userPaused, reducedMotion: reduced.matches, geometryReady: scaffold !== null, rotation: projectionState(), display: displayPose }),
-      destroy() { if (destroyed) return; destroyed = true; spriteGeneration++; cancelFrame(); cleanup.forEach(fn => fn()); options.backgroundScene?.setExclusionElements?.([],primaryExclusionOwner); detachContent(true); root.remove(); }
+      destroy() { if (destroyed) return; destroyed = true; spriteGeneration++; cancelFrame(); cleanup.forEach(fn => fn()); options.backgroundScene?.setExclusionElements?.([],primaryExclusionOwner); detachContent(true); tether?.remove(); root.remove(); }
     };
   }
 
   function attachBackground(container, options = {}) { return attach(container, { ...options, backgroundOnly:true, renderScaffold:true, sessions:[], selectedSessionId:null, view:"overview", sprite:null, readSessions:undefined, backgroundScene:undefined }); }
-  const api = Object.freeze({ attach, attachBackground, validateScaffold, rotate8, projectVector, stableIndex, normalizeSnapshots, normalizeExclusions, boundWorkspaceRect, peripheralRoute, formatAge, smooth, constants: Object.freeze({ PLANE_SHA, ASSET_SHA, STALE_MS }) });
+  const api = Object.freeze({ attach, attachBackground, validateScaffold, rotate8, projectVector, stableIndex, normalizeSnapshots, normalizeExclusions, cornerLinks, panelCorners, outsideSegments, boundWorkspaceRect, peripheralRoute, formatAge, smooth, constants: Object.freeze({ PLANE_SHA, ASSET_SHA, STALE_MS }) });
   global.BombSpatialWorld = api;
   if (typeof module !== "undefined" && module.exports) module.exports = api;
 })(typeof window !== "undefined" ? window : globalThis);

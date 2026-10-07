@@ -1,11 +1,21 @@
 // Bomb Code — three-column Grok Build control panel.
-// Pixel-bomb visual language: moods for thinking / tools / boom / wait.
+// Platonic-solid marks: moods for thinking / tools / boom / wait.
 // Turn status: BombPresence (presence.js) — single source of truth.
 
 const $ = (id) => document.getElementById(id);
 
 const SOLID_POSTER = "assets/platonic-solids-poster.png";
-const SOLID_GLB = "assets/platonic-solids.glb";
+const SOLID_BY_MOOD = {
+  idle: "assets/platonic-icosahedron.glb",
+  ready: "assets/platonic-octahedron.glb",
+  thinking: "assets/platonic-tetrahedron.glb",
+  running: "assets/platonic-cube.glb",
+  tooling: "assets/platonic-dodecahedron.glb",
+  stream: "assets/platonic-icosahedron.glb",
+  boom: "assets/platonic-octahedron.glb",
+  error: "assets/platonic-tetrahedron.glb",
+  wait: "assets/platonic-cube.glb",
+};
 const SOLID_3D_SIZES = new Set(["md", "lg", "xl"]);
 const P = window.BombPresence;
 if (!P || typeof P.emptyPresence !== "function") {
@@ -127,18 +137,21 @@ function prefersReducedMotion() {
   return !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
 }
 
-function solidMediaHtml(size = "sm") {
-  // Poster always present — WebKitGTK with compositing disabled may not paint WebGL.
-  const poster = `<img class="bomb-face" src="${SOLID_POSTER}" alt="" />`;
-  if (!SOLID_3D_SIZES.has(size)) return poster;
-  // One WebGL context per hero/status icon — avoid for xs/sm list spam.
+function solidSrc(mood) {
+  return SOLID_BY_MOOD[mood] || SOLID_BY_MOOD.idle;
+}
+
+function solidMediaHtml(size = "sm", mood = "idle") {
+  // Poster for list rows — one WebGL context per hero, not per thread.
+  if (!SOLID_3D_SIZES.has(size)) {
+    return `<img class="bomb-face" src="${SOLID_POSTER}" alt="" />`;
+  }
   const rotate = prefersReducedMotion()
     ? ""
     : ' auto-rotate rotation-per-second="18deg"';
   return (
-    poster +
-    `<model-viewer class="bomb-solid" src="${SOLID_GLB}" poster="${SOLID_POSTER}" ` +
-    `alt=""${rotate} interaction-prompt="none" ` +
+    `<model-viewer class="bomb-solid" src="${solidSrc(mood)}" poster="${SOLID_POSTER}" ` +
+    `alt="" environment-image="neutral"${rotate} interaction-prompt="none" ` +
     `shadow-intensity="0.2" exposure="1.05" disable-zoom disable-pan disable-tap ` +
     `touch-action="none" tabindex="-1"></model-viewer>`
   );
@@ -153,11 +166,7 @@ function respectSolidMotionPreference() {
 }
 
 function bombHtml(mood = "idle", size = "sm", extraClass = "") {
-  const wick =
-    ["thinking", "stream", "tooling", "wait", "ready", "running"].includes(mood)
-      ? " wick-on"
-      : "";
-  return `<span class="px-bomb ${size} mood-${mood} tier-satellite${wick} ${extraClass}" aria-hidden="true">${solidMediaHtml(size)}</span>`;
+  return `<span class="px-bomb ${size} mood-${mood} tier-satellite ${extraClass}" aria-hidden="true">${solidMediaHtml(size, mood)}</span>`;
 }
 
 function moodFromStatus(status) {
@@ -201,6 +210,9 @@ function setBombMood(el, mood, opts = {}) {
     el.addEventListener("animationend", clear, { once: true });
     setTimeout(clear, 400);
   }
+  const viewer = el.querySelector("model-viewer.bomb-solid");
+  const src = solidSrc(mood);
+  if (viewer && viewer.getAttribute("src") !== src) viewer.setAttribute("src", src);
 }
 
 function anySessionBusy() {
@@ -315,11 +327,6 @@ function updateBombChrome() {
     if (bomb) {
       bomb.classList.add("tier-dock", "lg");
       bomb.classList.remove("tier-satellite", "md", "sm", "xs");
-      // Wick is driven by mood CSS (thinking/stream/tooling/wait/ready)
-      bomb.classList.toggle(
-        "wick-on",
-        ["thinking", "stream", "tooling", "wait", "ready", "running"].includes(view.mood)
-      );
     }
 
     const label = $("turn-phase-label");
@@ -417,7 +424,7 @@ function updateBombChrome() {
     }
   }
 
-  // Activity header — ambient body; wick when any session busy
+  // Activity header — the Now-cube solid follows the live mood.
   const actBomb = $("activity-bomb");
   if (actBomb) {
     actBomb.classList.add("tier-ambient", "md");
@@ -431,7 +438,6 @@ function updateBombChrome() {
             : "ready"
       : "idle";
     setBombMood(actBomb, actMood);
-    actBomb.classList.toggle("wick-on", actMood !== "idle");
   }
 
   // Services bomb: HOST HEALTH ONLY (plan §5.3) — never the turn monologue.
@@ -624,7 +630,12 @@ function activateView(name) {
 }
 
 document.querySelectorAll(".nav-item").forEach((btn) => {
-  btn.addEventListener("click", () => activateView(btn.dataset.view));
+  btn.addEventListener("click", () => {
+    // Home opens the studio card and has no view of its own.
+    // activateView(undefined) would clear the desk behind that card.
+    if (!btn.dataset.view) return;
+    activateView(btn.dataset.view);
+  });
 });
 
 // ── Transcript (center) ─────────────────────────────────────────────────
@@ -1507,7 +1518,12 @@ function updateThreadGitRow(sess) {
   const isolated = !!(sess && (sess.projectRoot || sess.project_root));
   row.style.display = isolated ? "" : "none";
   if (isolated) {
-    $("thread-branch").textContent = `🌱 ${sess.worktree || "worktree"} · land to merge into project`;
+    const place = sess.worktree || "worktree";
+    const parts = String(place).split("/").filter(Boolean);
+    const short = parts.length > 2 ? parts.slice(-2).join("/") : place;
+    const branch = $("thread-branch");
+    branch.textContent = short;
+    branch.title = `${place}. This thread writes in an isolated worktree. Land merges it into the project folder.`;
   }
 }
 
@@ -1730,7 +1746,7 @@ function renderTools() {
     .join("");
 }
 
-async function selectSession(id) {
+async function selectSession(id, options = {}) {
   const prev = state.selectedSession;
   if (prev !== (id || null) && $("prompt")) {
     $("prompt").value = threadDrafts.switchThread(prev, id || null, $("prompt").value);
@@ -1749,8 +1765,8 @@ async function selectSession(id) {
     state.turn = state.presenceBySession.get(id) || (P ? P.emptyPresence() : { phase: "idle" });
     state.presenceBySession.set(id, state.turn);
   }
-  // Preserve the spatial working face when selecting a native thread.
-  if (id) activateView($("view-spatial")?.classList.contains("active") ? "spatial" : "chat");
+  // A restored thread stays on the desk already open. A click still opens the thread.
+  if (id && !options.keepView) activateView($("view-spatial")?.classList.contains("active") ? "spatial" : "chat");
   const sess = state.sessions.find((s) => s.id === id);
   // Selecting a thread activates its PROJECT (not its worktree path — using
   // the raw cwd made + nest new threads inside another thread's worktree).
@@ -2586,7 +2602,7 @@ async function refreshSessions() {
       state.selectedSession && state.sessions.some((s) => s.id === state.selectedSession);
     if (!stillThere) {
       const next = state.sessions[0]?.id || null;
-      await selectSession(next);
+      await selectSession(next, { keepView: true });
     } else if (!state.transcriptLoaded.has(state.selectedSession)) {
       // First sight of this thread: hydrate from SQLite. Already-loaded
       // threads update via events — a full innerHTML rebuild on every status
@@ -2624,10 +2640,8 @@ function parseCsv(s) {
     .filter(Boolean);
 }
 
-// ── Agent Talk visualizer (fuse & fireworks) ─────────────────────────────
-// Each live agent is a pixel bomb: fuse burns while it thinks, sparks carry
-// thought fragments, tool calls stamp the casing, and a finished turn pops
-// into a firework whose embers are words from the reply.
+// ── Agent Talk visualizer ────────────────────────────────────────────────
+// Live agents dance while they work. A finished turn pops reply words.
 const talk = {
   agents: new Map(), // sessionId → agent viz state
   collapsed: localStorage.getItem("bomb.talkCollapsed") === "1",
@@ -2789,7 +2803,7 @@ function talkFrame(now) {
     ctx.fillStyle = "rgba(255,255,255,0.25)";
     ctx.font = "11px ui-monospace, monospace";
     ctx.textAlign = "center";
-    ctx.fillText("no live agents — fuses are cold", W / 2, H / 2);
+    ctx.fillText("no live agents", W / 2, H / 2);
     return;
   }
 
@@ -2837,13 +2851,6 @@ function talkFrame(now) {
           color,
         });
       }
-    } else {
-      // Idle / post-boom: the classic dim bomb on the bench.
-      ctx.font = "20px system-ui";
-      ctx.textAlign = "center";
-      ctx.globalAlpha = a.phase === "idle" ? 0.55 : 1;
-      ctx.fillText("💣", cx, cy);
-      ctx.globalAlpha = 1;
     }
 
     // Label.
@@ -2851,40 +2858,6 @@ function talkFrame(now) {
     ctx.fillStyle = color;
     ctx.textAlign = "center";
     ctx.fillText(a.backend, cx, H - 26);
-
-    // Fuse spark rides along while active (sparkler next to the dancer).
-    const fx = cx + 9, fy = cy - 16;
-    if (!active) {
-      ctx.strokeStyle = "rgba(255,255,255,0.28)";
-      ctx.lineWidth = 1.4;
-      ctx.beginPath();
-      ctx.moveTo(fx, fy);
-      ctx.quadraticCurveTo(fx + 8, fy - 9, fx + 3, fy - 16);
-      ctx.stroke();
-    }
-    if (active) {
-      const t = a.fuse;
-      const bx = fx + 8 * t * (1 - t) * 2 + 3 * t;
-      const by = fy - 9 * t - 7 * t * t;
-      ctx.fillStyle = "#ffd966";
-      ctx.shadowColor = "#ffb84d";
-      ctx.shadowBlur = 8;
-      ctx.beginPath();
-      ctx.arc(bx, by, 2.2 + Math.random() * 1.2, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.shadowBlur = 0;
-      // Emit a passive spark sometimes even without new tokens.
-      if (a.sparks.length < 36 && Math.random() < 0.25) {
-        a.sparks.push({
-          x: bx - cx, y: by - cy,
-          vx: (Math.random() - 0.5) * 20,
-          vy: -14 - Math.random() * 18,
-          life: 0.8,
-          text: null,
-          color: "#ffd966",
-        });
-      }
-    }
 
     // Sparks (thought/speech fragments).
     for (const s of a.sparks) {
@@ -2983,7 +2956,8 @@ function setProjectCwd(path, { remember = true } = {}) {
   p = p.replace(/\/\.git$/i, "");
   if (remember) state.cwdDirty = false; // explicit choice supersedes typing
   $("cwd").value = p;
-  $("project-chip-name").textContent = p || "choose project";
+  const folder = p.split("/").filter(Boolean).pop();
+  $("project-chip-name").textContent = folder || "choose project";
   $("project-chip").title = p || "Choose project folder";
   if (p && remember) {
     const list = [p, ...recentProjects().filter((x) => x !== p)].slice(0, 8);
@@ -5433,6 +5407,7 @@ async function boot() {
   } catch (e) {
     toastError(e);
   }
+  activateView("builds");
 }
 
 $("cwd")?.addEventListener("input", () => {

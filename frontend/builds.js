@@ -110,7 +110,14 @@
       $('builds-concurrency-current').textContent = `Current limit: ${B.limit}`;
       if (!B.limitDirty && document.activeElement !== $('builds-concurrency')) $('builds-concurrency').value = String(B.limit);
       window.BombBuildsHost.refreshActivity();
-    } catch (e) { B.fresh = false; $('collaboration-snapshot').textContent = 'Refresh failed · graph and percentages are the last known snapshot'; $('collaboration-snapshot').classList.add('builds-error'); window.BombBuildsHost.refreshActivity(); notice(`Builds unavailable: ${e}`, true); }
+    } catch (e) {
+      B.fresh = false;
+      $('collaboration-snapshot').textContent = 'Refresh failed · graph and percentages are the last known snapshot';
+      $('collaboration-snapshot').classList.add('builds-error');
+      window.BombBuildsHost.refreshActivity();
+      const current = $('builds-status')?.textContent || '';
+      if (!current || current.startsWith('Builds unavailable') || current.startsWith('Choose a clean')) notice(`Builds unavailable: ${e}`, true);
+    }
     finally { B.loading = false; }
   }
   async function action(command, args) {
@@ -128,7 +135,79 @@
     finally { B.busy = false; renderDetail(); }
   }
 
+  const engines = { codex: 'codex', claude: 'claude', 'claude code': 'claude', grok: 'grok' };
+  function spokenRoutes(text) {
+    const found = {};
+    for (const line of String(text || '').split('\n')) {
+      const match = line.match(/^\s*(planner|implementer|auditor|verifier)\s*:\s*(codex|claude(?:\s+code)?|grok)(?:\s*\/\s*(\S+))?\s*$/i);
+      if (!match) continue;
+      const backend = engines[match[2].toLowerCase()];
+      if (!backend) continue;
+      found[match[1].toLowerCase()] = { backend, model: match[3] || null };
+    }
+    return found;
+  }
+  const PART_CAP = 8;
+  /** Numbered lines or ## headings become parts. Role lines stay routes, not parts. */
+  function planSequence(text) {
+    const roleLine = /^\s*(planner|implementer|auditor|verifier)\s*:/i;
+    const stepLine = /^(?:#{2,3}\s+(.+)|(\d+)[.)]\s+(.+))\s*$/;
+    const preface = [];
+    const steps = [];
+    let current = null;
+    for (const line of String(text || '').split('\n')) {
+      if (roleLine.test(line)) continue;
+      const match = line.match(stepLine);
+      if (match) {
+        if (current) steps.push(current);
+        current = { title: (match[1] || match[3] || '').trim(), body: [] };
+        continue;
+      }
+      if (current) current.body.push(line);
+      else preface.push(line);
+    }
+    if (current) steps.push(current);
+    if (steps.length < 2) return { parts: [], omitted: 0 };
+    const lead = preface.map(line => line.trim()).filter(Boolean).join('\n');
+    const omitted = Math.max(0, steps.length - PART_CAP);
+    const parts = steps.slice(0, PART_CAP).map((step, index) => {
+      const detail = step.body.join('\n').trim();
+      return {
+        index: index + 1,
+        title: step.title || `Part ${index + 1}`,
+        objective: [lead, step.title, detail].filter(Boolean).join('\n\n'),
+      };
+    });
+    return { parts, omitted };
+  }
+  function filesNamed(text) {
+    const found = [];
+    const re = /\b((?:[\w.-]+\/)*[\w.-]+\.(?:py|md|js|mjs|rs|toml|json|css|html|txt|yml|yaml))\b/gi;
+    const protect = /\b(?:do not|don't|never)\s+(?:edit|change|touch|modify)\b|\bwithout (?:editing|changing|touching)\b/i;
+    for (const sentence of String(text || '').split(/\n|(?<=[.!])\s+/)) {
+      if (protect.test(sentence)) continue;
+      for (const match of sentence.matchAll(re)) {
+        const path = match[1].replace(/^\.\//, '');
+        if (!found.includes(path)) found.push(path);
+      }
+    }
+    return found;
+  }
+  function pathCovered(path, writeSet) {
+    const writes = (writeSet || []).map(item => String(item || '').trim().replace(/^\.\//, '').replace(/\/+$/, '')).filter(Boolean);
+    if (writes.includes('.')) return true;
+    return writes.some(root => path === root || path.startsWith(`${root}/`));
+  }
+  function uncoveredFiles(part, writeSet) {
+    return filesNamed(part.objective).filter(path => !pathCovered(path, writeSet));
+  }
   function collectSpec() {
+    const spoken = spokenRoutes($('builds-objective').value);
+    for (const role of roles) {
+      if (!spoken[role]) continue;
+      $(`builds-${role}-engine`).value = spoken[role].backend;
+      $(`builds-${role}-model`).value = spoken[role].model || '';
+    }
     return {
       project_root: $('builds-project').value.trim(), objective: $('builds-objective').value.trim(),
       write_set: $('builds-scope').value.split('\n').map(s => s.trim()).filter(Boolean),
@@ -136,7 +215,45 @@
       roles: Object.fromEntries(roles.map(role => [role, { backend: $(`builds-${role}-engine`).value, model: $(`builds-${role}-model`).value.trim() || null }]))
     };
   }
-  function renderPreview(preview) {
+  function renderBindings() {
+    const spec = collectSpec();
+    const box = $('builds-bindings');
+    if (!box) return;
+    box.innerHTML = roles.map(role => {
+      const route = spec.roles[role];
+      return `<li>${esc(title(role))} · ${esc(route.backend)} · ${esc(route.model || 'configured default')}</li>`;
+    }).join('');
+    const sequence = planSequence($('builds-objective').value);
+    const list = $('builds-sequence');
+    const help = $('builds-submit-help');
+    if (list) {
+      if (!sequence.parts.length) {
+        list.hidden = true;
+        list.innerHTML = '';
+      } else {
+        list.hidden = false;
+        list.innerHTML = sequence.parts.map(part => {
+          const when = part.index === 1
+            ? 'Starts first. You still approve its plan before any edit.'
+            : `Starts after you accept part ${part.index - 1}.`;
+          const missing = uncoveredFiles(part, spec.write_set);
+          const gap = missing.length
+            ? ` ${missing.join(', ')} ${missing.length === 1 ? 'is not a write path' : 'are not write paths'}.`
+            : '';
+          return `<li><strong>${part.index}. ${esc(part.title)}</strong> · ${esc(when)}${esc(gap)}</li>`;
+        }).join('') + (sequence.omitted ? `<li>${sequence.omitted} later parts were left out. Approve eight at a time, then paste the rest.</li>` : '');
+      }
+    }
+    if (help) {
+      help.textContent = sequence.parts.length
+        ? `Preview checks part 1 and starts nobody. Submit queues ${sequence.parts.length} builds. Only the first planner starts. You approve every plan before edits, and you accept each result before the next part starts.`
+        : 'Preview checks the queue and starts nobody. Submit starts the planner. You approve the plan before any edit.';
+    }
+    const submit = $('builds-create');
+    if (submit) submit.textContent = sequence.parts.length > 1 ? `Queue ${sequence.parts.length} builds` : 'Submit reviewed build';
+    return sequence;
+  }
+  function renderPreview(preview, sequence) {
     const panel = $('builds-preview-panel');
     if (!panel) return;
     if (!preview) { panel.hidden = true; panel.innerHTML = ''; return; }
@@ -146,9 +263,18 @@
       ? (preview.dependencies || []).map(d => `<li>${esc(d.id.slice(0, 8))} · ${esc(d.objective.slice(0, 80))} · ${esc(d.status)}${d.accepted ? ' · accepted' : ''}</li>`).join('')
       : '<li>None selected</li>';
     const notes = (preview.notes || []).map(n => `<li>${esc(n)}</li>`).join('');
+    const parts = sequence?.parts || [];
+    const missing = [...new Set(parts.flatMap(part => uncoveredFiles(part, preview.write_set || [])))];
+    const gapHtml = missing.length
+      ? `<p class="builds-help">${esc(missing.join(', '))} ${missing.length === 1 ? 'is not a write path' : 'are not write paths'}. Add ${missing.length === 1 ? 'it' : 'them'} before you queue, or that part cannot edit ${missing.length === 1 ? 'it' : 'them'}.</p>`
+      : '';
+    const partsHtml = parts.length
+      ? `<h3>Sequence · ${parts.length} parts</h3><p class="builds-help">Only part 1 was checked against the project. Nothing was saved. Later parts start only after you accept the previous result.</p>${gapHtml}<ol>${parts.map(part => `<li>${esc(part.title)}</li>`).join('')}</ol>`
+      : '';
     panel.hidden = false;
     panel.innerHTML = `<h3>Dry-run preview</h3>
 <p class="builds-help">No build was saved. No worktree was created. No agents were started.</p>
+${partsHtml}
 <div class="builds-preview-meta">
 <div><strong>Project</strong> · ${esc(preview.project_root || '')}</div>
 <div><strong>HEAD</strong> · ${esc((preview.head_commit || '').slice(0, 12))}</div>
@@ -164,19 +290,28 @@
   async function dryRun() {
     if (B.busy) return;
     const spec = collectSpec();
-    if (!spec.project_root || !spec.objective || !spec.write_set.length) {
-      notice('Fill project, objective and write paths before previewing.', true);
+    const sequence = planSequence(spec.objective);
+    const previewSpec = sequence.parts.length ? { ...spec, objective: sequence.parts[0].objective } : spec;
+    if (!previewSpec.project_root || !previewSpec.objective || !previewSpec.write_set.length) {
+      if ((!previewSpec.project_root || !previewSpec.write_set.length) && $('builds-setup')) $('builds-setup').open = true;
+      notice(previewSpec.objective ? 'Add the project folder and one write path. Preview starts nobody.' : 'Paste the work first. Number the parts when it is a sequence.', true);
       return;
     }
     B.busy = true;
     if ($('builds-preview')) $('builds-preview').disabled = true;
     if ($('builds-create')) $('builds-create').disabled = true;
-    notice('Validating build without starting agents…');
+    notice(sequence.parts.length ? `Checking part 1 of ${sequence.parts.length} without starting agents…` : 'Validating build without starting agents…');
     try {
       const dependencies = Array.from($('builds-dependencies').selectedOptions, option => option.value);
-      const preview = await invoke('preview_build', { spec, dependencies });
-      renderPreview(preview);
-      notice('Dry run ok — review the preview. Nothing was submitted.');
+      const preview = await invoke('preview_build', { spec: previewSpec, dependencies });
+      renderPreview(preview, sequence);
+      const missing = [...new Set(sequence.parts.flatMap(part => uncoveredFiles(part, preview.write_set || spec.write_set)))];
+      const gap = missing.length
+        ? ` ${missing.join(', ')} ${missing.length === 1 ? 'is not a write path.' : 'are not write paths.'}`
+        : '';
+      notice(sequence.parts.length
+        ? `Dry run ok — ${sequence.parts.length} parts, nothing submitted.${gap} Queue ${sequence.parts.length} builds starts the first planner. Later parts wait until you accept the previous result.`
+        : 'Dry run ok — review the preview. Nothing was submitted.');
     } catch (e) {
       renderPreview(null);
       notice(String(e), true);
@@ -190,17 +325,40 @@
     event.preventDefault();
     if (B.busy) return;
     const spec = collectSpec();
+    const sequence = planSequence(spec.objective);
+    const parts = sequence.parts.length ? sequence.parts : [{ index: 1, title: '', objective: spec.objective }];
     B.busy = true; $('builds-create').disabled = true; if ($('builds-preview')) $('builds-preview').disabled = true;
-    notice('Submitting the reviewed build and its prerequisites…');
+    notice(parts.length > 1 ? `Queuing ${parts.length} reviewed builds. Only the first planner starts…` : 'Submitting the reviewed build and its prerequisites…');
+    const created = [];
     try {
-      const dependencies = Array.from($('builds-dependencies').selectedOptions, option => option.value);
-      const workflow = await invoke('create_build', { spec, dependencies });
-      B.selected = workflow.id; B.signature = ''; $('builds-new').open = false; renderPreview(null);
-      await refresh(); notice('Build submitted. Review its queue state and approve the full plan when planning completes.');
-    } catch (e) { notice(String(e), true); }
+      let previous = null;
+      for (const part of parts) {
+        const dependencies = previous
+          ? [previous]
+          : Array.from($('builds-dependencies').selectedOptions, option => option.value);
+        const workflow = await invoke('create_build', { spec: { ...spec, objective: part.objective }, dependencies });
+        if (!workflow?.id) throw new Error(`Part ${part.index} did not return a build.`);
+        previous = workflow.id;
+        created.push(workflow.id);
+      }
+      B.selected = created[0]; B.signature = ''; $('builds-new').open = false; renderPreview(null);
+      await refresh();
+      notice(created.length > 1
+        ? `Queued ${created.length} builds. The first planner can start now. The others wait until you accept the previous result. Approve each plan before any edit.`
+        : 'Build submitted. Review its queue state and approve the full plan when planning completes.');
+    } catch (e) {
+      notice(created.length ? `Queued ${created.length} of ${parts.length} before a stop: ${e}. Later parts were not submitted.` : String(e), true);
+    }
     finally { B.busy = false; $('builds-create').disabled = false; if ($('builds-preview')) $('builds-preview').disabled = false; renderDetail(); }
   };
   if ($('builds-preview')) $('builds-preview').onclick = () => dryRun();
+  if ($('builds-create')?.addEventListener) $('builds-create').addEventListener('click', () => {
+    const project = $('builds-project').value.trim();
+    const paths = $('builds-scope').value.trim();
+    if ((!project || !paths) && $('builds-setup')) $('builds-setup').open = true;
+  });
+  $('builds-objective').oninput = renderBindings;
+  renderBindings();
   $('builds-use-project').onclick = () => {
     $('builds-project').value = $('cwd').value;
     if (!$('builds-project').value) notice('Choose a project with the project selector, or enter its absolute folder path.', true);

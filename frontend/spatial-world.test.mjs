@@ -127,6 +127,48 @@ test('resize and movement keep native working surfaces inside scene and preserve
   }
 });
 
+test('each information-face corner links to one lattice point outside the faces', () => {
+  const points = [{ x: 0, y: 0 }, { x: 50, y: 10 }, { x: 10, y: 90 }, { x: 200, y: 200 }, { x: 40, y: 40 }];
+  const faces = [{ x: 20, y: 20, width: 60, height: 40 }];
+  const links = world.cornerLinks(points, faces);
+  assert.equal(links.length, 4);
+  const corners = [[20, 20], [80, 20], [80, 60], [20, 60]];
+  links.forEach((link, i) => {
+    assert.equal(link.x2, corners[i][0]);
+    assert.equal(link.y2, corners[i][1]);
+    assert.notEqual(link.x1, 40);
+    assert.ok(points.some(p => p.x === link.x1 && p.y === link.y1));
+  });
+});
+
+test('a corner uses a lattice point whose segment misses the other faces', () => {
+  const points = [{ x: 200, y: 10 }, { x: 10, y: -30 }];
+  const faces = [{ x: 0, y: 0, width: 40, height: 40 }, { x: 50, y: 0, width: 40, height: 40 }];
+  const topRight = world.cornerLinks(points, faces).find(link => link.x2 === 40 && link.y2 === 0);
+  assert.equal(topRight.x1, 10);
+  assert.equal(topRight.y1, -30);
+});
+
+test('a panel sheet hangs from its four corners', () => {
+  const corners = world.panelCorners({ x: 10, y: 20, width: 100, height: 80 });
+  assert.deepEqual(corners, [
+    { x: 10, y: 20 },
+    { x: 110, y: 20 },
+    { x: 110, y: 100 },
+    { x: 10, y: 100 },
+  ]);
+});
+
+test('a corner joint stays when another face blocks the middle of the segment', () => {
+  const pieces = world.outsideSegments(0, 0, 100, 0, [{ x: 40, y: -10, width: 20, height: 20 }]);
+  assert.ok(pieces.some(seg => (seg.x1 === 0 && seg.y1 === 0) || (seg.x2 === 0 && seg.y2 === 0)));
+  assert.ok(pieces.some(seg => seg.x1 >= 60 || seg.x2 >= 60));
+  pieces.forEach(seg => {
+    const midX = (seg.x1 + seg.x2) / 2;
+    assert.ok(midX <= 40 || midX >= 60);
+  });
+});
+
 test('session cleanup retains literal turn-ending evidence without implying task acceptance', () => {
   const [closed,unknown,saved] = world.normalizeSnapshots([
     row({id:'closed',phase:'idle',sessionClosed:true,turnEndedAt:now-1000}),
