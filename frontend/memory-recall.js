@@ -39,7 +39,7 @@
       if (value.schema !== 'bomb-code/memory-recall/v1' || value.ok !== true) throw new Error(value.error || 'Unexpected recall response.');
       showCoverage(value);
       if (action === 'search') {
-        if (value.status !== 'ready') throw new Error('Build or refresh the local index before searching.');
+        if (value.status !== 'ready') throw new Error('No local recall index yet. Click “Build / refresh local index”, then search again.');
         result = value; selected.clear(); render();
         status.textContent = `${value.hits.length} ranked excerpts. ${coverageText(value)}${value.vectorError ? ` Semantic search unavailable: ${value.vectorError}.` : ''}`;
       } else if (action === 'evidence') {
@@ -78,6 +78,18 @@
   ['recall-query','recall-topic','recall-source','recall-scope'].forEach(id => $(id).addEventListener(id.includes('source') || id.includes('scope') ? 'change' : 'input', () => invalidate('Recall question or filters changed. Prepare selected context again.')));
   document.addEventListener('bomb-code:thread-selected', () => invalidate('Thread changed. Search again before preparing selected context.'));
   $('recall-search').addEventListener('click', () => operation('search', values()));
+  // Honest empty state (D-045): don't leave a stale "sources changed" tone on first open.
+  function initRecallEmptyState() {
+    if (!status) return;
+    const current = (status.textContent || '').trim();
+    if (!current || /sources changed/i.test(current) || /ready to check/i.test(current)) {
+      status.textContent = 'No local recall index yet — click “Build / refresh local index” before searching, or Check coverage to see what is already indexed.';
+    }
+  }
+  initRecallEmptyState();
+  // Soft coverage probe (does not build); keeps empty-state honest.
+  operation('status').catch(() => initRecallEmptyState());
+
   $('recall-query').addEventListener('keydown', event => { if (event.key === 'Enter') { event.preventDefault(); operation('search', values()); } });
   $('recall-index').addEventListener('click', () => operation('index'));
   $('recall-embed').addEventListener('click', async () => {
