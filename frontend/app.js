@@ -202,6 +202,22 @@ function isNoiseAgentText(text) {
 }
 
 /** Start or advance the turn with a concrete signal (selected session by default). */
+
+/** True once the user has sent a prompt on this presence (not startup noise). */
+function userStartedTurn(p) {
+  if (!p) return false;
+  // Tools / wait mean a real agent turn is under way even if stagesSeen.send
+  // was lost; pure startup "think" with none of these is a phantom.
+  return !!(
+    p.promptChars ||
+    (p.stagesSeen && p.stagesSeen.send) ||
+    p.toolCount ||
+    (p.toolsActive || 0) > 0 ||
+    p.phase === "wait" ||
+    p.phase === "reply"
+  );
+}
+
 function noteTurn(phase, patch = {}, sid = null) {
   if (!P) return;
   const target = sid || state.selectedSession;
@@ -588,7 +604,7 @@ function appendTranscript(sessionId, role, body, at = nowIso(), opts = {}) {
   // Interleaved ACP noise (term/tool/plan rows) must not split a response —
   // look back past it to find the still-streaming block of the same role.
   if (stream && (role === "agent" || role === "thought" || role === "term") && list.length) {
-    for (let i = list.length - 1, hops = 0; i >= 0 && hops < 8; i--, hops++) {
+    for (let i = list.length - 1, hops = 0; i >= 0 && hops < 40; i--, hops++) {
       const entry = list[i];
       if (entry.role === role && entry.streaming) {
         // Rotate giant stream blocks: one multi-MB text node re-escaped on
@@ -615,9 +631,10 @@ function appendTranscript(sessionId, role, body, at = nowIso(), opts = {}) {
         }
         return;
       }
-      // Skip over noise rows that landed mid-stream; stop at real content.
-      if (entry.role === "term" || entry.role === "tool" || entry.role === "plan") continue;
-      break;
+      // Skip other roles (thought/tool/term/plan/system/approval) so interleaved
+      // noise cannot open a new AGENT bubble per chunk (llm-retry #12).
+      if (entry.role !== role) continue;
+      break; // same role but not streaming → start a new bubble
     }
   }
 
@@ -890,6 +907,19 @@ function resolveApprovalEntry(sessionId, requestId, resolution) {
   }
 }
 
+
+function scrollPendingApprovalIntoView() {
+  const root = $("transcript");
+  if (!root) return;
+  const pending = root.querySelector(".t-block.approval.pending");
+  if (!pending) return;
+  try {
+    pending.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  } catch (_) {
+    pending.scrollIntoView(false);
+  }
+}
+
 function renderTranscript() {
   // Follow state is sticky (state.followTail) — never re-derived here, since
   // render-time geometry is exactly what a dock resize corrupts. Switching
@@ -1096,6 +1126,8 @@ function renderTranscript() {
     scrollTranscriptBottom();
   }
   updateBombChrome();
+  queueMicrotask(scrollPendingApprovalIntoView);
+
 }
 
 // ── Threads / agents ────────────────────────────────────────────────────
@@ -1625,17 +1657,17 @@ function handleControlEvent(ev) {
         pushEvent(`thinking · ${shortId(sid)}`, "", null, { force: true });
       }
     } else {
+      // Prefer coalesced transcript length so "What's happening" / presence
+      // match the visible reply (llm-retry #11 said ~30 chars for a long answer).
+      const total = (body || "").length;
       const prev = p.replyChars || 0;
       p = P.applySignal(p, "reply", {
-        replyChars: prev + text.length,
+        replyChars: total,
         preview: clipPreview(body),
       });
       commitPresence(sid, p);
-      if (
-        isSelected &&
-        (prev === 0 || Math.floor((prev + text.length) / 400) > Math.floor(prev / 400))
-      ) {
-        pushEvent(`reply · ${formatCount(prev + text.length)} chars`, "", null, { force: true });
+      if (isSelected && (prev === 0 || Math.floor(total / 400) > Math.floor(prev / 400))) {
+        pushEvent(`reply · ${formatCount(total)} chars`, "", null, { force: true });
       }
     }
   } else if (type === "tool_call" || type === "toolCall") {
@@ -1732,7 +1764,9 @@ function handleControlEvent(ev) {
     // Only nudge presence during an actual turn — agents emit an initial plan
     // right after session start, which left the dock stuck on "thinking".
     if (sid && P.turnActive(presenceFor(sid))) {
-      noteTurn("think", { note: pe.title || "plan update" }, sid);
+      if (userStartedTurn(presenceFor(sid))) {
+        noteTurn("think", { note: pe.title || "plan update" }, sid);
+      }
     }
   } else if (type === "session_created" || type === "sessionCreated") {
     appendTranscript(sid, "term", `session ready · ${shortId(sid)}`);
@@ -1787,13 +1821,26 @@ function handleControlEvent(ev) {
           endTurnPresence(sid, "error", "Cancelled");
         }
       } else if (st.includes("idle") || st.includes("complete")) {
-        endAgentStream(sid);
-        // Idle can also be a timeout. Keep tools and permission state until
-        // a typed response boundary or explicit cancellation arrives.
-        commitPresence(sid, P.idleStatus(presenceFor(sid)));
+        // Do NOT endAgentStream on Idle — status can flicker Idle mid-turn and
+        // that fractured streaming replies into many AGENT bubbles (llm-retry #12).
+        // prompt_finished / cancel / fail / tool_call still close the stream.
+        const p = presenceFor(sid);
+        if (!userStartedTurn(p)) {
+          // Startup reached Idle with no user prompt — clear phantom presence
+          // (llm-retry #04/#06 Thinking → Completion unconfirmed).
+          commitPresence(sid, P.emptyPresence());
+        } else {
+          commitPresence(sid, P.idleStatus(p));
+        }
+        updateSendButton();
       } else if (st.includes("run")) {
         const p = presenceFor(sid);
-        noteTurn(P.turnActive(p) && p.phase !== "wait" ? p.phase : "think", { note: "Session running" }, sid);
+        // Ignore bare Running during startup handshake (no user turn yet).
+        // Still accept Running after a completed/closed turn so a later cancel
+        // is not masked by the old receipt (presence.test.mjs).
+        if (userStartedTurn(p) || P.normallyFinished(p) || p.sessionClosed) {
+          noteTurn(P.turnActive(p) && p.phase !== "wait" ? p.phase : "think", { note: "Session running" }, sid);
+        }
       }
     }
     refreshSessions();
@@ -1897,8 +1944,12 @@ function handleControlEvent(ev) {
         if (P.normallyFinished(p)) {
           // Usage may arrive after the response. It is not a new turn.
           p.contextTokens = n; commitPresence(sid, p);
-        } else if (P.turnActive(p) || p.phase === "idle") {
-          noteTurn(p.phase === "idle" ? "think" : p.phase, { contextTokens: n }, sid);
+        } else if (userStartedTurn(p) && P.turnActive(p)) {
+          noteTurn(p.phase, { contextTokens: n }, sid);
+        } else if (sid) {
+          // Startup / idle usage: record tokens without opening a phantom turn.
+          p.contextTokens = n;
+          commitPresence(sid, p);
         }
       }
       return;
@@ -1917,10 +1968,15 @@ function handleControlEvent(ev) {
       appendTranscript(sid, "term", line, nowIso(), { stream: true });
       if (/session\/prompt still open after/i.test(String(payload.line))) {
         commitPresence(sid, P.idleStatus(presenceFor(sid)));
-      } else if (P.turnActive(presenceFor(sid)) && !presenceFor(sid).completionUnconfirmed && !P.normallyFinished(presenceFor(sid))) {
+      } else if (
+        userStartedTurn(presenceFor(sid)) &&
+        P.turnActive(presenceFor(sid)) &&
+        !presenceFor(sid).completionUnconfirmed &&
+        !P.normallyFinished(presenceFor(sid))
+      ) {
         noteTurn(
-          presenceFor(sid).phase === "idle" ? "think" : presenceFor(sid).phase,
-          { note: String(payload.line).slice(0, 80) },
+          presenceFor(sid).phase,
+          { note: line.slice(0, 80) },
           sid
         );
       }
@@ -1935,14 +1991,20 @@ function handleControlEvent(ev) {
       if (!sid) return; // agent text without a session id has nowhere to go
       appendTranscript(sid, "agent", maybe, nowIso(), { stream: true });
       const p = presenceFor(sid);
-      noteTurn(
-        "reply",
-        {
-          replyChars: (p.replyChars || 0) + maybe.length,
-          preview: clipPreview(maybe),
-        },
-        sid
-      );
+      {
+        const list = getTranscript(sid);
+        const last = list[list.length - 1];
+        const total =
+          last && last.role === "agent" ? (last.body || "").length : (p.replyChars || 0) + maybe.length;
+        noteTurn(
+          "reply",
+          {
+            replyChars: total,
+            preview: clipPreview(last?.body || maybe),
+          },
+          sid
+        );
+      }
     } else if (sid) {
       // Unrecognized payload for a known session → its own thread, clipped.
       const dump = JSON.stringify(payload);
@@ -2968,6 +3030,14 @@ async function loadBackends() {
     $("agent-model-custom").style.display =
       $("agent-model").value === CUSTOM_MODEL_VALUE ? "" : "none";
     localStorage.setItem(`bomb.model.${sel.value}`, $("agent-model").value);
+    // Reflect selection immediately (llm-retry: label lagged until Send).
+    const mel = $("composer-model");
+    if (mel) {
+      const backendName = String(sel.value || "grok").toLowerCase();
+      mel.textContent = [backendName, currentModel()].filter(Boolean).join(" · ");
+    }
+    const sess = state.sessions.find((s) => s.id === state.selectedSession);
+    if (sess) sess.model = currentModel();
   };
 }
 
@@ -3550,7 +3620,8 @@ function updateSendButton() {
     if (blocked) {
       hint.textContent = gate.reason;
       hint.style.display = "block";
-    } else if (!busy) {
+    } else {
+      // Clear stale "still starting" even while a real turn shows Stop (llm-retry #06).
       hint.textContent = "";
       hint.style.display = "none";
     }

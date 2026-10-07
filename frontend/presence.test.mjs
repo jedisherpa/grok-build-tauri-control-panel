@@ -98,6 +98,14 @@ waiting = P.finishPrompt(waiting, "end_turn", 1300);
 assert(waiting.phase === "wait" && !P.closeCompletedSession(waiting), "turn ending does not erase pending permission");
 assert(P.finishPrompt(P.applySignal(P.emptyPresence(), "wait", {}, 1000), "max_tokens", 1100).phase === "wait", "truncation does not hide a pending permission");
 
+
+// Ghost startup Idle with no user prompt clears presence (llm-retry #04/#06)
+{
+  let g = P.applySignal(P.emptyPresence(), "think", { note: "handshake" }, 1000);
+  g = P.idleStatus(g, 1100);
+  assert(g.phase === "idle" && !g.completionUnconfirmed && !g.promptChars, "ghost startup Idle clears");
+}
+
 // Failed timer freezes (play1 #14 / #27)
 {
   let f = P.emptyPresence();
@@ -126,6 +134,7 @@ const native = {
   endTurnPresence: (sid, phase, note) => { open.clear(); nativePresence.set(sid, P.applySignal(nativePresence.get(sid), phase, { note, toolsActive: 0 })); },
   noteTurn: (phase, patch, sid) => nativePresence.set(sid, P.applySignal(nativePresence.get(sid), phase, patch)),
   endAgentStream() {}, clearBoomTimer() {}, appendTranscript() {}, pushEvent() {}, refreshSessions() {}, talkNote() {}, sweepToolsForSession() {}, renderTranscript() {}, updateSendButton() {},
+  userStartedTurn: (p) => !!(p && (p.promptChars || p.stagesSeen?.send || p.toolCount || (p.toolsActive || 0) > 0 || p.phase === "wait" || p.phase === "reply")),
   nowIso: () => new Date().toISOString(), shortId: sid => sid,
 };
 runInContext(handler, createContext(native));

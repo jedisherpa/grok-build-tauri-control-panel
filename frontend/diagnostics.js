@@ -45,7 +45,7 @@
     if (st.includes("fail")) {
       return {
         canSend: false,
-        reason: "This thread failed to start (see the error above). Fix sign-in, then start a new thread — your message is kept.",
+        reason: "This thread failed earlier. Start a new thread (or pick an idle one) — your message is kept.",
       };
     }
     return { canSend: true, reason: "" };
