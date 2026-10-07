@@ -189,7 +189,7 @@ tests/feature" spellcheck="false" required></textarea><span class="builds-help">
                 <label for="joe-passage">Exact passage</label>
                 <textarea id="joe-passage" rows="3" maxlength="12000" spellcheck="false" placeholder="Paste the wording you want to clarify…" aria-describedby="joe-input-note"></textarea>
                 <div class="joe-input-row"><label for="joe-language">Language code</label><input id="joe-language" value="eng" maxlength="3" spellcheck="false" aria-describedby="joe-input-note" /><button id="joe-copy-composer" class="btn ghost" type="button">Use unsent message</button></div>
-                <p id="joe-input-note" class="joe-notice">The reference stays local. Analyze sends the visible passage and source/reference metadata to the displayed provider. Preparing thread context includes selected excerpts; thought/raw logs and saved memory are excluded. No coding tools are enabled.</p>
+                <p id="joe-input-note" class="joe-notice">The reference stays local. Analyze sends the visible passage, any prepared context, and source/reference metadata to the displayed provider. Thread preparation excludes thought/raw logs and saved notes. Selected memory is included only when prepared and displayed below. No coding tools are enabled.</p>
                 <label class="joe-comparison"><input id="joe-compare" type="checkbox" disabled /><span id="joe-compare-label">Compare with a previous review in this thread when available</span></label>
                 <p class="joe-notice">Comparison is calculated locally after the new reading. The previous review is not sent to the provider.</p>
                 <button id="joe-analyze" class="btn primary" type="submit">Analyze passage</button>
