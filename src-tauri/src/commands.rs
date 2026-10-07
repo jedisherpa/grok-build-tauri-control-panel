@@ -2005,6 +2005,21 @@ pub struct SchedulerAddRequest {
     pub once_delay_secs: Option<u64>,
     pub cwd: Option<String>,
     pub max_runs: Option<u64>,
+    /// When false/omitted, the job is created then immediately paused so
+    /// routines never auto-fire from the UI without an explicit enable.
+    #[serde(default)]
+    pub enable: bool,
+}
+
+fn require_scheduler_cwd(cwd: Option<String>) -> Result<String, String> {
+    let cwd = cwd
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "working directory (cwd) is required".to_string())?;
+    if !PathBuf::from(&cwd).is_absolute() {
+        return Err("working directory must be an absolute path".into());
+    }
+    Ok(cwd)
 }
 
 #[tauri::command]
@@ -2012,7 +2027,16 @@ pub async fn scheduler_add(
     state: State<'_, AppState>,
     request: SchedulerAddRequest,
 ) -> Result<ScheduledJob, String> {
-    let schedule = if let Some(expr) = request.cron {
+    let name = request.name.trim().to_string();
+    if name.is_empty() {
+        return Err("job name is required".into());
+    }
+    let prompt = request.prompt.trim().to_string();
+    if prompt.is_empty() {
+        return Err("prompt is required".into());
+    }
+    let cwd = require_scheduler_cwd(request.cwd)?;
+    let schedule = if let Some(expr) = request.cron.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()) {
         ScheduleKind::Cron { expr }
     } else if let Some(d) = request.once_delay_secs {
         ScheduleKind::Once { delay_secs: d }
@@ -2021,17 +2045,29 @@ pub async fn scheduler_add(
             secs: request.interval_secs.unwrap_or(3600),
         }
     };
-    state
+    let job = state
         .scheduler
         .add(
-            request.name,
-            request.prompt,
+            name,
+            prompt,
             schedule,
-            request.cwd,
+            Some(cwd),
             request.max_runs,
         )
         .await
-        .map_err(err)
+        .map_err(err)?;
+    if !request.enable {
+        state.scheduler.pause(&job.id).await.map_err(err)?;
+        let paused = state
+            .scheduler
+            .list()
+            .await
+            .into_iter()
+            .find(|j| j.id == job.id)
+            .unwrap_or(job);
+        return Ok(paused);
+    }
+    Ok(job)
 }
 
 #[tauri::command]

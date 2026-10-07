@@ -1643,3 +1643,44 @@ img.logo {
   white-space: nowrap;
   max-width: 100%;
 }
+
+/* Scheduler — recurring / one-shot agent routines (D-054). */
+.scheduler-header { padding: 20px 24px 12px; border-bottom: 1px solid var(--border); flex-shrink: 0; }
+.scheduler-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
+.scheduler-heading h1 { margin: 0 0 8px; font: 26px var(--display); }
+.scheduler-heading p { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.6; max-width: 54rem; }
+#scheduler-status { color: var(--muted); font-size: 11px; line-height: 1.5; margin-top: 10px; overflow-wrap: anywhere; }
+#scheduler-status.scheduler-error { color: var(--err); }
+.scheduler-content { overflow: auto; min-height: 0; flex: 1; }
+.scheduler-new { padding: 16px 24px; border-bottom: 1px solid var(--border); }
+.scheduler-new > summary { cursor: pointer; color: var(--accent); font-size: 12px; line-height: 1.6; }
+.scheduler-form { display: grid; gap: 12px; margin-top: 16px; }
+.scheduler-form label { display: grid; gap: 7px; color: var(--text); font-size: 12px; min-width: 0; }
+.scheduler-form input, .scheduler-form textarea, .scheduler-form select { width: 100%; min-width: 0; padding: 9px 10px; color: var(--text); background: var(--bg-soft); border: 1px solid var(--border-hi); border-radius: 3px; font: 12px var(--font); box-sizing: border-box; }
+.scheduler-form textarea { resize: vertical; line-height: 1.5; }
+.scheduler-form-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; align-items: start; }
+.scheduler-enable-row { display: flex !important; align-items: center; gap: 8px; grid-template-columns: none !important; }
+.scheduler-enable-row input { width: auto; margin: 0; accent-color: var(--accent); }
+.scheduler-help { color: var(--muted); font-size: 11px; line-height: 1.6; margin: 0; }
+.scheduler-submit, .scheduler-actions { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; }
+#scheduler-use-project { justify-self: start; margin-top: -5px; }
+.scheduler-workspace { display: grid; grid-template-columns: minmax(180px, 36%) 1fr; min-height: 220px; }
+.scheduler-list { border-right: 1px solid var(--border); overflow: auto; }
+.scheduler-row { display: flex; flex-direction: column; gap: 6px; width: 100%; text-align: left; padding: 16px; color: var(--text); background: transparent; border: 0; border-bottom: 1px solid var(--border); cursor: pointer; }
+.scheduler-row:hover, .scheduler-row.selected { background: var(--bg-soft); }
+.scheduler-row.selected { box-shadow: inset 2px 0 var(--accent); }
+.scheduler-row-title { font-size: 13px; font-weight: 500; line-height: 1.4; overflow-wrap: anywhere; }
+.scheduler-row-status, .scheduler-row-meta, .scheduler-row-cwd { color: var(--muted); font-size: 10px; line-height: 1.5; overflow-wrap: anywhere; }
+.scheduler-detail { min-width: 0; padding: 22px 24px; overflow: auto; }
+.scheduler-detail h2 { margin: 0 0 12px; font-size: 20px; line-height: 1.5; overflow-wrap: anywhere; }
+.scheduler-current { color: var(--accent); font-size: 12px; line-height: 1.5; margin-bottom: 12px; }
+.scheduler-meta { font-size: 11px; line-height: 1.6; color: var(--muted); margin: 0 0 14px; }
+.scheduler-meta dt { margin-top: 10px; color: var(--dim); }
+.scheduler-meta dd { margin: 2px 0 0; overflow-wrap: anywhere; color: var(--text); }
+.scheduler-prompt-body { white-space: pre-wrap; font-family: var(--font); }
+@media (max-width: 1100px) {
+  .scheduler-header, .scheduler-new { padding-left: 18px; padding-right: 18px; }
+  .scheduler-detail { padding: 18px; }
+  .scheduler-form-columns, .scheduler-workspace { grid-template-columns: 1fr; }
+  .scheduler-list { border-right: 0; border-bottom: 1px solid var(--border); }
+}
