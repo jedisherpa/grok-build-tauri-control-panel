@@ -52,7 +52,14 @@
         globalThis.WizardJoeGuide?.clearMemoryContext('The recall index changed. Prepare current context again.');
         if (action === 'embed_batch') status.textContent += ` Added ${value.embedded || 0}; ${value.remaining ?? value.pendingVectors ?? 0} pending.`;
         if (value.embeddingError) status.textContent += ` ${value.embeddingError}`;
-      } else if (!value.sourceFresh) invalidate('Recall sources changed. Prepare current context again.');
+      } else if (!value.sourceFresh) {
+        const chunks = (value.chunkCount || 0) + (value.historyChunks || 0) + (value.noteChunks || 0);
+        invalidate(
+          chunks
+            ? 'Recall sources changed. Click “Build / refresh local index”, then search again.'
+            : 'No local recall index yet — click “Build / refresh local index” before searching.'
+        );
+      }
       return value;
     } catch (error) {
       if (current === revision) { result = null; selected.clear(); results.replaceChildren(); globalThis.WizardJoeGuide?.clearMemoryContext('Recall is unavailable. Prepare current context again.'); status.textContent = `Recall unavailable: ${String(error)}`; }
