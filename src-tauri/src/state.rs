@@ -41,6 +41,21 @@ pub struct AppState {
     pub explainer: Arc<ExplainerService>,
 }
 
+fn load_startup_config(paths: &GrokPaths, resolved_binary: Option<PathBuf>) -> Result<GrokConfig> {
+    // Validate both layers before saving discovery. Missing is distinct from corrupt.
+    let mut config = GrokConfig::load(paths)
+        .context("load panel/project configuration; original files preserved")?;
+    let mut base =
+        GrokConfig::load_base(paths).context("load base configuration; original file preserved")?;
+    if let Some(binary) = resolved_binary {
+        base.grok_binary = Some(binary.clone());
+        config.grok_binary = Some(binary);
+    }
+    base.save(&paths.config_file)
+        .context("save resolved panel configuration")?;
+    Ok(config)
+}
+
 impl AppState {
     pub async fn initialize() -> Result<Self> {
         // Critical for macOS .app launches from Finder/Dock.
@@ -48,7 +63,7 @@ impl AppState {
 
         let paths = GrokPaths::discover(std::env::current_dir().ok().as_deref())
             .context("path discovery")?;
-        let _ = paths.ensure_dirs();
+        paths.ensure_dirs().context("create panel directories")?;
 
         // Resolve the binary against the BASE (global-only) config and save
         // that — saving the overlay-merged view would silently promote
@@ -63,19 +78,7 @@ impl AppState {
                 None
             }
         };
-        {
-            let mut base = GrokConfig::load_base(&paths).unwrap_or_default();
-            if resolved_binary.is_some() {
-                base.grok_binary = resolved_binary.clone();
-            }
-            let _ = base.save(&paths.config_file);
-        }
-
-        // Runtime config: global + project overlay.
-        let mut config = GrokConfig::load(&paths).unwrap_or_default();
-        if resolved_binary.is_some() {
-            config.grok_binary = resolved_binary;
-        }
+        let config = load_startup_config(&paths, resolved_binary)?;
 
         let binary = config
             .resolve_grok_binary()
@@ -103,13 +106,18 @@ impl AppState {
             event_bus.clone(),
         ));
 
-        let mcp = McpManager::new(
+        let mut mcp = McpManager::new(
             config.clone(),
             paths.clone(),
             grok_cli.clone(),
             event_bus.clone(),
         )
         .context("mcp manager")?;
+        if paths.grok_dir != paths.home_dir.join(".grok") {
+            Arc::get_mut(&mut mcp)
+                .context("configure isolated MCP manager")?
+                .set_prefer_cli(false);
+        }
 
         let memory = MemoryService::open(paths.memory_dir.clone(), event_bus.clone())
             .await
@@ -197,7 +205,12 @@ impl AppState {
 
         let dev_server = DevServerManager::new();
         let login = LoginManager::new(grok_cli.grok_path.clone());
-        let haven = HavenClient::new(paths.home_dir.clone());
+        let haven_home = paths
+            .grok_dir
+            .parent()
+            .context("profile home")?
+            .to_path_buf();
+        let haven = HavenClient::new(haven_home);
 
         // ELI12 narrator for the right panel (selected-thread side LLM calls).
         let explainer = {
@@ -246,5 +259,31 @@ impl AppState {
             haven,
             explainer,
         })
+    }
+}
+
+#[cfg(test)]
+mod release_tests {
+    use super::*;
+
+    #[test]
+    fn corrupt_base_or_overlay_never_overwrites_existing_config() {
+        let dir = std::env::temp_dir().join(format!("c3-config-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&dir).unwrap();
+        let mut paths = GrokPaths::discover(None).unwrap();
+        paths.config_file = dir.join("config.toml");
+        paths.project_config_file = Some(dir.join("project.toml"));
+        std::fs::write(&paths.config_file, "invalid=[").unwrap();
+        assert!(load_startup_config(&paths, Some("/generated/grok".into())).is_err());
+        assert_eq!(
+            std::fs::read_to_string(&paths.config_file).unwrap(),
+            "invalid=["
+        );
+        let valid = toml::to_string(&GrokConfig::default()).unwrap();
+        std::fs::write(&paths.config_file, &valid).unwrap();
+        std::fs::write(paths.project_config_file.as_ref().unwrap(), "invalid=[").unwrap();
+        assert!(load_startup_config(&paths, Some("/generated/grok".into())).is_err());
+        assert_eq!(std::fs::read_to_string(&paths.config_file).unwrap(), valid);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

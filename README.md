@@ -40,7 +40,8 @@
 ```bash
 git clone https://github.com/jedisherpa/grok-build-tauri-control-panel.git
 cd grok-build-tauri-control-panel
-./scripts/install.sh   # release build → /Applications/Bomb Code.app + open
+./scripts/install.sh --development --destination "/Applications/Bomb Code Dev.app"
+# Destination must be new. This preserves the built signature and does not launch.
 ```
 
 Later launches:
@@ -48,10 +49,15 @@ Later launches:
 ```bash
 ./scripts/run.sh
 # or
-open "/Applications/Bomb Code.app"
+open "/Applications/Bomb Code Dev.app"
 ```
 
 See **[QUICKSTART.md](./QUICKSTART.md)** for first ACP session, MCP setup, and config paths.
+
+Production signing/notarization and iterative feature qualification are tracked in
+[the release status](docs/release/QUALIFICATION_REPORT.md) and
+[the macOS distribution procedure](docs/release/MACOS_DISTRIBUTION.md).
+The developer installer does not replace an existing application or certify a release.
 
 ### Develop
 

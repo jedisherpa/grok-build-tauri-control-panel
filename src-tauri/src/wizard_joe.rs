@@ -15,9 +15,7 @@ use tokio::{
 };
 use uuid::Uuid;
 
-const REFERENCE: &str = "/Users/paulcooper/.grok/control-panel/wizard-joe/reference";
-const NODE: &str = "/Users/paulcooper/.nvm/versions/node/v20.20.0/bin/node";
-const PYTHON: &str = "/Users/paulcooper/.grok/control-panel/wizard-joe/python-env/bin/python3";
+use crate::semantic_runtime::SemanticRuntime;
 const MAX_LINE: usize = 16 * 1024 * 1024;
 const MAX_PROMPT: usize = 200_000;
 const MANIFEST_SHA: &str = "4d466d7d8e830f6a3330e619a497f99aa3b6fa6c7439432c610b1f3485498e83";
@@ -232,13 +230,16 @@ fn validate_input(
     Ok(())
 }
 
-fn unavailable_reason(backend: &str) -> Option<String> {
+fn unavailable_reason(backend: &str, runtime: &SemanticRuntime) -> Option<String> {
     if backend != "grok" {
         return Some("Joe currently requires the tool-free Grok narrator provider; choose Grok in narrator settings".into());
     }
-    for file in [NODE, PYTHON] {
-        if !Path::new(file).is_file() {
-            return Some(format!("Required local runtime is unavailable: {file}"));
+    for file in [&runtime.node, &runtime.python] {
+        if !file.is_file() {
+            return Some(format!(
+                "Required local runtime is unavailable: {}",
+                file.display()
+            ));
         }
     }
     for file in [
@@ -248,7 +249,7 @@ fn unavailable_reason(backend: &str) -> Option<String> {
         "semantic_e8/outputs/model.json",
         "round_trip_experiment/PACKAGE_MANIFEST.json",
     ] {
-        if !Path::new(REFERENCE).join(file).is_file() {
+        if !runtime.reference.join(file).is_file() {
             return Some(format!("Pinned semantic reference is unavailable: {file}"));
         }
     }
@@ -258,9 +259,10 @@ fn unavailable_reason(backend: &str) -> Option<String> {
 #[tauri::command]
 pub async fn joe_status(state: State<'_, AppState>) -> Result<Value, String> {
     let (backend, model) = state.explainer.structured_provider().await;
-    let mut reason = unavailable_reason(&backend);
+    let runtime = SemanticRuntime::discover()?;
+    let mut reason = unavailable_reason(&backend, &runtime);
     if reason.is_none() {
-        let probe = Command::new(PYTHON)
+        let probe = Command::new(&runtime.python)
             .args(["-B", "-c", "import sys\ntry:\n import numpy, scipy\nexcept Exception as error:\n print(type(error).__name__ + ': ' + str(error)[:1200])\n sys.exit(1)"])
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -274,7 +276,7 @@ pub async fn joe_status(state: State<'_, AppState>) -> Result<Value, String> {
         };
     }
     Ok(
-        json!({"available":reason.is_none(),"referenceRoot":REFERENCE,"manifestSha256":MANIFEST_SHA,"pythonPath":PYTHON,"nodePath":NODE,"provider":backend,"model":model,"manualOnly":true,"reason":reason}),
+        json!({"available":reason.is_none(),"referenceRoot":runtime.reference,"manifestSha256":MANIFEST_SHA,"pythonPath":runtime.python,"nodePath":runtime.node,"provider":backend,"model":model,"manualOnly":true,"reason":reason}),
     )
 }
 
@@ -313,9 +315,10 @@ async fn run_reader(
     model: &str,
     memory_context: &Option<Value>,
 ) -> Result<Value, String> {
-    let mut child = Command::new(NODE)
+    let runtime = SemanticRuntime::discover()?;
+    let mut child = Command::new(&runtime.node)
         .args(["-e", RUNNER])
-        .current_dir(REFERENCE)
+        .current_dir(&runtime.reference)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -324,7 +327,7 @@ async fn run_reader(
         .map_err(|_| "Could not start the local semantic reader")?;
     let mut input = child.stdin.take().ok_or("Reader input is unavailable")?;
     let mut output = BufReader::new(child.stdout.take().ok_or("Reader output is unavailable")?);
-    let request = json!({"sentence":sentence,"language":language,"threadId":thread_id,"referenceRoot":REFERENCE,"manifestSha256":MANIFEST_SHA,"python":PYTHON,"model":model,"memoryContext":memory_context});
+    let request = json!({"sentence":sentence,"language":language,"threadId":thread_id,"referenceRoot":runtime.reference,"manifestSha256":MANIFEST_SHA,"python":runtime.python,"model":model,"memoryContext":memory_context});
     input
         .write_all(format!("{request}\n").as_bytes())
         .await
@@ -445,7 +448,8 @@ pub async fn joe_analyze(
         }
     }
     let (backend, model) = state.explainer.structured_provider().await;
-    if let Some(reason) = unavailable_reason(&backend) {
+    let runtime = SemanticRuntime::discover()?;
+    if let Some(reason) = unavailable_reason(&backend, &runtime) {
         return Err(reason);
     }
     BUSY.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -507,7 +511,7 @@ pub async fn joe_analyze(
             .map_err(|_| "Could not restrict Joe's receipt folder")?;
     }
     let path = dir.join(format!("{request_id}.json"));
-    let mut result = json!({"schema":"bomb-code/joe-result/v1","requestId":request_id,"threadId":thread_id,"sentence":sentence,"language":language,"status":status,"provider":"grok","model":model,"guide":{"identityId":"bomb-code:wizard-joe","roleVersion":"manual-clarification-guide/v1"},"interpretation":interpretation,"reference":reference,"referenceRequested":{"root":REFERENCE,"manifestSha256":MANIFEST_SHA},"runtime":{"pythonPath":PYTHON,"nodePath":NODE},"clarifications":questions,"receiptPath":path,"error":error,"at":chrono::Utc::now(),"authority":{"toolsDispatched":false,"approvalsGranted":false,"memoryCommitted":false}});
+    let mut result = json!({"schema":"bomb-code/joe-result/v1","requestId":request_id,"threadId":thread_id,"sentence":sentence,"language":language,"status":status,"provider":"grok","model":model,"guide":{"identityId":"bomb-code:wizard-joe","roleVersion":"manual-clarification-guide/v1"},"interpretation":interpretation,"reference":reference,"referenceRequested":{"root":runtime.reference,"manifestSha256":MANIFEST_SHA},"runtime":{"pythonPath":runtime.python,"nodePath":runtime.node},"clarifications":questions,"receiptPath":path,"error":error,"at":chrono::Utc::now(),"authority":{"toolsDispatched":false,"approvalsGranted":false,"memoryCommitted":false}});
     if let Some(context) = memory_context {
         result["memoryEvidence"] = json!({"receiptId":memory_evidence_id,"context":context,
             "status":"source-validated-before-provider-call","authority":"historical evidence; no current permission"});
@@ -776,12 +780,13 @@ mod tests {
     }
     #[tokio::test]
     async fn actual_reference_preserves_provider_failure() {
-        if unavailable_reason("grok").is_some() {
+        let runtime = SemanticRuntime::discover().unwrap();
+        if unavailable_reason("grok", &runtime).is_some() {
             return;
         }
-        let mut child = Command::new(NODE)
+        let mut child = Command::new(&runtime.node)
             .args(["-e", RUNNER])
-            .current_dir(REFERENCE)
+            .current_dir(&runtime.reference)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
@@ -790,7 +795,7 @@ mod tests {
             .unwrap();
         let mut stdin = child.stdin.take().unwrap();
         let mut stdout = BufReader::new(child.stdout.take().unwrap());
-        let request = json!({"sentence":"The bank approved the loan.","language":"eng","threadId":null,"referenceRoot":REFERENCE,"manifestSha256":MANIFEST_SHA,"python":PYTHON,"model":"test-provider-unavailable"});
+        let request = json!({"sentence":"The bank approved the loan.","language":"eng","threadId":null,"referenceRoot":runtime.reference,"manifestSha256":MANIFEST_SHA,"python":runtime.python,"model":"test-provider-unavailable"});
         stdin
             .write_all(format!("{request}\n").as_bytes())
             .await

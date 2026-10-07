@@ -28,6 +28,14 @@ use crate::messages::{
 use crate::terminals::TerminalRegistry;
 use crate::transport::{NdjsonTransport, NotificationEvent};
 
+fn byte_prefix(text: &str, budget: usize) -> &str {
+    let mut end = budget.min(text.len());
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    &text[..end]
+}
+
 /// How permission requests are answered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -1970,7 +1978,7 @@ impl AcpClient {
                                         .unwrap_or("");
                                     if !text.is_empty() {
                                         let clip = if text.len() > 4000 {
-                                            format!("{}…", &text[..4000])
+                                            format!("{}…", byte_prefix(text, 4000))
                                         } else {
                                             text.to_string()
                                         };
@@ -2451,7 +2459,7 @@ impl AcpClient {
         // Cap huge files so we don't blow the agent context
         const MAX: usize = 400_000;
         if content.len() > MAX {
-            content.truncate(MAX);
+            content.truncate(byte_prefix(&content, MAX).len());
             content.push_str("\n…[truncated]");
         }
         Ok(content)
@@ -3422,6 +3430,21 @@ mod tests {
         assert!(none.starts_with("Grok isn't signed in"));
         let keyed = auth_required_message("grok", "", true);
         assert!(keyed.contains("XAI_API_KEY that is set"));
+    }
+
+    #[test]
+    fn byte_budget_never_splits_unicode_terminal_or_file_output() {
+        for budget in [4000, 400_000] {
+            let text = format!("{}é尾", "a".repeat(budget - 1));
+            assert_eq!(byte_prefix(&text, budget).len(), budget - 1);
+            assert_eq!(byte_prefix(&text, budget + 1).len(), budget + 1);
+            let mut file = text.clone();
+            file.truncate(byte_prefix(&file, budget).len());
+            assert_eq!(file, "a".repeat(budget - 1));
+        }
+        assert_eq!(byte_prefix("尾", 0), "");
+        assert_eq!(byte_prefix("尾", 2), "");
+        assert_eq!(byte_prefix("尾", 100), "尾");
     }
 
     #[test]

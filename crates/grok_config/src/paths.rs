@@ -29,11 +29,35 @@ impl GrokPaths {
             .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
             .ok_or_else(|| ConfigError::Invalid("cannot resolve home directory".into()))?;
 
-        let grok_dir = home_dir.join(".grok");
+        Self::for_home(
+            home_dir,
+            std::env::var_os("C3_PROFILE_DIR").map(PathBuf::from),
+            project_root,
+        )
+    }
+
+    fn for_home(
+        home_dir: PathBuf,
+        profile: Option<PathBuf>,
+        project_root: Option<&Path>,
+    ) -> Result<Self> {
+        // An operator-selected profile isolates panel stores, worktrees and MCP
+        // credentials. CLI authentication stays at the real user's location.
+        let grok_dir = match profile {
+            Some(root) => {
+                if !root.is_absolute() || (root.exists() && !root.is_dir()) {
+                    return Err(ConfigError::Invalid(
+                        "C3_PROFILE_DIR must be an absolute directory".into(),
+                    ));
+                }
+                root.join(".grok")
+            }
+            None => home_dir.join(".grok"),
+        };
         let panel_dir = grok_dir.join("control-panel");
         // Isolate panel settings from the CLI's config.toml ([cli]/[ui]/marketplace).
         let config_file = panel_dir.join("config.toml");
-        let grok_cli_config_file = grok_dir.join("config.toml");
+        let grok_cli_config_file = home_dir.join(".grok/config.toml");
         let worktrees_dir = grok_dir.join("worktrees");
         let memory_dir = panel_dir.join("memory");
         let sessions_dir = panel_dir.join("sessions");
@@ -105,6 +129,29 @@ mod tests {
         assert_eq!(
             paths.project_config_file.unwrap(),
             PathBuf::from("/tmp/myproject/.grok/control-panel.toml")
+        );
+    }
+
+    #[test]
+    fn qa_profile_isolates_all_writable_stores_and_keeps_cli_config_read_only() {
+        let paths =
+            GrokPaths::for_home("/Users/Tester".into(), Some("/tmp/c3-qa".into()), None).unwrap();
+        assert_eq!(paths.home_dir, PathBuf::from("/Users/Tester"));
+        assert_eq!(
+            paths.grok_cli_config_file,
+            PathBuf::from("/Users/Tester/.grok/config.toml")
+        );
+        for path in [
+            &paths.config_file,
+            &paths.worktrees_dir,
+            &paths.memory_dir,
+            &paths.sessions_dir,
+            &paths.panel_dir,
+        ] {
+            assert!(path.starts_with("/tmp/c3-qa/.grok"));
+        }
+        assert!(
+            GrokPaths::for_home("/Users/Tester".into(), Some("relative".into()), None).is_err()
         );
     }
 }

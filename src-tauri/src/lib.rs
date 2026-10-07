@@ -9,6 +9,7 @@ mod history;
 mod meaning_candidates;
 mod meaning_memory;
 mod memory_recall;
+mod semantic_runtime;
 mod state;
 mod wizard_joe;
 mod word_shapes;

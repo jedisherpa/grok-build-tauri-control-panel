@@ -390,7 +390,10 @@ def search(c, payload):
             # Quote each token rather than interpreting user input as FTS syntax.
             conditions.append('t.id IN (SELECT thread_id FROM search WHERE search MATCH ?)')
             params.append(' AND '.join('"'+x+'"' for x in terms))
-        # Punctuation-only query used to return total=0 (feature-deep2). Treat as browse-all.
+        else:
+            # Only an empty query browses all records. A literal query without
+            # searchable tokens has no matches, rather than silently widening it.
+            conditions.append('0')
     where=' WHERE '+' AND '.join(conditions) if conditions else ''
     total=c.execute('SELECT count(*) FROM threads t'+where,params).fetchone()[0]
     offset=max(0,int(payload.get('offset',0)))

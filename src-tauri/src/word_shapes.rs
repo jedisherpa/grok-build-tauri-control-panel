@@ -7,8 +7,7 @@ use tokio::{
 };
 
 const WORKER: &str = include_str!("../../scripts/word_dictionary.py");
-const REFERENCE: &str = "/Users/paulcooper/.grok/control-panel/wizard-joe/reference";
-const PYTHON: &str = "/Users/paulcooper/.grok/control-panel/wizard-joe/python-env/bin/python3";
+use crate::semantic_runtime::SemanticRuntime;
 const RESPONSE_LIMIT: usize = 1024 * 1024;
 static OPERATING: Mutex<()> = Mutex::const_new(());
 
@@ -67,7 +66,7 @@ fn request(payload: Value) -> Result<Value, String> {
     }
     let mut result = payload;
     result["action"] = json!(action);
-    result["referenceRoot"] = json!(REFERENCE);
+    result["referenceRoot"] = json!(SemanticRuntime::discover()?.reference);
     Ok(result)
 }
 
@@ -81,7 +80,7 @@ pub(crate) async fn run(payload: Value) -> Result<Value, String> {
     if input.len() > 16 * 1024 {
         return Err("Dictionary request exceeds its input budget".into());
     }
-    let mut child = tokio::process::Command::new(PYTHON)
+    let mut child = tokio::process::Command::new(SemanticRuntime::discover()?.python)
         .args(["-B", "-c", WORKER])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -166,7 +165,11 @@ mod tests {
         }
         assert_eq!(
             request(json!({"query":"月","language":"jpn"})).unwrap()["referenceRoot"],
-            REFERENCE
+            SemanticRuntime::discover()
+                .unwrap()
+                .reference
+                .to_str()
+                .unwrap()
         );
     }
 }

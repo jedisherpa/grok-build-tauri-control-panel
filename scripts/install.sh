@@ -1,48 +1,54 @@
 #!/usr/bin/env bash
-# Build production .app and install to /Applications.
+# Explicit developer installation. Never replaces or re-signs an existing app.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-export PATH="${HOME}/.grok/bin:${HOME}/.cargo/bin:${HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:${PATH}"
-
-echo "==> Checking grok CLI"
-if ! command -v grok >/dev/null 2>&1; then
-  if [[ -x "${HOME}/.grok/bin/grok" ]]; then
-    export PATH="${HOME}/.grok/bin:${PATH}"
-  else
-    echo "ERROR: grok CLI not found. Install Grok Build first."
-    exit 1
-  fi
+if [[ $# != 3 || "$1" != "--development" || "$2" != "--destination" ]]; then
+  echo 'Usage: scripts/install.sh --development --destination /absolute/new/Bomb\ Code.app' >&2
+  echo 'Builds a developer bundle; destination must not exist. See docs/release/MACOS_DISTRIBUTION.md.' >&2
+  exit 2
 fi
-grok version || true
+DEST="$3"
 
-echo "==> Building app bundle (release)"
-cargo tauri build --bundles app
+# Tauri may notarize automatically when these credentials are present. This
+# developer installer must never transmit a build to Apple implicitly.
+for name in APPLE_ID APPLE_PASSWORD APPLE_TEAM_ID APPLE_API_KEY APPLE_API_KEY_PATH APPLE_API_ISSUER; do
+  if [[ -n "${!name:-}" ]]; then
+    echo 'ERROR: notarization environment is present; use the reviewed release workflow instead.' >&2
+    exit 2
+  fi
+done
 
-SRC="${ROOT}/target/release/bundle/macos/Bomb Code.app"
-DEST="/Applications/Bomb Code.app"
+python3 - "$DEST" <<'PY'
+import os
+from pathlib import Path
+import sys
+path = Path(sys.argv[1])
+if not path.is_absolute() or path.suffix != '.app' or os.path.lexists(path):
+    sys.exit('ERROR: destination must be an absolute, new .app path')
+if not path.parent.is_dir():
+    sys.exit('ERROR: destination parent must already exist')
+PY
 
-if [[ ! -d "$SRC" ]]; then
-  echo "ERROR: app bundle not found at $SRC"
+export PATH="${HOME}/.grok/bin:${HOME}/.cargo/bin:${HOME}/.local/bin:/opt/homebrew/bin:/usr/local/bin:${PATH}"
+if ! command -v grok >/dev/null 2>&1; then
+  echo 'ERROR: grok CLI not found. Install Grok Build first.' >&2
   exit 1
 fi
+echo 'Building developer app bundle. This does not qualify a production release.'
+cargo tauri build --bundles app
+SRC="${CARGO_TARGET_DIR:-${ROOT}/target}/release/bundle/macos/Bomb Code.app"
+codesign --verify --deep --strict "$SRC"
 
-echo "==> Installing to $DEST"
-rm -rf "$DEST"
-cp -R "$SRC" "$DEST"
-
-# Ad-hoc sign so Gatekeeper is less noisy for local builds (optional).
-if command -v codesign >/dev/null 2>&1; then
-  codesign --force --deep --sign - "$DEST" 2>/dev/null || true
-fi
-
-echo ""
-echo "Installed: $DEST"
-echo "Launch with: open \"$DEST\""
-echo "Or:          ./scripts/run.sh"
-echo ""
-echo "Panel config:  ~/.grok/control-panel/config.toml"
-echo "Grok CLI cfg:  ~/.grok/config.toml  (unchanged by panel)"
-echo "Credentials:   ~/.grok/mcp_credentials.json"
-open "$DEST"
+python3 - "$SRC" "$DEST" <<'PY'
+import shutil
+import sys
+# copytree exclusively creates the new destination, including after a race.
+# Existing installations and their signatures are never removed or replaced.
+shutil.copytree(sys.argv[1], sys.argv[2], symlinks=True)
+PY
+codesign --verify --deep --strict "$DEST"
+echo "Developer app copied with its existing signature: $DEST"
+echo "Launch explicitly after selecting a QA profile: open \"$DEST\""
+echo 'This installer does not launch the app or certify signing/notarization.'

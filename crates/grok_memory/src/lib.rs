@@ -58,8 +58,8 @@ impl MemoryService {
                 Err(e) => {
                     // Don't treat corruption as "empty" — the next persist()
                     // would silently wipe every entry. Keep the file aside.
-                    let backup = path.with_extension("json.corrupt");
-                    let _ = tokio::fs::rename(&path, &backup).await;
+                    // Preserve the original bytes in place. A repair operation
+                    // must choose its own backup; startup cannot replace one.
                     return Err(MemoryError::Json(e));
                 }
             }
@@ -102,11 +102,12 @@ impl MemoryService {
             created_at: now,
             updated_at: now,
         };
-        {
-            let mut store = self.store.write().await;
-            store.entries.push(entry.clone());
-        }
-        self.persist().await?;
+        let mut store = self.store.write().await;
+        let mut candidate = store.clone();
+        candidate.entries.push(entry.clone());
+        self.persist_store(&candidate).await?;
+        *store = candidate;
+        drop(store);
         self.event_bus.emit(ControlEvent::MemoryUpdated {
             scope: entry.scope.clone(),
             at: now,
@@ -116,13 +117,14 @@ impl MemoryService {
 
     pub async fn remove(&self, id: &str) -> Result<()> {
         let mut store = self.store.write().await;
-        let before = store.entries.len();
-        store.entries.retain(|e| e.id != id);
-        if store.entries.len() == before {
+        let mut candidate = store.clone();
+        let before = candidate.entries.len();
+        candidate.entries.retain(|e| e.id != id);
+        if candidate.entries.len() == before {
             return Err(MemoryError::NotFound(id.to_string()));
         }
-        drop(store);
-        self.persist().await?;
+        self.persist_store(&candidate).await?;
+        *store = candidate;
         Ok(())
     }
 
@@ -158,17 +160,37 @@ impl MemoryService {
             }
             out.push_str(&line);
         }
-        if out.trim().is_empty() { None } else { Some(out) }
+        if out.trim().is_empty() {
+            None
+        } else {
+            Some(out)
+        }
     }
 
-    async fn persist(&self) -> Result<()> {
-        let store = self.store.read().await;
-        let raw = serde_json::to_string_pretty(&*store)?;
+    // Caller retains exclusive mutation ownership through durable publication.
+    async fn persist_store(&self, store: &MemoryStore) -> Result<()> {
+        use tokio::io::AsyncWriteExt;
+        let raw = serde_json::to_string_pretty(store)?;
         // tmp + rename: a crash mid-write must not truncate memory.json.
         let path = self.json_path();
-        let tmp = path.with_extension("json.tmp");
-        tokio::fs::write(&tmp, raw).await?;
-        tokio::fs::rename(&tmp, &path).await?;
+        let tmp = path.with_extension(format!("json.{}.tmp", Uuid::new_v4()));
+        let mut options = tokio::fs::OpenOptions::new();
+        options.write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        let mut file = options.open(&tmp).await?;
+        let publish = async {
+            file.write_all(raw.as_bytes()).await?;
+            file.sync_all().await?;
+            drop(file);
+            tokio::fs::rename(&tmp, &path).await?;
+            Ok::<_, std::io::Error>(())
+        }
+        .await;
+        if publish.is_err() {
+            let _ = tokio::fs::remove_file(&tmp).await;
+        }
+        publish?;
         Ok(())
     }
 }
@@ -178,6 +200,55 @@ mod tests {
     use super::*;
     use grok_events::shared_bus;
     use tempfile::tempdir;
+
+    #[tokio::test]
+    async fn concurrent_notes_have_no_shared_temp_race_and_reload_exactly() {
+        let dir = tempdir().unwrap();
+        let mem = MemoryService::open(dir.path(), shared_bus()).await.unwrap();
+        let mut workers = Vec::new();
+        for number in 0..32 {
+            let service = mem.clone();
+            workers.push(tokio::spawn(async move {
+                service
+                    .add("qa", format!("generated-{number}"), vec![])
+                    .await
+                    .unwrap()
+            }));
+        }
+        let mut ids = Vec::new();
+        for worker in workers {
+            ids.push(worker.await.unwrap().id);
+        }
+        let reopened = MemoryService::open(dir.path(), shared_bus()).await.unwrap();
+        let rows = reopened.list(Some("qa")).await;
+        assert_eq!(rows.len(), ids.len());
+        assert!(rows.iter().all(|row| ids.contains(&row.id)));
+    }
+
+    #[tokio::test]
+    async fn failed_note_publication_does_not_change_visible_state() {
+        let dir = tempdir().unwrap();
+        let mem = MemoryService::open(dir.path(), shared_bus()).await.unwrap();
+        std::fs::create_dir(dir.path().join("memory.json")).unwrap();
+        assert!(mem.add("qa", "cannot be committed", vec![]).await.is_err());
+        assert!(mem.list(None).await.is_empty());
+    }
+
+    #[tokio::test]
+    async fn corrupt_notes_and_existing_backup_are_preserved_exactly() {
+        let dir = tempdir().unwrap();
+        std::fs::write(dir.path().join("memory.json"), "invalid").unwrap();
+        std::fs::write(dir.path().join("memory.json.corrupt"), "older backup").unwrap();
+        assert!(MemoryService::open(dir.path(), shared_bus()).await.is_err());
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("memory.json")).unwrap(),
+            "invalid"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("memory.json.corrupt")).unwrap(),
+            "older backup"
+        );
+    }
 
     #[tokio::test]
     async fn add_flush_and_context_pack() {

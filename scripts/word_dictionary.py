@@ -15,7 +15,7 @@ import sys
 import unicodedata
 
 SCHEMA = "bomb-code/dictionary-shapes/v1"
-REFERENCE_ROOT = Path("/Users/paulcooper/.grok/control-panel/wizard-joe/reference")
+REFERENCE_ROOT = Path.home() / '.grok/control-panel/wizard-joe/reference'
 MANIFEST_SHA = "4d466d7d8e830f6a3330e619a497f99aa3b6fa6c7439432c610b1f3485498e83"
 MANIFEST_PATH = "round_trip_experiment/PACKAGE_MANIFEST.json"
 GRAPH_PATH = "semantic_e8/outputs/aligned_graph.json"

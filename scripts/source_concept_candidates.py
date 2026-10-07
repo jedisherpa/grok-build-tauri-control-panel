@@ -20,7 +20,7 @@ import memory_recall as recall
 import word_dictionary
 
 SCHEMA = 'bomb-code/source-concept-candidates/v1'
-PANEL = Path('/Users/paulcooper/.grok/control-panel')
+PANEL = Path.home() / '.grok/control-panel'
 MAX_CONCEPTS = 8
 MAX_ALIASES = 8192
 MAX_ALIAS_CHARS = 512
