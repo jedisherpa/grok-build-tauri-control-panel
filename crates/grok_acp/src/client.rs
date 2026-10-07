@@ -260,12 +260,22 @@ pub(crate) fn auth_required_message(backend: &str, stderr_tail: &str, api_key_se
     }
 }
 
-/// A `session/request_permission` we have not yet answered — awaiting the user.
+/// How to shape the JSON-RPC response when the user answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingPermissionKind {
+    /// Standard `session/request_permission` outcome envelope.
+    SessionPermission,
+    /// Grok `x.ai/exit_plan_mode` ext — ExitPlanModeExtResponse { decision, comments }.
+    ExitPlanMode,
+}
+
+/// A permission / plan-exit request we have not yet answered — awaiting the user.
 #[derive(Debug)]
 struct PendingPermission {
     /// Original wire id; permission responses are JSON-RPC responses to it.
     rpc_id: Value,
     options: Vec<PermissionOptionInfo>,
+    kind: PendingPermissionKind,
 }
 
 pub struct AcpClient {
@@ -1486,9 +1496,9 @@ impl AcpClient {
                 AcpError::Protocol(format!("no pending permission request: {request_id}"))
             })?;
 
-        let outcome = match option_id {
-            Some(oid) => {
-                if !pending.options.is_empty() && !pending.options.iter().any(|o| o.id == oid) {
+        if !pending.options.is_empty() {
+            if let Some(oid) = option_id {
+                if !pending.options.iter().any(|o| o.id == oid) {
                     // Put it back so a corrected retry can still answer.
                     let valid: Vec<&str> = pending.options.iter().map(|o| o.id.as_str()).collect();
                     let msg = format!(
@@ -1501,13 +1511,43 @@ impl AcpClient {
                         .insert(request_id.to_string(), pending);
                     return Err(AcpError::Protocol(msg));
                 }
-                json!({ "outcome": { "outcome": "selected", "optionId": oid } })
             }
-            None => json!({ "outcome": { "outcome": "cancelled" } }),
+        }
+
+        let outcome = match pending.kind {
+            PendingPermissionKind::ExitPlanMode => {
+                // Grok ExitPlanModeExtResponse: { decision, comments }.
+                // decision: approve | request_changes | abandon
+                let decision = match option_id {
+                    None => "abandon",
+                    Some(oid) => {
+                        let lower = oid.to_lowercase();
+                        if lower.contains("abandon") || lower.contains("reject") || lower.contains("deny") {
+                            "abandon"
+                        } else if lower.contains("change") || lower.contains("revise") || lower.contains("request") {
+                            "request_changes"
+                        } else {
+                            "approve"
+                        }
+                    }
+                };
+                json!({ "decision": decision, "comments": Value::Null })
+            }
+            PendingPermissionKind::SessionPermission => match option_id {
+                Some(oid) => json!({ "outcome": { "outcome": "selected", "optionId": oid } }),
+                None => json!({ "outcome": { "outcome": "cancelled" } }),
+            },
         };
 
         if let Some(transport) = self.transport.read().await.clone() {
-            transport.send_response(pending.rpc_id, outcome).await?;
+            if let Err(e) = transport.send_response(pending.rpc_id.clone(), outcome.clone()).await {
+                // D-046: keep the card retryable if the wire blips mid-plan-exit.
+                self.pending_permissions
+                    .lock()
+                    .await
+                    .insert(request_id.to_string(), pending);
+                return Err(e);
+            }
         } else {
             debug!(%request_id, ?option_id, "respond_approval (mock/local)");
         }
@@ -1696,6 +1736,9 @@ impl AcpClient {
                     .and_then(|p| p.get("toolCall"))
                     .and_then(|t| t.get("rawInput"));
                 let plan_extracted = extract_tool_plan(&tool, tool_raw_input);
+                // D-046: exit_plan_mode must never auto-approve — agent also sends
+                // x.ai/exit_plan_mode and treats a failed handshake as "client disconnected".
+                let exit_plan_tool = is_exit_plan_tool(&tool, &req.params);
                 if let Some(ref plan) = plan_extracted {
                     if let Some(bus) = &self.event_bus {
                         bus.emit(ControlEvent::Raw {
@@ -1703,8 +1746,17 @@ impl AcpClient {
                             payload: json!({ "channel": "plan_doc", "text": plan }),
                         });
                     }
+                } else if exit_plan_tool {
+                    if let Some(plan) = self.read_plan_md_for_approval().await {
+                        if let Some(bus) = &self.event_bus {
+                            bus.emit(ControlEvent::Raw {
+                                session_id: Some(self.control_session_id),
+                                payload: json!({ "channel": "plan_doc", "text": plan }),
+                            });
+                        }
+                    }
                 }
-                let summary = if plan_extracted.is_some() {
+                let summary = if plan_extracted.is_some() || exit_plan_tool {
                     format!("{tool} — approve the plan above?")
                 } else {
                     permission_summary(&req.params, &tool)
@@ -1759,7 +1811,7 @@ impl AcpClient {
                 };
                 // Plan approvals always go to the user — the whole point is to
                 // review the plan, even in auto/yolo.
-                let auto_reason = if plan_extracted.is_some() {
+                let auto_reason = if plan_extracted.is_some() || exit_plan_tool {
                     None
                 } else if allow_hit {
                     Some("matches an allow rule".to_string())
@@ -1829,6 +1881,7 @@ impl AcpClient {
                         PendingPermission {
                             rpc_id: req.id,
                             options: options.clone(),
+                            kind: PendingPermissionKind::SessionPermission,
                         },
                     );
                     if let Some(bus) = &self.event_bus {
@@ -1840,7 +1893,7 @@ impl AcpClient {
                             options,
                             auto_approved: false,
                             selected_option: None,
-                            plan_approval: plan_extracted.is_some(),
+                            plan_approval: plan_extracted.is_some() || exit_plan_tool,
                             at: Utc::now(),
                         });
                         bus.emit_status(self.control_session_id, SessionStatus::WaitingApproval)
@@ -1923,6 +1976,36 @@ impl AcpClient {
                     }
                 }
             }
+            // D-046: Grok plan-exit handshake. Returning -32601 here made the
+            // agent report "client disconnected mid-approval" / plan exit failed.
+            "x.ai/exit_plan_mode" | "x.ai/exitPlanMode" => {
+                self.handle_exit_plan_mode_ext(req).await?;
+            }
+            // Nested ext_method envelope (some builds wrap the method name).
+            "agent.ext_method" | "agent/ext_method" => {
+                let nested = req
+                    .params
+                    .as_ref()
+                    .and_then(|p| {
+                        p.get("method")
+                            .or_else(|| p.get("name"))
+                            .or_else(|| p.get("extMethod"))
+                            .and_then(|v| v.as_str())
+                    })
+                    .unwrap_or("");
+                if is_exit_plan_ext_method(nested) {
+                    self.handle_exit_plan_mode_ext(req).await?;
+                } else {
+                    warn!(method = %req.method, nested, "unhandled agent.ext_method");
+                    transport
+                        .send_error_response(
+                            req.id,
+                            -32601,
+                            format!("method not found: {} ({nested})", req.method),
+                        )
+                        .await?;
+                }
+            }
             other => {
                 warn!(method = %other, "unhandled agent request — method not found");
                 // Spec-correct: an unknown method gets -32601, not `{}` — a
@@ -1935,7 +2018,108 @@ impl AcpClient {
         Ok(())
     }
 
-    fn resolve_sandbox_path(&self, path: &str) -> Result<PathBuf> {
+    /// Park Grok's `x.ai/exit_plan_mode` ext as a plan-approval card (D-046).
+    ///
+    /// The agent reads plan.md from disk itself; we surface the same file in the
+    /// UI and answer with ExitPlanModeExtResponse `{ decision, comments }` when
+    /// the user clicks Approve / Request changes / Abandon.
+    async fn handle_exit_plan_mode_ext(&self, req: IncomingAgentRequest) -> Result<()> {
+        let request_id = id_key(&req.id);
+        let options = vec![
+            PermissionOptionInfo {
+                id: "approve".into(),
+                kind: "allow_once".into(),
+                label: "Approve plan · start building".into(),
+            },
+            PermissionOptionInfo {
+                id: "request_changes".into(),
+                kind: "reject_once".into(),
+                label: "Request changes".into(),
+            },
+            PermissionOptionInfo {
+                id: "abandon".into(),
+                kind: "reject_once".into(),
+                label: "Abandon plan".into(),
+            },
+        ];
+
+        if let Some(plan) = self.read_plan_md_for_approval().await {
+            if let Some(bus) = &self.event_bus {
+                bus.emit(ControlEvent::Raw {
+                    session_id: Some(self.control_session_id),
+                    payload: json!({ "channel": "plan_doc", "text": plan }),
+                });
+            }
+        }
+
+        self.pending_permissions.lock().await.insert(
+            request_id.clone(),
+            PendingPermission {
+                rpc_id: req.id,
+                options: options.clone(),
+                kind: PendingPermissionKind::ExitPlanMode,
+            },
+        );
+
+        if let Some(bus) = &self.event_bus {
+            bus.emit(ControlEvent::ApprovalRequired {
+                session_id: self.control_session_id,
+                request_id,
+                tool: "exit_plan_mode".into(),
+                summary: "Approve the plan to leave plan mode and start building?".into(),
+                options,
+                auto_approved: false,
+                selected_option: None,
+                plan_approval: true,
+                at: Utc::now(),
+            });
+            bus.emit_status(self.control_session_id, SessionStatus::WaitingApproval)
+                .await;
+        }
+        // No response yet — wire stays open until respond_approval.
+        Ok(())
+    }
+
+    /// Best-effort read of the session plan.md (cwd or ~/.grok/sessions/<enc-cwd>/<sid>/).
+    async fn read_plan_md_for_approval(&self) -> Option<String> {
+        let mut candidates = Vec::new();
+        candidates.push(self.config.cwd.join("plan.md"));
+        candidates.push(self.config.cwd.join(".grok").join("plan.md"));
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let sessions_root = home.join(".grok/sessions");
+        // Grok encodes the absolute cwd as a single path segment (e.g. %2Fhome%2F…).
+        let enc_cwd: String = self
+            .config
+            .cwd
+            .to_string_lossy()
+            .bytes()
+            .map(|b| match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    (b as char).to_string()
+                }
+                _ => format!("%{b:02X}"),
+            })
+            .collect();
+        candidates.push(sessions_root.join(&enc_cwd).join("plan.md"));
+        if let Some(sid) = self.session_id.read().await.as_ref() {
+            candidates.push(sessions_root.join(&enc_cwd).join(sid).join("plan.md"));
+            candidates.push(sessions_root.join(sid).join("plan.md"));
+        }
+
+        for path in candidates {
+            if let Ok(text) = tokio::fs::read_to_string(&path).await {
+                let trimmed = text.trim();
+                if trimmed.len() >= 20 {
+                    return Some(trimmed.to_string());
+                }
+            }
+        }
+        None
+    }
+
+        fn resolve_sandbox_path(&self, path: &str) -> Result<PathBuf> {
         let p = PathBuf::from(path);
         let abs = if p.is_absolute() {
             p
@@ -2637,6 +2821,28 @@ fn is_safe_command(command: &str) -> bool {
     true
 }
 
+/// True when the tool is Grok/Claude exit-plan (must never auto-approve).
+fn is_exit_plan_tool(tool_name: &str, params: &Option<Value>) -> bool {
+    let n = tool_name.to_lowercase().replace(['-', '_'], "");
+    if n.contains("exitplan") {
+        return true;
+    }
+    let kind = params
+        .as_ref()
+        .and_then(|p| p.get("toolCall"))
+        .and_then(|t| t.get("kind"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_lowercase()
+        .replace(['-', '_'], "");
+    kind == "exitplan" || kind.contains("exitplan")
+}
+
+fn is_exit_plan_ext_method(method: &str) -> bool {
+    let m = method.to_lowercase().replace(['-', '_'], "");
+    m.contains("exitplan") || method.eq_ignore_ascii_case("x.ai/exit_plan_mode")
+}
+
 /// Pull a plan document out of a plan-presenting tool call's input
 /// (Claude Code's `ExitPlanMode` / `exit_plan_mode` carries `{ plan: "…" }`).
 fn extract_tool_plan(tool_name: &str, raw_input: Option<&Value>) -> Option<String> {
@@ -3133,6 +3339,20 @@ mod tests {
         assert_eq!(opts[1].label, "Deny it");
     }
 
+    #[test]
+    fn is_exit_plan_tool_detects_exit_plan_mode() {
+        assert!(is_exit_plan_tool("exit_plan_mode", &None));
+        assert!(is_exit_plan_tool("ExitPlanMode", &None));
+        assert!(is_exit_plan_tool(
+            "tool",
+            &Some(json!({ "toolCall": { "kind": "exit_plan" } }))
+        ));
+        assert!(!is_exit_plan_tool("Bash", &None));
+        assert!(is_exit_plan_ext_method("x.ai/exit_plan_mode"));
+        assert!(is_exit_plan_ext_method("x.ai/exitPlanMode"));
+        assert!(!is_exit_plan_ext_method("x.ai/ask_user_question"));
+    }
+
     #[tokio::test]
     async fn respond_approval_unknown_request_errors() {
         let c = AcpClient::mock_for_tests("sess-1", None);
@@ -3147,6 +3367,7 @@ mod tests {
             "42".into(),
             PendingPermission {
                 rpc_id: json!(42),
+                kind: PendingPermissionKind::SessionPermission,
                 options: vec![PermissionOptionInfo {
                     id: "allow".into(),
                     kind: "allow_once".into(),
@@ -3166,6 +3387,7 @@ mod tests {
             "7".into(),
             PendingPermission {
                 rpc_id: json!(7),
+                kind: PendingPermissionKind::SessionPermission,
                 options: vec![PermissionOptionInfo {
                     id: "allow".into(),
                     kind: "allow_once".into(),
