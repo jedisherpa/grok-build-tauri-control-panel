@@ -602,6 +602,7 @@ function activateView(name) {
   // Per-view refresh hooks: data views load themselves on entry.
   if (name === "history" && window.BombHistory) window.BombHistory.refresh();
   if (name === "builds" && window.BombBuilds) window.BombBuilds.refresh();
+  if (name === "scheduler" && window.BombScheduler) window.BombScheduler.refresh();
   if (name === "worktrees") refreshWorktrees();
   if (name === "mcp") refreshMcpView();
   if (name === "memory") refreshMemoryView();

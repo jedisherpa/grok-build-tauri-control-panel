@@ -43,6 +43,7 @@
           <button class="nav-item" data-view="memory" title="Memory">
             <span class="nav-icon">◈</span> Memory
           </button>
+          <button class="nav-item" data-view="scheduler" title="Scheduler"><span class="nav-icon">⏱</span> Scheduler</button>
           <button class="nav-item" data-view="settings" title="System">
             <span class="nav-icon">⚙</span> System
           </button>
@@ -397,6 +398,53 @@ tests/feature" spellcheck="false" required></textarea><span class="builds-help">
           </div>
         </section>
 
+
+        <section id="view-scheduler" class="view">
+          <header class="scheduler-header">
+            <div class="scheduler-heading">
+              <div>
+                <h1>Scheduler</h1>
+                <p>Recurring and one-shot agent routines. Every job needs an absolute working directory. New jobs stay paused until you enable them.</p>
+              </div>
+              <button id="scheduler-refresh" class="btn ghost" type="button">Refresh</button>
+            </div>
+            <div id="scheduler-status" role="status" aria-live="polite">Loading scheduled jobs…</div>
+          </header>
+          <div class="scheduler-content">
+            <details id="scheduler-new" class="scheduler-new" open>
+              <summary>Create scheduled job</summary>
+              <form id="scheduler-form" class="scheduler-form">
+                <label>Name<input id="scheduler-name" type="text" maxlength="120" placeholder="nightly status check" required autocomplete="off" /></label>
+                <label>Prompt / command<textarea id="scheduler-prompt" rows="3" maxlength="8000" placeholder="What should the agent do each time this fires?" required></textarea></label>
+                <label>Working directory (required)<input id="scheduler-cwd" type="text" placeholder="/absolute/project/path" spellcheck="false" required /></label>
+                <button id="scheduler-use-project" class="btn ghost" type="button">Use selected project</button>
+                <div class="scheduler-form-columns">
+                  <label>Schedule type
+                    <select id="scheduler-kind" aria-label="Schedule type">
+                      <option value="interval" selected>Interval (seconds)</option>
+                      <option value="cron">Cron (UTC)</option>
+                      <option value="once">One-shot delay</option>
+                    </select>
+                  </label>
+                  <label id="scheduler-field-interval">Interval seconds<input id="scheduler-interval" type="number" min="1" step="1" value="3600" /></label>
+                  <label id="scheduler-field-cron" hidden>Cron expression<input id="scheduler-cron" type="text" placeholder="0 9 * * *" spellcheck="false" /></label>
+                  <label id="scheduler-field-once" hidden>Delay seconds<input id="scheduler-once" type="number" min="0" step="1" value="60" /></label>
+                  <label>Max runs (optional)<input id="scheduler-max-runs" type="number" min="1" step="1" placeholder="unlimited" /></label>
+                </div>
+                <label class="scheduler-enable-row"><input id="scheduler-enable" type="checkbox" /> Enable immediately (otherwise create paused)</label>
+                <p class="scheduler-help">Safe default is paused. Enabling may spawn a headless Plan-mode agent when the schedule fires — confirm if you check Enable immediately.</p>
+                <div class="scheduler-submit">
+                  <button id="scheduler-create" class="btn primary" type="submit">Create job</button>
+                </div>
+              </form>
+            </details>
+            <div class="scheduler-workspace">
+              <div id="scheduler-list" class="scheduler-list" aria-label="Scheduled jobs"></div>
+              <article id="scheduler-detail" class="scheduler-detail"><p class="empty-hint">Select a job to inspect schedule, next run, and controls.</p></article>
+            </div>
+          </div>
+        </section>
+
         <section id="view-settings" class="view">
           <div class="pane-pad">
             <div class="settings-card" id="runtime-card">
@@ -632,6 +680,7 @@ tests/feature" spellcheck="false" required></textarea><span class="builds-help">
     <script src="memory-recall.js"></script>
     <script src="collaboration.js"></script>
     <script src="builds.js"></script>
+    <script src="scheduler.js"></script>
     <script src="spatial-world.js"></script>
     <script src="spatial-host.js"></script>
     <script src="spatial-faces.js"></script>
