@@ -7,6 +7,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 mod word_shapes;
 pub use word_shapes::word_shapes;
+pub mod retrieval;
 
 pub const ALGORITHM: &str = "bomb-code/cdiss-source-structure/v1";
 const SCHEMA: &str = "bomb-code/cdiss-state/v1";
