@@ -466,3 +466,12 @@ existing development-server fixtures remaining ignored; 132 frontend, 18 source,
 Critical/High/actionable Medium. All 13 protected source/index/config/original
 receipt/reference hashes remain unchanged. Correct the local bundle signature
 and verify the ad-hoc signed 0.1.13 update; preserve the 0.1.12 rollback bundle.
+
+
+## Observatory UI refinement — 2026-10-07
+
+Paul supplied a dark glass mathematical sphere reference for another careful visual pass. Retain the canonical E8 asset/projection, full-window 0.5 background layer, exclusion masks, original working controls and independent thread/utility cubes. Add static, nonsemantic orbital/shell guides beneath the source lattice; rebalance sparse connections and highlighted edges; use midnight glass, restrained blue/violet/amber rims, smaller utility headings and a readable central explanation. The guides are presentation geometry, not E8 facets or inferred semantics. No provider, permission, history or backend behavior changes.
+
+The 960x640 browser check exposed default sidebar cubes retaining their old spacing after window resize. Recompute default layouts for the current bounds; preserve manually moved/resized and legacy saved placements, retaining keyboard/pointer resize, native fold controls and exclusion refreshes. Reset cubes uses current bounds. The extra conversation minimum height avoids compact-face text colliding with the composer.
+
+Verification: 132 frontend tests pass, affected JavaScript syntax and diff-whitespace checks pass; workspace check and strict all-target Clippy pass. Actual frontend checks confirm ten independent cubes, one original composer, unchanged 0.5 lattice opacity, keyboard resize and a non-overlapping default arrangement at the minimum supported window. Native bundle/installation and preservation verification follow in the local release evidence.

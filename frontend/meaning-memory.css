@@ -1,3 +1,4 @@
+@import url("observatory.css");
 .meaning-memory { margin: 20px 0; border-top: 1px solid var(--border, #324458); padding-top: 16px; }
 .meaning-memory h3 { margin: 8px 0; font-size: 16px; }
 .meaning-memory p { line-height: 1.5; overflow-wrap: anywhere; }

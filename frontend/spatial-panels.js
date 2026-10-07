@@ -17,7 +17,7 @@
     doc.documentElement.classList.add("has-panel-cubes");
     const bounds = () => ({ width: win.innerWidth, height: win.innerHeight });
     function listen(node, type, fn) { node.addEventListener(type, fn); cleanup.push(() => node.removeEventListener(type, fn)); }
-    function save() { try { win.localStorage.setItem(STORAGE, JSON.stringify(Object.fromEntries(panels.map(p => [p.id, { ...p.rect, expanded: p.expanded, expandedHeight: p.expandedHeight }])))); } catch { /* Private or full storage does not disable controls. */ } }
+    function save() { try { win.localStorage.setItem(STORAGE, JSON.stringify(Object.fromEntries(panels.map(p => [p.id, { ...p.rect, expanded: p.expanded, expandedHeight: p.expandedHeight, userPlaced: p.userPlaced }])))); } catch { /* Private or full storage does not disable controls. */ } }
     function mask() {
       const elements = panels.map(p => p.element);
       background?.setExclusionElements?.(elements, "panel-cubes");
@@ -40,10 +40,10 @@
     }
     function gesture(p, handle, resize) {
       let drag;
-      listen(handle, "pointerdown", e => { if (e.button !== 0) return; e.preventDefault(); handle.focus({ preventScroll: true }); drag = { id: e.pointerId, x: e.clientX, y: e.clientY, rect: { ...p.rect } }; handle.setPointerCapture(e.pointerId); p.element.style.zIndex = String(++z); });
+      listen(handle, "pointerdown", e => { if (e.button !== 0) return; e.preventDefault(); handle.focus({ preventScroll: true }); p.userPlaced = true; drag = { id: e.pointerId, x: e.clientX, y: e.clientY, rect: { ...p.rect } }; handle.setPointerCapture(e.pointerId); p.element.style.zIndex = String(++z); });
       listen(handle, "pointermove", e => { if (drag?.id !== e.pointerId) return; const dx = e.clientX - drag.x, dy = e.clientY - drag.y; p.rect = resize ? { ...drag.rect, width: drag.rect.width + dx, height: drag.rect.height + dy } : { ...drag.rect, x: drag.rect.x + dx, y: drag.rect.y + dy }; place(p); });
       ["pointerup", "pointercancel", "lostpointercapture"].forEach(type => listen(handle, type, () => { if (drag) { drag = null; if (p.expanded) p.expandedHeight = p.rect.height; save(); } }));
-      listen(handle, "keydown", e => { if (!/^Arrow(Left|Right|Up|Down)$/.test(e.key) || e.metaKey || e.ctrlKey || e.altKey) return; e.preventDefault(); const step = e.shiftKey ? 32 : 8, dx = e.key === "ArrowRight" ? step : e.key === "ArrowLeft" ? -step : 0, dy = e.key === "ArrowDown" ? step : e.key === "ArrowUp" ? -step : 0; p.rect = resize ? { ...p.rect, width: p.rect.width + dx, height: p.rect.height + dy } : { ...p.rect, x: p.rect.x + dx, y: p.rect.y + dy }; p.element.style.zIndex = String(++z); place(p); if (p.expanded) p.expandedHeight = p.rect.height; save(); });
+      listen(handle, "keydown", e => { if (!/^Arrow(Left|Right|Up|Down)$/.test(e.key) || e.metaKey || e.ctrlKey || e.altKey) return; e.preventDefault(); p.userPlaced = true; const step = e.shiftKey ? 32 : 8, dx = e.key === "ArrowRight" ? step : e.key === "ArrowLeft" ? -step : 0, dy = e.key === "ArrowDown" ? step : e.key === "ArrowUp" ? -step : 0; p.rect = resize ? { ...p.rect, width: p.rect.width + dx, height: p.rect.height + dy } : { ...p.rect, x: p.rect.x + dx, y: p.rect.y + dy }; p.element.style.zIndex = String(++z); place(p); if (p.expanded) p.expandedHeight = p.rect.height; save(); });
     }
     function cube(id, title, content, rect, toggle = null, extras = []) {
       if (!content) return;
@@ -57,7 +57,7 @@
       const body = doc.createElement("div"); body.className = "spatial-panel-cube-body"; element.appendChild(body); body.appendChild(content); const extraAnchors = extras.filter(Boolean).map(node => { const marker = doc.createComment(`original ${id} accessory`); node.before(marker); header.appendChild(node); return [node, marker]; });
       const resize = doc.createElement("button"); resize.type = "button"; resize.className = "spatial-panel-cube-resize"; resize.textContent = "⌟"; resize.setAttribute("aria-label", `Resize ${title} cube`); resize.title = "Drag to resize · Arrow keys resize · Shift changes farther"; element.appendChild(resize);
       const stored = saved[id], valid = stored && ["x", "y", "width", "height"].every(key => Number.isFinite(stored[key]));
-      const p = { id, element, body, fold, nativeToggle, extraAnchors, anchor, content, toggleAnchor, defaultRect: { ...rect }, expanded: true, expandedHeight: valid ? stored.expandedHeight : rect.height === 34 ? 140 : rect.height, rect: valid ? stored : rect };
+      const p = { id, userPlaced: !!valid && stored.userPlaced !== false, element, body, fold, nativeToggle, extraAnchors, anchor, content, toggleAnchor, defaultRect: { ...rect }, expanded: true, expandedHeight: valid ? stored.expandedHeight : rect.height === 34 ? 140 : rect.height, rect: valid ? stored : rect };
       panels.push(p); gesture(p, move, false); gesture(p, resize, true);
       if (toggle) {
         const sync = () => expand(p, toggle.getAttribute("aria-expanded") === "true", false);
@@ -70,30 +70,44 @@
     const left = doc.querySelector(".col-left"), right = doc.querySelector(".col-right");
     const brand = left?.querySelector(".brand");
     if (brand) { brand.classList.add("spatial-floating-brand"); doc.body.appendChild(brand); }
-    const available = win.innerHeight - 76, leftScale = Math.min(1, (available - 36) / 740);
-    cube("navigation", "Navigate", left?.querySelector(".nav-block"), { x: 12, y: 64, width: 180, height: 260 * leftScale });
-    cube("projects", "Projects & threads", left?.querySelector(".threads-section"), { x: 22, y: 82 + 260 * leftScale, width: 180, height: 330 * leftScale });
-    cube("services", "Services", left?.querySelector(".col-footer"), { x: 12, y: 100 + 590 * leftScale, width: 190, height: 150 * leftScale });
     const specs = [
       ["now", "Now", "#now-panel", null, 100], ["agents", "Agents", "#agent-list", "#agents-toggle", 100],
       ["tools", "Tools", "#tool-list", "#tools-toggle", 86], ["details", "Tool details", "#technical-transcript", null, 216],
       ["view", "View", "#view-options", "#view-toggle", 34], ["log", "Log", "#event-feed", "#log-toggle", 34],
       ["preview", "Live preview", ".dev-dock", null, 144],
     ];
-    specs.forEach(spec => { if (spec[4] === 34 && doc.querySelector(spec[3])?.getAttribute("aria-expanded") === "true") spec[4] = 140; });
-    const collapsedCount = specs.filter(spec => spec[4] === 34).length;
-    const weight = specs.reduce((sum, spec) => sum + (spec[4] === 34 ? 0 : spec[4] - 56), 0);
-    const extra = Math.max(0, available - 96 - collapsedCount * 34 - (7 - collapsedCount) * 56); let y = 64;
-    specs.forEach(([id, title, selector, toggleId, h], i) => {
+    function defaultRects() {
+      const available = win.innerHeight - 76, leftScale = Math.min(1, (available - 36) / 740);
+      const rects = new Map([
+        ["navigation", { x: 12, y: 64, width: 180, height: 260 * leftScale }],
+        ["projects", { x: 22, y: 82 + 260 * leftScale, width: 180, height: 330 * leftScale }],
+        ["services", { x: 12, y: 100 + 590 * leftScale, width: 190, height: 150 * leftScale }],
+      ]);
+      const heights = specs.map(([id, , , toggleId, h]) => {
+        const panel = panels.find(p => p.id === id);
+        return panel ? panel.expanded ? Math.max(76, h) : 34 : h === 34 && doc.querySelector(toggleId)?.getAttribute("aria-expanded") === "true" ? 140 : h;
+      });
+      const collapsedCount = heights.filter(h => h === 34).length;
+      const weight = heights.reduce((sum, h) => sum + (h === 34 ? 0 : h - 56), 0);
+      const extra = Math.max(0, available - 96 - collapsedCount * 34 - (7 - collapsedCount) * 56); let y = 64;
+      specs.forEach(([id], i) => {
+        const h = heights[i], height = h === 34 ? 34 : 56 + (weight ? Math.min(weight, extra) * (h - 56) / weight : 0);
+        rects.set(id, { x: win.innerWidth - 254 + (i % 2 ? 8 : 0), y, width: 214, height });
+        y += height + 16;
+      });
+      return rects;
+    }
+    let defaults = defaultRects();
+    cube("navigation", "Navigate", left?.querySelector(".nav-block"), defaults.get("navigation"));
+    cube("projects", "Projects & threads", left?.querySelector(".threads-section"), defaults.get("projects"));
+    cube("services", "Services", left?.querySelector(".col-footer"), defaults.get("services"));
+    specs.forEach(([id, title, selector, toggleId]) => {
       const child = right?.querySelector(selector), content = child?.closest(".right-block") || child;
-      const height = h === 34 ? 34 : 56 + Math.min(weight, extra) * (h - 56) / weight;
-      cube(id, title, content, { x: win.innerWidth - 254 + (i % 2 ? 8 : 0), y, width: 214, height }, toggleId ? doc.querySelector(toggleId) : null, id === "now" ? [doc.getElementById("now-elapsed"), doc.getElementById("btn-refresh"), doc.getElementById("activity-bomb")] : []);
-      y += height + 16;
+      cube(id, title, content, defaults.get(id), toggleId ? doc.querySelector(toggleId) : null, id === "now" ? [doc.getElementById("now-elapsed"), doc.getElementById("btn-refresh"), doc.getElementById("activity-bomb")] : []);
     });
     const reset = doc.createElement("button"); reset.type = "button"; reset.className = "spatial-cubes-reset"; reset.textContent = "Reset cubes"; reset.title = "Restore the small cubes around your working surface"; layer.appendChild(reset);
-    const defaults = new Map(panels.map(p => [p.id, { ...p.defaultRect }]));
-    listen(reset, "click", () => { panels.forEach(p => { p.rect = { ...defaults.get(p.id), height: p.expanded ? defaults.get(p.id).height : 34 }; p.expandedHeight = Math.max(76, defaults.get(p.id).height); place(p); }); save(); });
-    listen(win, "resize", () => { panels.forEach(place); save(); });
+    listen(reset, "click", () => { defaults = defaultRects(); panels.forEach(p => { p.userPlaced = false; p.rect = { ...defaults.get(p.id), height: p.expanded ? defaults.get(p.id).height : 34 }; p.expandedHeight = Math.max(76, defaults.get(p.id).height); place(p); }); save(); });
+    listen(win, "resize", () => { defaults = defaultRects(); panels.forEach(p => { if (!p.userPlaced) { p.rect = { ...defaults.get(p.id) }; p.expandedHeight = Math.max(76, p.rect.height); } place(p); }); save(); });
     listen(doc, "bomb-code:view-selected", () => win.queueMicrotask(mask));
     const observer = new win.ResizeObserver(mask); panels.forEach(p => observer.observe(p.element)); cleanup.push(() => observer.disconnect());
     return { elements: () => panels.map(p => p.element), destroy() { if (destroyed) return; destroyed = true; cleanup.forEach(fn => fn()); panels.forEach(p => { p.extraAnchors.forEach(([node, marker]) => marker.replaceWith(node)); if (p.toggleAnchor) p.toggleAnchor.replaceWith(p.fold); p.anchor.replaceWith(p.content); }); if (brand) { brand.classList.remove("spatial-floating-brand"); left.prepend(brand); } layer.remove(); doc.documentElement.classList.remove("has-panel-cubes"); background?.setExclusionElements?.([], "panel-cubes"); scene?.setExclusionElements?.([], "panel-cubes"); } };

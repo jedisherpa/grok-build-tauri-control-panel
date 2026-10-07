@@ -6,7 +6,7 @@
   const PLANE_SHA = "fd8ac2058aee11bfb68ed69dec7aa424db56db465e8e61724cfdbda89e58472a";
   const ASSET_SHA = "f124fe8ff3bb6706a2013a72b2f90bc589c446e080c05085481a113fa77edd21";
   const STALE_MS = 25000;
-  const PALETTE = ["#b7e3ce", "#c4b5dd", "#eed8b5"];
+  const PALETTE = ["#98c9ee", "#bdb0e4", "#e8c993"];
   const ACTIVE = new Set(["send", "think", "tools", "reply"]);
   const PHASES = new Set(["idle", "send", "think", "tools", "reply", "wait", "done", "error", "unknown", "disconnected"]);
   const PHASE_LABEL = { idle: "Idle", send: "Sending", think: "Agent working", tools: "Tools running", reply: "Reply arriving", wait: "Waiting for you", done: "Turn ended", error: "Turn error", unknown: "Status unknown", disconnected: "Disconnected" };
@@ -359,11 +359,41 @@
       return {...p,x:p.x+origin.left-relative.left,y:p.y+origin.top-relative.top};
     }
 
+    // Quiet orbital guides are presentation geometry only. They neither replace
+    // the pinned E8 projection nor encode a dependency, interpretation or status.
+    function drawOrbitalGuides() {
+      ctx.save();
+      ctx.lineWidth = .65;
+      const x = width * .51, y = height * .49;
+      const radius = Math.min(width * .44, height * .61);
+      ctx.strokeStyle = "#83b4e6"; ctx.globalAlpha = .44;
+      ctx.beginPath(); ctx.ellipse(x, y, radius, radius, 0, 0, Math.PI * 2); ctx.stroke();
+      [.28, .57, .82].forEach(ratio => {
+        ctx.beginPath(); ctx.ellipse(x, y, radius * ratio, radius, -.17, 0, Math.PI * 2); ctx.stroke();
+      });
+      [-.62, -.32, .32, .62].forEach(latitude => {
+        const r = radius * Math.sqrt(1 - latitude * latitude);
+        ctx.beginPath(); ctx.ellipse(x, y + radius * latitude, r, r * .16, -.17, 0, Math.PI * 2); ctx.stroke();
+      });
+      ctx.globalAlpha = .52; ctx.strokeStyle = "#c3abd9";
+      ctx.beginPath(); ctx.ellipse(x, y, radius, radius * .23, -.24, 0, Math.PI * 2); ctx.stroke();
+      ctx.globalAlpha = .46; ctx.strokeStyle = "#e8c993";
+      ctx.beginPath(); ctx.ellipse(x, y, radius * .97, radius * .18, .22, 0, Math.PI * 2); ctx.stroke();
+      // A cropped lower shell gives depth without putting a grid behind text.
+      ctx.strokeStyle = "#83b4e6"; ctx.globalAlpha = .3;
+      const floorX = width * .51, floorY = height * 1.32, floorR = width * .62;
+      [.55, .78, 1].forEach(ratio => {
+        ctx.beginPath(); ctx.ellipse(floorX, floorY, floorR * ratio, height * .51, 0, Math.PI, Math.PI * 2); ctx.stroke();
+      });
+      ctx.restore();
+    }
+
     function drawLattice(clock) {
       if (!ctx) return;
       ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.clearRect(0, 0, width, height);
       if (!scaffold) return;
       const points = rootPoints(), renderBase = options.renderScaffold !== false;
+      if (renderBase) drawOrbitalGuides();
       // Strata are interface sections, not literal E8 facets or semantic dimensions.
       const strataCount = renderBase && !options.backgroundOnly ? 3 : 0;
       for (let i = 0; i < strataCount; i++) {
@@ -385,7 +415,7 @@
         if (!emphasis && (!renderBase || i % 23 !== 0)) return;
         const p = points[a], q = points[b];
         ctx.beginPath(); ctx.moveTo(p.x, p.y); ctx.lineTo(q.x, q.y);
-        ctx.strokeStyle = emphasis ? owners.get(a) || owners.get(b) || "#b7e3ce" : "#91bcae"; ctx.globalAlpha = emphasis ? (renderBase ? .44 : .25) : .40; ctx.stroke();
+        ctx.strokeStyle = emphasis ? owners.get(a) || owners.get(b) || "#b7e3ce" : "#9ab8d4"; ctx.globalAlpha = emphasis ? (renderBase ? .36 : .24) : .26; ctx.stroke();
       });
       ctx.globalAlpha = 1;
       points.map((p, i) => ({ ...p, i })).sort((a, b) => a.z - b.z).forEach(p => {
