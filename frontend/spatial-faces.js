@@ -254,12 +254,17 @@
       if (destroyed) return;
       syncSelection();
       const source = getState(), sessions = rows(source.sessions);
-      const signature = sessions.map(session => `${session.id}:${session.label || ""}:${session.backend || ""}`).join("|");
+      // Include selected so a new thread forces a rebuild; labels must refresh
+      // when the narrator renames a thread (round4b stale dropdown).
+      const signature = `${selected || ""}|` + sessions.map(session => `${session.id}:${session.label || ""}:${session.backend || ""}`).join("|");
       if (picker.dataset.signature !== signature) {
         const before = picker.value; picker.replaceChildren();
         sessions.forEach(session => { const option = doc.createElement("option"); option.value = session.id; option.textContent = `${session.label || `Thread ${session.id.slice(0, 8)}`} · ${session.backend || "engine unreported"}`; picker.appendChild(option); });
         picker.dataset.signature = signature;
-        picker.value = sessions.some(session => session.id === before) ? before : sessions.find(session => session.id !== selected)?.id || sessions[0]?.id || "";
+        const prefer = sessions.find(session => session.id !== selected && session.id === before)
+          || sessions.find(session => session.id !== selected)
+          || sessions[0];
+        picker.value = prefer?.id || "";
       }
       open.disabled = !sessions.length;
       const available = new Set(sessions.map(session => session.id));

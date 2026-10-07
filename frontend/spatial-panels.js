@@ -112,37 +112,50 @@
         };
       }
     }
-    function reflowOnResize() {
-      // Enlarge/shrink: re-dock right rail against current bounds so cubes do
-      // not stay at the old small-window coordinates (Play B B09b).
+    const reset = doc.createElement("button"); reset.type = "button"; reset.className = "spatial-cubes-reset"; reset.textContent = "Reset cubes"; reset.title = "Restore the small cubes around your working surface"; layer.appendChild(reset);
+    const defaults = new Map(panels.map(p => [p.id, { ...p.defaultRect }]));
+    let lastBounds = bounds();
+    function applyDefaultLayout(expandedKeep) {
       const b = bounds();
       panels.forEach(p => {
+        const d = defaults.get(p.id);
+        let rect = { ...d, height: (expandedKeep && p.expanded) ? Math.max(d.height, p.expandedHeight || d.height) : (p.expanded ? d.height : 34) };
+        if (isRightRail(p.id)) rect.x = Math.max(12, b.width - rect.width - 24);
+        // Left-rail cubes: keep default x but clamp into current width
+        if (!isRightRail(p.id)) {
+          rect.x = Math.min(rect.x, Math.max(12, b.width - rect.width - 12));
+        }
+        p.rect = rect;
+        p.expandedHeight = Math.max(76, d.height);
+        clampAboveComposer(p);
+        place(p);
+      });
+    }
+    function reflowOnResize() {
+      // round4b Play B: enlarge left Projects covering Navigate / Tool details
+      // cut off — re-apply default layout against the new size (same as Reset),
+      // not merely shift right-rail x.
+      const b = bounds();
+      const enlarged = b.width > lastBounds.width + 24 || b.height > lastBounds.height + 24;
+      const shrunk = b.width < lastBounds.width - 24 || b.height < lastBounds.height - 24;
+      lastBounds = { ...b };
+      if (enlarged || shrunk) {
+        applyDefaultLayout(true);
+        try { win.localStorage.removeItem(STORAGE); } catch { /* ignore */ }
+        save();
+        return;
+      }
+      panels.forEach(p => {
         if (isRightRail(p.id)) {
-          p.rect = {
-            ...p.rect,
-            x: Math.max(12, b.width - p.rect.width - 24),
-          };
+          p.rect = { ...p.rect, x: Math.max(12, b.width - p.rect.width - 24) };
         }
         clampAboveComposer(p);
         place(p);
       });
       save();
     }
-    const reset = doc.createElement("button"); reset.type = "button"; reset.className = "spatial-cubes-reset"; reset.textContent = "Reset cubes"; reset.title = "Restore the small cubes around your working surface"; layer.appendChild(reset);
-    const defaults = new Map(panels.map(p => [p.id, { ...p.defaultRect }]));
     listen(reset, "click", () => {
-      // Recompute from original defaults against the *current* window size so
-      // Reset is visible after maximize/enlarge (play1 #15/#26).
-      const b = bounds();
-      panels.forEach(p => {
-        const d = defaults.get(p.id);
-        let rect = { ...d, height: p.expanded ? d.height : 34 };
-        if (isRightRail(p.id)) rect.x = Math.max(12, b.width - rect.width - 24);
-        p.rect = rect;
-        p.expandedHeight = Math.max(76, d.height);
-        clampAboveComposer(p);
-        place(p);
-      });
+      applyDefaultLayout(false);
       try { win.localStorage.removeItem(STORAGE); } catch { /* ignore */ }
       save();
     });
