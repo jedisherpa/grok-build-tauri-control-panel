@@ -170,6 +170,7 @@
         previous.rect = primaryRect();
       }
       const target = next && faces.get(next);
+      const hadFace = !!target;
       selected = next;
       if (target) { removePreview(target); scene.setWorkspaceRect?.(target.rect); }
       else if (next && available.has(next)) {
@@ -178,9 +179,31 @@
         faces.set(next, { id: next, rect }); scene.setWorkspaceRect?.(rect);
       }
       faces.forEach(face => { if (face.id !== selected) ensurePreview(face); });
-      restoreWorkingSurface();
-      tuckContextFaces();
+      // Expand only when the new thread had no stored face geometry (Play B leftover
+      // face covering a fresh thread). Promote keeps the preview's own rect and
+      // leaves the demoted thread at its prior workspace geometry.
+      if (!hadFace) {
+        restoreWorkingSurface();
+        tuckOverlappingContextFaces();
+      }
       mask();
+    }
+    function tuckOverlappingContextFaces() {
+      const b = bounds();
+      const ws = (selected && faces.get(selected)?.rect) || primaryRect();
+      let i = 0;
+      faces.forEach((face) => {
+        if (face.id === selected) return;
+        if (!overlaps(face.rect, ws, 8)) return;
+        face.rect = boundedRect({
+          x: Math.max(12, b.width - 340),
+          y: 155 + (i % 5) * 40,
+          width: 300,
+          height: Math.min(220, Math.max(160, b.height - 320)),
+        }, b);
+        i += 1;
+        place(face);
+      });
     }
     /** Fill most of the scene for the working face; leave right-rail + composer. */
     function restoreWorkingSurface() {
