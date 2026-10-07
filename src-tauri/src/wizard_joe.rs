@@ -15,10 +15,9 @@ use tokio::{
 };
 use uuid::Uuid;
 
-const REFERENCE: &str =
-    "/Users/paulcooper/Documents/Codex/2026-10-06/tak/work/sensesnap-reference/current";
+const REFERENCE: &str = "/Users/paulcooper/.grok/control-panel/wizard-joe/reference";
 const NODE: &str = "/Users/paulcooper/.nvm/versions/node/v20.20.0/bin/node";
-const PYTHON: &str = "/Users/paulcooper/Documents/Codex/2026-10-06/tak/work/sensesnap-reference/python-env/bin/python3";
+const PYTHON: &str = "/Users/paulcooper/.grok/control-panel/wizard-joe/python-env/bin/python3";
 const MAX_LINE: usize = 16 * 1024 * 1024;
 const MAX_PROMPT: usize = 200_000;
 const MANIFEST_SHA: &str = "4d466d7d8e830f6a3330e619a497f99aa3b6fa6c7439432c610b1f3485498e83";
@@ -181,15 +180,17 @@ pub async fn joe_status(state: State<'_, AppState>) -> Result<Value, String> {
     let mut reason = unavailable_reason(&backend);
     if reason.is_none() {
         let probe = Command::new(PYTHON)
-            .args(["-c", "import numpy, scipy"])
-            .stdout(Stdio::null())
+            .args(["-B", "-c", "import sys\ntry:\n import numpy, scipy\nexcept Exception as error:\n print(type(error).__name__ + ': ' + str(error)[:1200])\n sys.exit(1)"])
+            .stdout(Stdio::piped())
             .stderr(Stdio::null())
             .kill_on_drop(true)
-            .status();
-        if !matches!(tokio::time::timeout(Duration::from_secs(10), probe).await, Ok(Ok(status)) if status.success())
-        {
-            reason=Some("The pinned Python runtime cannot import NumPy and SciPy; Joe is unavailable until its existing dependencies are restored".into());
-        }
+            .output();
+        reason = match tokio::time::timeout(Duration::from_secs(10), probe).await {
+            Ok(Ok(output)) if output.status.success() => None,
+            Ok(Ok(output)) => Some(format!("Pinned Python import failed ({}): {}", output.status, String::from_utf8_lossy(&output.stdout).chars().take(1400).collect::<String>())),
+            Ok(Err(error)) => Some(format!("Pinned Python could not start ({:?})", error.kind())),
+            Err(_) => Some("Pinned Python import check exceeded 10 seconds; retry when local compute is available".into()),
+        };
     }
     Ok(
         json!({"available":reason.is_none(),"referenceRoot":REFERENCE,"manifestSha256":MANIFEST_SHA,"pythonPath":PYTHON,"nodePath":NODE,"provider":backend,"model":model,"manualOnly":true,"reason":reason}),
