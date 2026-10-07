@@ -3,6 +3,8 @@
 //! Fans out session lifecycle, tool calls, plan updates, and system events
 //! to Tauri UI subscribers and internal services.
 
+pub mod diagnostics;
+
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -234,7 +236,9 @@ impl EventBus {
     pub fn emit_error(&self, session_id: Option<Uuid>, message: impl Into<String>) {
         self.emit(ControlEvent::Error {
             session_id,
-            message: message.into(),
+            // Errors are rendered verbatim in the UI: never ship ANSI codes,
+            // team IDs or key fragments.
+            message: diagnostics::sanitize_diagnostic(&message.into()),
             at: Utc::now(),
         });
     }

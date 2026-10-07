@@ -800,7 +800,8 @@ function handleExplainEvent(sid, payload) {
     return;
   }
   state.explainPending = false;
-  const text = String(payload.text || "").trim();
+  const D = (typeof window !== "undefined" && window.BombDiagnostics);
+  const text = (D ? D.sanitize(String(payload.text || "")) : String(payload.text || "")).trim();
   if (!text) return;
   const list = explainListFor(sid);
   list.push({ text, kind, requestId: payload.requestId || null, at: payload.at || nowIso() });
@@ -1774,6 +1775,9 @@ function handleControlEvent(ev) {
         endAgentStream(sid);
         sweepToolsForSession(sid, "failed");
         endTurnPresence(sid, "error", String(ev.status));
+        // Composer status comes from sess.status; ensure the bar refreshes now.
+        renderTranscript();
+        updateSendButton();
       } else if (st.includes("cancel")) {
         endAgentStream(sid);
         const p = presenceFor(sid);
@@ -1814,8 +1818,12 @@ function handleControlEvent(ev) {
     if (!state.ready) setStatus("error", ev.message || "error");
     if (sid) {
       endAgentStream(sid);
-      appendTranscript(sid, "error", ev.message || "error");
+      appendTranscript(sid, "error", (typeof window !== "undefined" && window.BombDiagnostics)
+        ? (typeof window !== "undefined" && window.BombDiagnostics).sanitize(ev.message || "error")
+        : (ev.message || "error"));
       endTurnPresence(sid, "error", ev.message || "error");
+      renderTranscript();
+      updateSendButton();
     }
   } else if (type === "approval_required" || type === "approvalRequired") {
     const autoApproved = !!(ev.auto_approved ?? ev.autoApproved);
@@ -1898,11 +1906,15 @@ function handleControlEvent(ev) {
     if (payload?.channel === "term" && payload?.line) {
       // Only the owning session's thread gets the line — never the selected
       // one as a fallback (another session's stderr showed up mid-thread).
+      // Sanitize: strip ANSI and redact team IDs / key fragments before display.
+      const D = (typeof window !== "undefined" && window.BombDiagnostics);
+      const rawLine = String(payload.line);
+      const line = D ? D.sanitize(rawLine) : rawLine;
       if (!sid) {
-        pushEvent(String(payload.line).slice(0, 120), "", null);
+        pushEvent(line.slice(0, 120), "", null);
         return;
       }
-      appendTranscript(sid, "term", String(payload.line), nowIso(), { stream: true });
+      appendTranscript(sid, "term", line, nowIso(), { stream: true });
       if (/session\/prompt still open after/i.test(String(payload.line))) {
         commitPresence(sid, P.idleStatus(presenceFor(sid)));
       } else if (P.turnActive(presenceFor(sid)) && !presenceFor(sid).completionUnconfirmed && !P.normallyFinished(presenceFor(sid))) {
@@ -2275,8 +2287,23 @@ async function refreshSessions() {
       await loadTranscriptFromDb(state.selectedSession);
       renderTranscript();
       updateBombChrome();
+      updateSendButton();
     } else {
+      // Refresh composer status/model without rebuilding the transcript DOM
+      // (rebuilding on every status change used to destroy scroll; play1 #5/#14
+      // showed the composer stuck on "starting" after the thread failed).
+      const sid = state.selectedSession;
+      const sess = state.sessions.find((s) => s.id === sid);
+      if (sid && sess) {
+        const backendName = String(sess.backend || "grok").toLowerCase();
+        const el = $("composer-session");
+        if (el) el.textContent = `${shortId(sid)} · ${sess.status || "?"}`;
+        const mel = $("composer-model");
+        if (mel) mel.textContent = [backendName, sess.model].filter(Boolean).join(" · ");
+        updateThreadGitRow(sess);
+      }
       updateBombChrome();
+      updateSendButton();
     }
   } catch (e) {
     toastError(e);
@@ -3056,13 +3083,20 @@ async function sendPrompt() {
       });
       return;
     }
-    // Sending into a still-starting session fails backend-side; don't spin up
-    // turn presence for a prompt that can't be delivered yet.
+    // Sending into a still-starting or already-failed session fails backend-side
+    // (or silently no-ops). Gate with a visible reason and leave the prompt alone.
     const selectedSess = state.sessions.find((s) => s.id === state.selectedSession);
-    if (selectedSess && String(selectedSess.status || "").toLowerCase().includes("start")) {
-      pushEvent("session is still starting — give it a second, then send", "err", "wait", {
-        force: true,
-      });
+    const gate = (typeof window !== "undefined" && window.BombDiagnostics)
+      ? (typeof window !== "undefined" && window.BombDiagnostics).composerGate(state.selectedSession, selectedSess?.status)
+      : { canSend: true, reason: "" };
+    if (!gate.canSend) {
+      pushEvent(gate.reason, "err", "wait", { force: true, milestone: true });
+      const hint = $("composer-gate-hint");
+      if (hint) {
+        hint.textContent = gate.reason;
+        hint.style.display = "block";
+      }
+      updateSendButton();
       return;
     }
     if (!state.selectedSession) {
@@ -3501,9 +3535,26 @@ function updateSendButton() {
   const btn = $("btn-send");
   if (!btn) return;
   const busy = turnActive() && !!state.selectedSession;
+  const sess = state.sessions.find((s) => s.id === state.selectedSession);
+  const gate = (typeof window !== "undefined" && window.BombDiagnostics)
+    ? (typeof window !== "undefined" && window.BombDiagnostics).composerGate(state.selectedSession, sess?.status)
+    : { canSend: true, reason: "" };
+  const blocked = !busy && !gate.canSend;
   btn.textContent = busy ? "Stop" : "Send";
+  btn.disabled = blocked;
+  btn.title = blocked ? gate.reason : "";
   btn.classList.toggle("danger", busy);
   btn.classList.toggle("primary", !busy);
+  const hint = $("composer-gate-hint");
+  if (hint) {
+    if (blocked) {
+      hint.textContent = gate.reason;
+      hint.style.display = "block";
+    } else if (!busy) {
+      hint.textContent = "";
+      hint.style.display = "none";
+    }
+  }
 }
 async function cancelCurrentTurn() {
   try {

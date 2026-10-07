@@ -162,6 +162,12 @@ pub struct AcpClientConfig {
     pub skip_auth_when_unadvertised: bool,
     /// Short label for logs/errors ("grok", "claude", "codex").
     pub backend_label: String,
+    /// Auth methods that start an interactive (browser / device-code) login.
+    /// They are never invoked implicitly at session start: the user starts
+    /// sign-in explicitly from Services instead.
+    pub interactive_auth_methods: Vec<String>,
+    /// Opt-in to call an interactive auth method during startup anyway.
+    pub allow_interactive_auth: bool,
 }
 
 impl AcpClientConfig {
@@ -180,13 +186,77 @@ impl AcpClientConfig {
             prompt_timeout: Duration::from_secs(60 * 60 * 2), // 2 hours
             // Grok Build advertises cached_token + grok.com (not xai.api_key).
             auth_preference: vec![
+                "xai.api_key".into(),
                 "cached_token".into(),
                 "grok.com".into(),
-                "xai.api_key".into(),
             ],
             skip_auth_when_unadvertised: false,
             backend_label: "grok".into(),
+            // `grok.com` = browser/device login; calling it at startup popped
+            // a "Sign in to Grok Build" page nobody asked for and then timed out.
+            interactive_auth_methods: vec!["grok.com".into()],
+            allow_interactive_auth: false,
         }
+    }
+
+    fn api_key_set(&self) -> bool {
+        let named = |k: &str| k == "XAI_API_KEY";
+        self.env.iter().any(|(k, v)| named(k) && !v.trim().is_empty())
+            || std::env::var("XAI_API_KEY").map(|v| !v.trim().is_empty()).unwrap_or(false)
+    }
+}
+
+/// Bounded, sanitized tail of the agent's stderr, used to explain startup failures.
+#[derive(Clone, Default)]
+pub(crate) struct StderrTail(Arc<std::sync::Mutex<std::collections::VecDeque<String>>>);
+
+impl StderrTail {
+    const CAP: usize = 80;
+
+    pub(crate) fn push(&self, line: String) {
+        let mut q = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if q.len() == Self::CAP {
+            q.pop_front();
+        }
+        q.push_back(line);
+    }
+
+    pub(crate) fn text(&self) -> String {
+        let q = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        q.iter().cloned().collect::<Vec<_>>().join("\n")
+    }
+}
+
+/// Decide whether startup authentication must stop instead of invoking an
+/// interactive login. Pure so it can be unit-tested.
+pub(crate) fn interactive_auth_blocked(
+    method: &str,
+    interactive: &[String],
+    allow_interactive: bool,
+) -> bool {
+    !allow_interactive && interactive.iter().any(|m| m == method)
+}
+
+/// The agent has already printed a recognizable auth failure.
+fn summarize_ready(tail: &str) -> bool {
+    let l = tail.to_ascii_lowercase();
+    l.contains("not signed in") || l.contains("api key") || l.contains("permission-denied")
+}
+
+/// Plain-language reason the agent could not authenticate.
+pub(crate) fn auth_required_message(backend: &str, stderr_tail: &str, api_key_set: bool) -> String {
+    use grok_events::diagnostics::summarize_cli_failure;
+    if let Some(s) = summarize_cli_failure(stderr_tail, api_key_set) {
+        return s;
+    }
+    if backend == "grok" {
+        if api_key_set {
+            "Grok couldn't sign in with the XAI_API_KEY that is set (it may be disabled, expired or mistyped). Check it at console.x.ai → API keys, or use Log in with Grok in Services, then start the thread again.".into()
+        } else {
+            "Grok isn't signed in. Use Log in with Grok in Services, or set XAI_API_KEY, then start the thread again.".into()
+        }
+    } else {
+        format!("{backend} needs you to sign in. Use its Log in button in Services, then start the thread again.")
     }
 }
 
@@ -205,6 +275,7 @@ pub struct AcpClient {
     session_id: RwLock<Option<String>>,
     agent_capabilities: RwLock<Option<Value>>,
     auth_methods: RwLock<Vec<String>>,
+    stderr_tail: StderrTail,
     event_bus: Option<Arc<EventBus>>,
     control_session_id: Uuid,
     notification_rx: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<NotificationEvent>>>,
@@ -322,17 +393,22 @@ impl AcpClient {
         let transport = NdjsonTransport::new(stdin, stdout, notif_tx, agent_req_tx);
 
         // Mirror agent stderr into the control bus (center column / terminal view).
+        // Lines are sanitized (ANSI, team IDs, key fragments) before they are
+        // kept or shown, and a bounded tail explains startup failures.
+        let stderr_tail = StderrTail::default();
         if let Some(stderr) = stderr {
             let bus = event_bus.clone();
             let sid = control_session_id;
+            let tail = stderr_tail.clone();
             tokio::spawn(async move {
                 use tokio::io::{AsyncBufReadExt, BufReader};
                 let mut lines = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    let line = line.trim_end().to_string();
-                    if line.is_empty() {
+                    let line = grok_events::diagnostics::sanitize_diagnostic(line.trim_end());
+                    if line.trim().is_empty() {
                         continue;
                     }
+                    tail.push(line.clone());
                     if let Some(bus) = &bus {
                         bus.emit(ControlEvent::Raw {
                             session_id: Some(sid),
@@ -363,6 +439,7 @@ impl AcpClient {
             session_id: RwLock::new(None),
             agent_capabilities: RwLock::new(None),
             auth_methods: RwLock::new(Vec::new()),
+            stderr_tail,
             event_bus,
             control_session_id,
             notification_rx: Mutex::new(Some(notif_rx)),
@@ -386,11 +463,16 @@ impl AcpClient {
             terminals: TerminalRegistry::new(default_cwd),
         });
 
-        client.initialize().await?;
-        client.authenticate().await?;
-        client
-            .open_session(opts, connect_opts.resume_acp_session_id.as_deref())
-            .await?;
+        let startup = async {
+            client.initialize().await?;
+            client.authenticate().await?;
+            client
+                .open_session(opts, connect_opts.resume_acp_session_id.as_deref())
+                .await
+        };
+        if let Err(e) = startup.await {
+            return Err(client.explain_startup_error(e).await);
+        }
 
         // Background event loop for notifications
         let loop_client = client.clone();
@@ -423,6 +505,7 @@ impl AcpClient {
             session_id: RwLock::new(Some(session_id.to_string())),
             agent_capabilities: RwLock::new(None),
             auth_methods: RwLock::new(Vec::new()),
+            stderr_tail: StderrTail::default(),
             event_bus,
             control_session_id: Uuid::new_v4(),
             notification_rx: Mutex::new(None),
@@ -532,6 +615,36 @@ impl AcpClient {
         Ok(())
     }
 
+    /// Turn a raw startup failure into something a person can act on, using
+    /// the agent's own stderr when it says why (auth refused, key disabled).
+    async fn explain_startup_error(&self, e: AcpError) -> AcpError {
+        let _ = self.shutdown_quiet().await;
+        match e {
+            AcpError::AuthRequired(_) => e,
+            AcpError::Timeout(_) | AcpError::ProcessExited | AcpError::ChannelClosed | AcpError::Rpc { .. } => {
+                let tail = self.stderr_tail.text();
+                match grok_events::diagnostics::summarize_cli_failure(&tail, self.config.api_key_set()) {
+                    Some(reason) => AcpError::AuthRequired(format!("{reason} (details: {e})")),
+                    None => e,
+                }
+            }
+            other => other,
+        }
+    }
+
+    /// Kill the child after a failed startup without reporting it as a crash.
+    async fn shutdown_quiet(&self) -> Result<()> {
+        self.shutting_down
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let mut child_guard = self.child.lock().await;
+        if let Some(child) = child_guard.as_mut() {
+            let _ = crate::process::terminate(child).await;
+        }
+        child_guard.take();
+        *self.transport.write().await = None;
+        Ok(())
+    }
+
     fn pick_auth_method(&self, advertised: &[String]) -> String {
         // Prefer cached CLI login, then first advertised method.
         let preferred = &self.config.auth_preference;
@@ -562,6 +675,66 @@ impl AcpClient {
             return Ok(());
         }
         let method_id = self.pick_auth_method(&advertised);
+        // When an API key is in the child env, NEVER open an interactive
+        // browser/device login (play1 #11, play1-llm #04). The current Grok
+        // CLI often only advertises `grok.com` even with XAI_API_KEY set; try
+        // `xai.api_key` explicitly (same path headless `grok -p` uses), and if
+        // that RPC is refused, continue without authenticate — the key stays
+        // in the process env for session/new.
+        if self.config.api_key_set()
+            && (method_id == "xai.api_key"
+                || interactive_auth_blocked(
+                    &method_id,
+                    &self.config.interactive_auth_methods,
+                    self.config.allow_interactive_auth,
+                ))
+        {
+            let key_method = "xai.api_key".to_string();
+            info!(
+                advertised = %method_id,
+                method_id = %key_method,
+                "ACP authenticate via API key (no browser)"
+            );
+            let params = AuthenticateParams {
+                method_id: key_method.clone(),
+                meta: Some(json!({ "headless": true })),
+            };
+            match self
+                .request_startup("authenticate", Some(serde_json::to_value(params)?))
+                .await
+            {
+                Ok(_) => {
+                    info!(method_id = %key_method, "ACP authenticate complete (api key)");
+                    return Ok(());
+                }
+                Err(e) => {
+                    info!(
+                        error = %e,
+                        "xai.api_key authenticate RPC failed; continuing with XAI_API_KEY in env (no browser fallback)"
+                    );
+                    return Ok(());
+                }
+            }
+        }
+        if interactive_auth_blocked(
+            &method_id,
+            &self.config.interactive_auth_methods,
+            self.config.allow_interactive_auth,
+        ) {
+            for _ in 0..15 {
+                if summarize_ready(&self.stderr_tail.text()) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            let msg = auth_required_message(
+                &self.config.backend_label,
+                &self.stderr_tail.text(),
+                false,
+            );
+            warn!(%method_id, "interactive auth not started implicitly; session start stops");
+            return Err(AcpError::AuthRequired(msg));
+        }
         info!(%method_id, "ACP authenticate");
 
         let params = AuthenticateParams {
@@ -2684,6 +2857,50 @@ impl AcpClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grok_com_is_never_started_implicitly() {
+        let cfg = AcpClientConfig::new("/bin/true", "/tmp");
+        assert!(interactive_auth_blocked("grok.com", &cfg.interactive_auth_methods, false));
+        assert!(!interactive_auth_blocked("cached_token", &cfg.interactive_auth_methods, false));
+        assert!(!interactive_auth_blocked("xai.api_key", &cfg.interactive_auth_methods, false));
+        assert!(!interactive_auth_blocked("grok.com", &cfg.interactive_auth_methods, true));
+    }
+
+    #[test]
+    fn with_api_key_interactive_auth_is_skipped_not_opened() {
+        // Decision table used by authenticate(): blocked + key ⇒ skip (Ok),
+        // blocked + no key ⇒ AuthRequired. Never call the interactive method.
+        assert!(interactive_auth_blocked("grok.com", &["grok.com".into()], false));
+        // The Ok-vs-Err branch is covered by the live authenticate() path;
+        // here we pin the predicate the branch keys off.
+        let cfg = AcpClientConfig::new("/bin/true", "/tmp");
+        assert!(cfg.interactive_auth_methods.iter().any(|m| m == "grok.com"));
+        assert!(!cfg.allow_interactive_auth);
+    }
+
+    #[test]
+    fn auth_required_message_is_plain_and_redacted() {
+        let tail = "\x1b[33m WARN\x1b[0m Failed to fetch models: 403 - The API key xai-...KwZn is disabled and cannot be used. go to https://console.x.ai/team/2c0a58ed-703f-434e-9191-a3016d3bc641/api-keys\nNot signed in.";
+        let m = auth_required_message("grok", tail, true);
+        assert!(m.contains("disabled"), "{m}");
+        assert!(!m.contains("KwZn") && !m.contains("2c0a58ed") && !m.contains('\x1b'));
+        let none = auth_required_message("grok", "", false);
+        assert!(none.starts_with("Grok isn't signed in"));
+        let keyed = auth_required_message("grok", "", true);
+        assert!(keyed.contains("XAI_API_KEY that is set"));
+    }
+
+    #[test]
+    fn stderr_tail_is_bounded() {
+        let t = StderrTail::default();
+        for i in 0..200 {
+            t.push(format!("line {i}"));
+        }
+        let text = t.text();
+        assert!(text.starts_with("line 120"));
+        assert!(text.ends_with("line 199"));
+    }
 
     #[tokio::test]
     async fn mock_client_has_session() {

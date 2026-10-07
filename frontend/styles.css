@@ -1027,6 +1027,15 @@ body {
   min-width: 0;
 }
 .composer-meta > span { white-space: nowrap; }
+.composer-gate-hint {
+  margin: 0 0 6px; padding: 6px 8px; border-radius: 4px;
+  border: 1px solid color-mix(in srgb, var(--warn) 55%, var(--border));
+  background: color-mix(in srgb, var(--warn) 12%, var(--bg-elev));
+  color: var(--warn); font: 12px/1.4 var(--ui);
+}
+#btn-send:disabled {
+  opacity: 0.55; cursor: not-allowed;
+}
 .composer-row { display: flex; gap: 8px; align-items: flex-end; }
 .composer-row textarea {
   flex: 1; resize: none; min-height: 52px; max-height: 160px;

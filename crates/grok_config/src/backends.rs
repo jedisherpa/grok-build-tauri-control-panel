@@ -92,10 +92,10 @@ const GROK: BackendDescriptor = BackendDescriptor {
     binary_names: &["grok"],
     npx_packages: &[],
     env_passthrough: &["XAI_API_KEY"],
-    auth_preference: &["cached_token", "grok.com", "xai.api_key"],
+    auth_preference: &["xai.api_key", "cached_token", "grok.com"],
     skip_auth_when_unadvertised: false,
-    default_model: "grok-4",
-    model_catalog: &["grok-4", "grok-code-fast-1"],
+    default_model: "grok-4.5",
+    model_catalog: &["grok-4.6", "grok-4.5"],
     supports_headless: true,
 };
 

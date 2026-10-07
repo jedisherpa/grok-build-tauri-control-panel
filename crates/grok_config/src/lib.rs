@@ -81,7 +81,7 @@ pub struct GrokConfig {
 impl Default for GrokConfig {
     fn default() -> Self {
         Self {
-            default_model: "grok-4".to_string(),
+            default_model: "grok-4.5".to_string(),
             default_effort: "high".to_string(),
             default_backend: Backend::Grok,
             backends: HashMap::new(),
@@ -441,7 +441,7 @@ mod tests {
     fn old_config_without_backends_table_loads() {
         // Pre-multi-backend config.toml: no default_backend, no [backends].
         let raw = r#"
-default_model = "grok-4"
+default_model = "grok-4.5"
 default_effort = "high"
 max_concurrent_sessions = 10
 "#;

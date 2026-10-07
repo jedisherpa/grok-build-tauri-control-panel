@@ -1425,6 +1425,7 @@ name = "grok_events"
 version = "0.1.11"
 dependencies = [
  "chrono",
+ "regex",
  "serde",
  "serde_json",
  "thiserror 2.0.18",

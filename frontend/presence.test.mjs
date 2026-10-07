@@ -98,6 +98,19 @@ waiting = P.finishPrompt(waiting, "end_turn", 1300);
 assert(waiting.phase === "wait" && !P.closeCompletedSession(waiting), "turn ending does not erase pending permission");
 assert(P.finishPrompt(P.applySignal(P.emptyPresence(), "wait", {}, 1000), "max_tokens", 1100).phase === "wait", "truncation does not hide a pending permission");
 
+// Failed timer freezes (play1 #14 / #27)
+{
+  let f = P.emptyPresence();
+  const t0 = 1_000_000;
+  f = P.applySignal(f, "send", { promptChars: 5 }, t0);
+  f = P.applySignal(f, "error", { note: "failed" }, t0 + 5_000);
+  assert(f.phase === "error" && f.completedAt === t0 + 5_000, "error stamps completedAt");
+  const v1 = P.formatPresence(f, { now: t0 + 5_000 });
+  const v2 = P.formatPresence(f, { now: t0 + 65_000 });
+  assert(v1.elapsed === v2.elapsed, "Failed elapsed must not keep counting");
+  assert(v1.title === "Failed", "title Failed");
+}
+
 // Exercise the actual app handler with native state stores; no UI or provider.
 const appSource = readFileSync(join(__dirname, "app.js"), "utf8");
 const start = appSource.indexOf("function handleControlEvent(ev) {");
@@ -112,7 +125,7 @@ const native = {
   openToolsFor: () => open,
   endTurnPresence: (sid, phase, note) => { open.clear(); nativePresence.set(sid, P.applySignal(nativePresence.get(sid), phase, { note, toolsActive: 0 })); },
   noteTurn: (phase, patch, sid) => nativePresence.set(sid, P.applySignal(nativePresence.get(sid), phase, patch)),
-  endAgentStream() {}, clearBoomTimer() {}, appendTranscript() {}, pushEvent() {}, refreshSessions() {}, talkNote() {}, sweepToolsForSession() {},
+  endAgentStream() {}, clearBoomTimer() {}, appendTranscript() {}, pushEvent() {}, refreshSessions() {}, talkNote() {}, sweepToolsForSession() {}, renderTranscript() {}, updateSendButton() {},
   nowIso: () => new Date().toISOString(), shortId: sid => sid,
 };
 runInContext(handler, createContext(native));
@@ -133,3 +146,4 @@ nativePresence.set("a", P.finishPrompt(P.emptyPresence(), "end_turn", Date.now()
 native.handleControlEvent({ type: "error", session_id: "a", message: "later provider fault" });
 assert(nativePresence.get("a").phase === "error" && !P.normallyFinished(nativePresence.get("a")), "later provider error is never masked by completion");
 console.log("presence.test.mjs: all passed");
+

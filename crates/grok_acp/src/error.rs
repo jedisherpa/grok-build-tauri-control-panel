@@ -12,6 +12,10 @@ pub enum AcpError {
     Protocol(String),
     #[error("rpc error {code}: {message}")]
     Rpc { code: i64, message: String },
+    /// The agent needs a sign-in the user has not chosen to start (e.g. an
+    /// interactive browser login). The message is plain language for the UI.
+    #[error("{0}")]
+    AuthRequired(String),
     #[error("timeout: {0}")]
     Timeout(String),
     #[error("session not ready")]

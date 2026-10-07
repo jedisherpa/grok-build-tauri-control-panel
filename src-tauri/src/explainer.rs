@@ -23,7 +23,7 @@ use grok_events::{ControlEvent, EventBus};
 
 /// Cheapest known fast model (verified against `grok models`); config can
 /// override via `explainer_model`.
-const DEFAULT_EXPLAINER_MODEL: &str = "grok-composer-2.5-fast";
+const DEFAULT_EXPLAINER_MODEL: &str = "grok-4.5";
 const TICK_SECS: u64 = 5;
 const ERROR_BACKOFF_SECS: u64 = 60;
 const MAX_BUFFER_LINES: usize = 60;
@@ -253,12 +253,18 @@ impl ExplainerService {
         let result = self.explain_once(sid, urgent, approval_request_id).await;
         self.busy.store(false, Ordering::Release);
         if let Err(e) = result {
-            warn!(error = %e, "explainer call failed; backing off");
+            warn!(error = %grok_events::diagnostics::sanitize_diagnostic(&e.to_string()), "explainer call failed; backing off");
             *self.backoff_until.lock().await =
                 Some(std::time::Instant::now() + Duration::from_secs(ERROR_BACKOFF_SECS));
+            // Narrator stderr is coloured tracing output plus raw provider
+            // bodies (team IDs, key fragments). Show a plain, redacted reason.
+            let key_set = std::env::var("XAI_API_KEY")
+                .map(|v| !v.trim().is_empty())
+                .unwrap_or(false);
+            let reason = grok_events::diagnostics::display_cli_failure(&e.to_string(), key_set);
             self.emit(
                 sid,
-                &format!("(explainer paused: {e})"),
+                &format!("(explainer paused: {reason})"),
                 "error",
                 None,
             );

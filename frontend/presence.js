@@ -168,6 +168,10 @@
     if (phase === "wait" || phase === "error" || phase === "done" || phase === "idle") {
       if (p.phase !== phase) phaseChanged = true;
       p.phase = phase;
+      // Stamp an end time so the Failed/Done timer stops advancing.
+      if ((phase === "error" || phase === "done") && !p.completedAt) {
+        p.completedAt = now;
+      }
     } else if (stickyTools) {
       // stay on tools; patches already applied
     } else if (next >= cur || p.phase === "wait") {
@@ -352,7 +356,12 @@
     const active = turnActive(p);
     const show =
       active || p.phase === "done" || p.phase === "error" || p.sessionClosed;
-    const elapsed = p.startedAt ? formatElapsed(now - p.startedAt) : "";
+    // Freeze the clock once the turn has ended (error / done / closed).
+    // play1 showed "Failed 3m 12s" still ticking after the thread failed.
+    const endAt = p.completedAt || (["error", "done"].includes(p.phase) || p.sessionClosed ? p.lastSignalAt : null);
+    const elapsed = p.startedAt
+      ? formatElapsed((endAt || now) - p.startedAt)
+      : "";
     const quietMs = p.lastSignalAt ? now - p.lastSignalAt : 0;
     const mood = resolveMood(p, now);
     const showFlavor =
