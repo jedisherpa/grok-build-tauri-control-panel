@@ -53,7 +53,7 @@ for (const chars of [1, 800, 1000000]) {
   const view = P.formatPresence(active);
   assert(view.meterMode === 'indeterminate', 'reply activity is indeterminate');
   assert(view.meterProgress === null, 'no fabricated percentage');
-  assert(view.completionLabel.includes('unknown'), 'unknown completion is explicit');
+  assert(view.completionLabel.includes('Live activity') || view.completionLabel.includes('not a percent'), 'live activity copy is honest');
 }
 for (const phase of ['done','error','tools']) {
   const active = P.emptyPresence(); active.phase = phase;
@@ -65,7 +65,7 @@ let uncertain = P.markToolStart(P.emptyPresence(), "read", 1000);
 uncertain = P.idleStatus(uncertain, 1100);
 assert(uncertain.phase === "tools" && uncertain.toolsActive === 1, "Idle retains open tools");
 assert(!P.normallyFinished(uncertain), "Idle cannot supply a completion receipt");
-assert(P.formatPresence(uncertain, { now: 1200 }).title === "Completion unconfirmed", "missing boundary is visible");
+assert(P.formatPresence(uncertain, { now: 1200 }).title === "Idle · turn may still be open", "missing boundary is visible");
 let waiting = P.applySignal(P.emptyPresence(), "wait", { note: "approval pending" }, 1000);
 waiting = P.idleStatus(waiting, 1100);
 assert(waiting.phase === "wait" && waiting.note === "approval pending", "Idle retains pending approval phase");
@@ -154,5 +154,19 @@ assert(nativePresence.get("a").phase === "error" && !P.normallyFinished(nativePr
 nativePresence.set("a", P.finishPrompt(P.emptyPresence(), "end_turn", Date.now()));
 native.handleControlEvent({ type: "error", session_id: "a", message: "later provider fault" });
 assert(nativePresence.get("a").phase === "error" && !P.normallyFinished(nativePresence.get("a")), "later provider error is never masked by completion");
+
+// D-049: idle/done copy is clear — never "Task completion unknown".
+{
+  const done = P.finishPrompt(P.emptyPresence(), "end_turn", 1000);
+  const doneView = P.formatPresence(done, { now: 1100 });
+  assert(doneView.completionLabel.includes("Turn finished") || doneView.completionLabel.includes("ready"), "done label is clear");
+  assert(!/unknown/i.test(doneView.completionLabel), "done label avoids unknown");
+  const idle = P.emptyPresence();
+  assert(P.formatPresence(idle).completionLabel === "", "hidden idle has empty label");
+  const live = P.emptyPresence(); live.phase = "think"; live.startedAt = 1; live.lastSignalAt = 1;
+  const liveView = P.formatPresence(live, { now: 2 });
+  assert(!/Task completion unknown/i.test(liveView.completionLabel), "live label avoids Task completion unknown");
+}
+
 console.log("presence.test.mjs: all passed");
 

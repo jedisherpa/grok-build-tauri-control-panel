@@ -20,7 +20,7 @@
   function selectBuild(id) { B.selected = id; const index = B.builds.findIndex(w => w.id === id); if (index >= 0) B.graphPage = Math.floor(index / 24); renderList(); renderGraph(); renderDetail(); }
   function checkpointText(w) {
     const p = C.progress(w);
-    return p ? `${p.percent}% workflow checkpoints · ${p.completed}/${p.total} completed` : 'Workflow completion unknown';
+    return p ? `${p.percent}% workflow checkpoints · ${p.completed}/${p.total} completed` : 'No workflow checkpoints yet';
   }
   function renderGraph() {
     const viewport = $('collaboration-graph');
@@ -45,7 +45,7 @@
     if ($('edges-next')) $('edges-next').onclick = () => { B.edgePage++; renderGraph(); };
     $('collaboration-links').querySelectorAll('[data-graph-build]').forEach(button => button.onclick = () => selectBuild(button.dataset.graphBuild));
     const unlinked = B.sessions.filter(s => !C.sessionLink(B.builds, s.id));
-    $('collaboration-sessions').innerHTML = unlinked.length ? `<p class="builds-help">No recorded build links for these sessions. Completion unknown; shared names or folders do not establish collaboration.</p>${unlinked.map(s => `<button class="btn ghost builds-session" data-session="${esc(s.id)}">${esc(s.id.slice(0,8))} · ${esc(s.backend || s.mode || 'native')} · ${esc(s.status)} · completion unknown</button>`).join('')}` : '<p class="builds-help">No other live native sessions in this snapshot.</p>';
+    $('collaboration-sessions').innerHTML = unlinked.length ? `<p class="builds-help">No recorded build links for these sessions. Shared names or folders do not establish collaboration.</p>${unlinked.map(s => `<button class="btn ghost builds-session" data-session="${esc(s.id)}">${esc(s.id.slice(0,8))} · ${esc(s.backend || s.mode || 'native')} · ${esc(s.status)} · not linked to a build</button>`).join('')}` : '<p class="builds-help">No other live native sessions in this snapshot.</p>';
     $('collaboration-sessions').querySelectorAll('[data-session]').forEach(button => button.onclick = () => window.BombBuildsHost.openSession(button.dataset.session).catch(e => notice(String(e), true)));
   }
   function renderProgress(w) {
