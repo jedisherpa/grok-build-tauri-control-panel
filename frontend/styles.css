@@ -1602,3 +1602,44 @@ img.logo {
 .agent-card.selected { border-color: color-mix(in srgb, var(--accent, #6cf) 50%, transparent); background: var(--bg-soft); }
 .agent-list-footnote { font-size: 10px; color: var(--muted); margin: 6px 4px 0; line-height: 1.35; }
 .col-right .agent-list { max-height: 200px; overflow: auto; }
+
+/* play1 labels: page headings, empty CTA, stronger mode highlight, services scroll */
+.page-heading {
+  margin: 0 0 10px;
+  font: 22px/1.2 Georgia, "Times New Roman", serif;
+  color: var(--text);
+}
+.projects-empty-cta {
+  display: inline-flex;
+  margin: 8px 10px 4px;
+  width: calc(100% - 20px);
+  justify-content: center;
+}
+.mode-btn.active {
+  color: var(--bg);
+  background: color-mix(in srgb, var(--mint, #8be28b) 88%, #000);
+  border-color: color-mix(in srgb, var(--mint, #8be28b) 70%, #fff);
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--mint, #8be28b) 55%, transparent);
+  font-weight: 600;
+}
+.mode-btn.yolo.active {
+  background: color-mix(in srgb, var(--warn, #e8b86d) 85%, #000);
+  border-color: var(--warn, #e8b86d);
+  color: #1a1208;
+}
+.svc-row .svc-meta {
+  white-space: normal;
+  overflow-wrap: anywhere;
+  font-size: 11px;
+  line-height: 1.35;
+}
+.spatial-panel-cube[data-cube="services"] .spatial-panel-cube-body {
+  overflow: auto;
+}
+.thread-row .thread-label,
+.project-group-label {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 100%;
+}
