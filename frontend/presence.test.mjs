@@ -133,7 +133,7 @@ const native = {
   openToolsFor: () => open,
   endTurnPresence: (sid, phase, note) => { open.clear(); nativePresence.set(sid, P.applySignal(nativePresence.get(sid), phase, { note, toolsActive: 0 })); },
   noteTurn: (phase, patch, sid) => nativePresence.set(sid, P.applySignal(nativePresence.get(sid), phase, patch)),
-  endAgentStream() {}, clearBoomTimer() {}, appendTranscript() {}, pushEvent() {}, refreshSessions() {}, talkNote() {}, sweepToolsForSession() {}, renderTranscript() {}, updateSendButton() {},
+  endAgentStream() {}, clearBoomTimer() {}, appendTranscript() {}, pushEvent() {}, refreshSessions() {}, talkNote() {}, sweepToolsForSession() {}, renderTranscript() {}, updateSendButton() {}, pushFinalExplainFromReply() {}, explainListFor: () => [], renderExplainFeed() {},
   userStartedTurn: (p) => !!(p && (p.promptChars || p.stagesSeen?.send || p.toolCount || (p.toolsActive || 0) > 0 || p.phase === "wait" || p.phase === "reply")),
   nowIso: () => new Date().toISOString(), shortId: sid => sid,
 };
