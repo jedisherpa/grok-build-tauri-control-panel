@@ -32,14 +32,14 @@ For a universal app, declare both `--architecture arm64 --architecture x86_64`. 
 
 ## Developer ID candidate
 
-First resolve all required stories and failures, commit the qualified source, and select the distribution architectures. Check `security find-identity -v -p codesigning` locally. Outside-App-Store distribution needs a valid **Developer ID Application** identity, not an Apple Development or ad-hoc identity. This Mac initially had zero valid identities, so no signed release was available at qualification start.
+First resolve all required stories and failures, commit the qualified source, and select the distribution architectures. Check `security find-identity -v -p codesigning` locally. Outside-App-Store distribution needs a valid **Developer ID Application** identity, not an Apple Development or ad-hoc identity. The initial sandboxed query falsely suggested missing identities. A 2026-10-07 check outside the sandbox found the existing `Developer ID Application: Paul Cooper (X8BVJAF8W5)` identity, valid through 2031-03-15. A disposable executable signed with hardened runtime and a secure timestamp passed strict signature verification. Recheck the identity at release time; do not import another certificate merely because a sandboxed query returns zero.
 
-Build with the selected identity and hardened runtime, with notarization credentials absent so build and submission remain separate reviewed steps. Example for Apple Silicon, after identity setup:
+Build with the selected identity and hardened runtime, with notarization credentials absent so build and submission remain separate reviewed steps. Example for Apple Silicon using the existing identity:
 
 ```sh
 env -u APPLE_ID -u APPLE_PASSWORD -u APPLE_TEAM_ID \
   -u APPLE_API_KEY -u APPLE_API_KEY_PATH -u APPLE_API_ISSUER \
-  APPLE_SIGNING_IDENTITY='Developer ID Application: YOUR NAME (TEAMID)' \
+  APPLE_SIGNING_IDENTITY='Developer ID Application: Paul Cooper (X8BVJAF8W5)' \
   cargo tauri build --target aarch64-apple-darwin --bundles app \
   --config '{"bundle":{"macOS":{"hardenedRuntime":true}}}' -- --locked
 ```
@@ -48,7 +48,7 @@ Preserve the build log, compiler/Xcode/Tauri versions, target, lockfile digest a
 
 ## Notarization, stapling and final download
 
-Only submit after the signed candidate's required stories pass. Create a keychain profile interactively with `xcrun notarytool store-credentials 'c3-notary'`. The tool prompts for credentials, and its default validation contacts Apple; do this only when that account setup is intended. Never put passwords or exported private keys in Git, scripts, command-line history or QA output.
+Only submit after the signed candidate's required stories pass. Reuse the existing iCloud Keychain profile `fisheye-research-feed-notary`: its read-only history query authenticated successfully on 2026-10-07 and returned 100 accepted submissions. The older `prismai-notary` profile returned HTTP 401 and must not be selected without a separately authorized credential refresh. Recheck authentication at release time with `xcrun notarytool history --keychain-profile 'fisheye-research-feed-notary' --output-format json`. No new profile is needed for this release. Never put passwords or exported private keys in Git, scripts, command-line history or QA output.
 
 Create a new private distribution directory, ZIP the signed app with Apple's `ditto` method, and submit that archive:
 
@@ -56,7 +56,7 @@ Create a new private distribution directory, ZIP the signed app with Apple's `di
 mkdir '/absolute/new-distribution'
 ditto -c -k --keepParent '/absolute/Bomb Code.app' '/absolute/new-distribution/submission.zip'
 xcrun notarytool submit '/absolute/new-distribution/submission.zip' \
-  --keychain-profile 'c3-notary' --wait --output-format json
+  --keychain-profile 'fisheye-research-feed-notary' --wait --output-format json
 ```
 
 Preserve the submitted ZIP digest and returned submission ID/status. Require **Accepted**, retrieve and review `notarytool log` even on success, and retain warnings. Notarization alone does not qualify production. Staple the ticket to the app, validate it, and run distribution preflight:
