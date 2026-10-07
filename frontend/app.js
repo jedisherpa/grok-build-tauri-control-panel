@@ -1593,36 +1593,68 @@ async function deleteThread(id) {
 
 function renderAgents() {
   const root = $("agent-list");
+  const countEl = $("agents-count");
   const live = state.sessions.filter((s) => s.live !== false && !String(s.status || "").includes("saved"));
+  const saved = state.sessions.filter((s) => s.live === false || String(s.status || "").includes("saved"));
+  if (countEl) {
+    countEl.textContent = live.length
+      ? `${live.length} live${saved.length ? ` · ${saved.length} saved` : ""}`
+      : saved.length
+        ? `${saved.length} saved in Threads`
+        : "";
+  }
   if (!live.length) {
-    root.innerHTML = `<div class="empty-hint">No live agents · saved threads stay in Threads</div>`;
+    root.innerHTML = `<div class="empty-hint">No live ACP processes right now. ${
+      saved.length
+        ? `${saved.length} saved thread${saved.length === 1 ? "" : "s"} stay under Projects &amp; threads and resume on send.`
+        : "Start a thread or submit a reviewed build to attach agents."
+    } Backend can run several live sessions at once (for example Builds plan/implement/audit roles); this panel lists every live process, not a fake multi-list.</div>`;
+    updateBombChrome();
     return;
   }
-  root.innerHTML = live
-    .map((s) => {
-      const status = String(s.status || "?").toLowerCase();
-      const badgeCls = status.includes("run")
-        ? "running"
-        : status.includes("fail") || status.includes("cancel")
-          ? "failed"
-          : "idle";
-      const bombMood = moodFromStatus(status);
-      const runCls = status.includes("run") ? "running" : "";
-      const workflow = window.BombBuilds?.sessionSummary(s.id);
-      return `<div class="agent-card ${runCls}">
-  <div class="name">${bombHtml(bombMood, "sm")}${escapeHtml(String(s.mode || "acp").toUpperCase())} · ${escapeHtml(shortId(s.id))}</div>
+  root.innerHTML =
+    live
+      .map((s) => {
+        const status = String(s.status || "?").toLowerCase();
+        const badgeCls = status.includes("run")
+          ? "running"
+          : status.includes("fail") || status.includes("cancel")
+            ? "failed"
+            : "idle";
+        const bombMood = moodFromStatus(status);
+        const runCls = status.includes("run") ? "running" : "";
+        const selected = s.id === state.selectedSession ? "selected" : "";
+        const workflow = window.BombBuilds?.sessionSummary(s.id);
+        const title = s.label
+          ? escapeHtml(s.label)
+          : `${escapeHtml(String(s.mode || "acp").toUpperCase())} · ${escapeHtml(shortId(s.id))}`;
+        return `<button type="button" class="agent-card ${runCls} ${selected}" data-session="${escapeHtml(s.id)}" aria-pressed="${s.id === state.selectedSession}" title="Open this live session">
+  <div class="name">${bombHtml(bombMood, "sm")}${title}</div>
   <div class="meta"><span class="badge ${badgeCls}">${bombHtml(bombMood, "xs")}${escapeHtml(status)}</span>
-  <span class="muted">${escapeHtml(s.model || "")}</span></div>
+  <span class="muted">${escapeHtml(s.model || "")}</span>
+  <span class="muted">${escapeHtml(shortId(s.id))}</span></div>
   <div class="path">${escapeHtml(s.cwd || "")}</div>
-  <div class="path">${workflow ? `${escapeHtml(workflow.role)} · build ${escapeHtml(shortId(workflow.id))} · ${escapeHtml(workflow.text)}${workflow.fresh ? '' : ' · last known snapshot'}` : 'Task completion unknown · no recorded build link'}</div>
+  <div class="path">${workflow ? `${escapeHtml(workflow.role)} · build ${escapeHtml(shortId(workflow.id))} · ${escapeHtml(workflow.text)}${workflow.fresh ? "" : " · last known snapshot"}` : "Task completion unknown · no recorded build link"}</div>
   ${
     s.mcpServers?.length || s.mcp_servers?.length
       ? `<div class="path">mcp: ${escapeHtml((s.mcpServers || s.mcp_servers || []).join(", "))}</div>`
       : ""
   }
-</div>`;
-    })
-    .join("");
+</button>`;
+      })
+      .join("") +
+    `<p class="agent-list-footnote">${
+      live.length === 1
+        ? `Showing the one live ACP process. ${saved.length ? `${saved.length} saved thread${saved.length === 1 ? "" : "s"} remain in Projects & threads. ` : ""}More cards appear here when additional sessions are live (Builds roles or extra started threads).`
+        : `Showing ${live.length} live ACP processes. Click a card to open that session. Saved threads stay in Projects & threads.`
+    }</p>`;
+  root.querySelectorAll("[data-session]").forEach((button) => {
+    button.onclick = () => {
+      const id = button.dataset.session;
+      if (!id) return;
+      window.BombBuildsHost?.openSession?.(id).catch((e) => toastError(e));
+    };
+  });
   updateBombChrome();
 }
 

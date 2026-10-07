@@ -82,6 +82,39 @@ impl From<Workflow> for BuildDto {
         }
     }
 }
+
+#[derive(Clone, Serialize)]
+pub struct BuildPreviewRole {
+    pub role: String,
+    pub backend: String,
+    pub model: Option<String>,
+}
+#[derive(Clone, Serialize)]
+pub struct BuildPreviewDependency {
+    pub id: String,
+    pub objective: String,
+    pub status: String,
+    pub accepted: bool,
+}
+/// Validation-only preview. Never persists a build or starts native agents.
+#[derive(Clone, Serialize)]
+pub struct BuildPreviewDto {
+    pub dry_run: bool,
+    pub would_persist: bool,
+    pub would_spawn_agents: bool,
+    pub project_root: String,
+    pub repository: String,
+    pub head_commit: String,
+    pub write_set: Vec<String>,
+    pub objective: String,
+    pub max_repairs: u8,
+    pub roles: Vec<BuildPreviewRole>,
+    pub dependencies: Vec<BuildPreviewDependency>,
+    pub predicted_queue_state: QueueState,
+    pub concurrency_limit: usize,
+    pub clean_working_tree: bool,
+    pub notes: Vec<String>,
+}
 pub struct BuildService {
     records: Mutex<BTreeMap<String, BuildRecord>>,
     concurrency: Mutex<usize>,
@@ -290,6 +323,172 @@ impl BuildService {
             .set_kv(STORAGE, &serde_json::to_string(&candidate)?)?;
         *guard = candidate;
         Ok(out)
+    }
+
+    /// Same checks as create, but does not store a build or call dispatch.
+    pub async fn preview(
+        self: &Arc<Self>,
+        mut spec: WorkflowSpec,
+        dependencies: Vec<String>,
+    ) -> Result<BuildPreviewDto> {
+        spec.validate()?;
+        for role in [
+            Role::Planner,
+            Role::Implementer,
+            Role::Auditor,
+            Role::Verifier,
+        ] {
+            if Backend::from_key(&spec.roles.get(role).backend).is_none() {
+                bail!("unknown native backend");
+            }
+        }
+        let root = tokio::fs::canonicalize(&spec.project_root).await?;
+        let top = git(&root, &["rev-parse", "--show-toplevel"]).await?;
+        if root != tokio::fs::canonicalize(String::from_utf8(top)?.trim()).await? {
+            bail!("select the repository root");
+        }
+        let dirty = !git(&root, &["status", "--porcelain"]).await?.is_empty();
+        if dirty {
+            bail!("project has uncommitted changes; commit or choose a clean checkout first");
+        }
+        spec.project_root = root.to_string_lossy().into_owned();
+        spec.write_set = spec
+            .write_set
+            .iter()
+            .map(|p| normalize_write_path(p))
+            .collect::<std::result::Result<_, _>>()?;
+        for p in &spec.write_set {
+            ensure_inside(&root, p)?;
+        }
+        if dependencies.len() > 64 {
+            bail!("at most 64 prerequisites per task");
+        }
+        let repository = canonical_git_identity(&root)
+            .await?
+            .to_string_lossy()
+            .into_owned();
+        let head_commit = String::from_utf8(git(&root, &["rev-parse", "HEAD"]).await?)?
+            .trim()
+            .to_string();
+        // Read concurrency before records so we never nest locks.
+        let limit = *self.concurrency.lock().await;
+        let guard = self.records.lock().await;
+        let mut candidate = guard.clone();
+        // Probe graph/queue with a temporary id that is never persisted.
+        let probe_id = format!("preview-{}", Uuid::new_v4());
+        let order = candidate.values().map(|r| r.order).max().unwrap_or(0) + 1;
+        let workflow = Workflow::new(spec.clone())?;
+        let mut probe = workflow.clone();
+        probe.id = probe_id.clone();
+        for dep in &dependencies {
+            if !candidate.contains_key(dep) {
+                bail!("unknown prerequisite build: {dep}");
+            }
+        }
+        candidate.insert(
+            probe_id.clone(),
+            BuildRecord {
+                workflow: probe,
+                checkout_fingerprint: None,
+                dependencies: dependencies.clone(),
+                repository: repository.clone(),
+                reserved: false,
+                order,
+                submitted_commit: Some(head_commit.clone()),
+                cleanup_pending: false,
+                cleanup_session: None,
+            },
+        );
+        validate_graph(&coordination_tasks(&candidate))?;
+        let predicted = queue_state(&probe_id, &coordination_tasks(&candidate), limit)?;
+        let dep_rows: Vec<BuildPreviewDependency> = dependencies
+            .iter()
+            .map(|id| {
+                let row = candidate.get(id);
+                BuildPreviewDependency {
+                    id: id.clone(),
+                    objective: row
+                        .map(|r| r.workflow.spec.objective.clone())
+                        .unwrap_or_else(|| "Unavailable prerequisite".into()),
+                    status: row
+                        .map(|r| {
+                            serde_json::to_value(r.workflow.status)
+                                .ok()
+                                .and_then(|v| v.as_str().map(str::to_string))
+                                .unwrap_or_else(|| format!("{:?}", r.workflow.status))
+                        })
+                        .unwrap_or_else(|| "missing".into()),
+                    accepted: row.is_some_and(|r| r.workflow.status == WorkflowStatus::Accepted),
+                }
+            })
+            .collect();
+        drop(guard);
+        let roles = [
+            Role::Planner,
+            Role::Implementer,
+            Role::Auditor,
+            Role::Verifier,
+        ]
+        .into_iter()
+        .map(|role| {
+            let route = workflow.spec.roles.get(role);
+            BuildPreviewRole {
+                role: format!("{role:?}").to_lowercase(),
+                backend: route.backend.clone(),
+                model: route.model.clone(),
+            }
+        })
+        .collect();
+        let mut notes = vec![
+            "Dry run only: nothing was saved and no native agents were started.".into(),
+            "Submit reviewed build still requires a clean Git checkout and your later plan approval.".into(),
+        ];
+        if !dep_rows.is_empty() {
+            notes.push(
+                "Prerequisites must be accepted by you before this build can leave the waiting queue."
+                    .into(),
+            );
+        }
+        match predicted {
+            QueueState::Queued => notes.push(
+                "With the current snapshot this build would be eligible to reserve a slot when submitted."
+                    .into(),
+            ),
+            QueueState::WaitingDependencies => notes.push(
+                "Predicted queue: waiting until every selected prerequisite is accepted."
+                    .into(),
+            ),
+            QueueState::BlockedDependencies => notes.push(
+                "Predicted queue: blocked because a prerequisite ended unsuccessfully."
+                    .into(),
+            ),
+            QueueState::WaitingScope => notes.push(
+                "Predicted queue: waiting because another build holds overlapping write paths."
+                    .into(),
+            ),
+            QueueState::WaitingSlot => notes.push(
+                "Predicted queue: waiting for a free concurrency slot."
+                    .into(),
+            ),
+            other => notes.push(format!("Predicted queue state: {other:?}.")),
+        }
+        Ok(BuildPreviewDto {
+            dry_run: true,
+            would_persist: false,
+            would_spawn_agents: false,
+            project_root: workflow.spec.project_root.clone(),
+            repository,
+            head_commit,
+            write_set: workflow.spec.write_set.clone(),
+            objective: workflow.spec.objective.clone(),
+            max_repairs: workflow.spec.max_repairs,
+            roles,
+            dependencies: dep_rows,
+            predicted_queue_state: predicted,
+            concurrency_limit: limit,
+            clean_working_tree: true,
+            notes,
+        })
     }
     pub async fn create(
         self: &Arc<Self>,
@@ -1158,6 +1357,19 @@ pub async fn create_build(
     state
         .builds
         .create(spec, dependencies.unwrap_or_default())
+        .await
+        .map_err(|e| format!("{e:#}"))
+}
+
+#[tauri::command]
+pub async fn preview_build(
+    state: tauri::State<'_, crate::state::AppState>,
+    spec: WorkflowSpec,
+    dependencies: Option<Vec<String>>,
+) -> Result<BuildPreviewDto, String> {
+    state
+        .builds
+        .preview(spec, dependencies.unwrap_or_default())
         .await
         .map_err(|e| format!("{e:#}"))
 }

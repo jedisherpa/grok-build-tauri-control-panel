@@ -1582,3 +1582,23 @@ img.logo {
 .has-panel-cubes #composer.composer {
   z-index: 20;
 }
+
+/* Builds dry-run preview */
+.builds-preview-panel {
+  margin-top: 8px;
+  padding: 10px 12px;
+  border: 1px solid color-mix(in srgb, var(--accent, #6cf) 35%, transparent);
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--bg-soft, #12161c) 90%, transparent);
+  font-size: 12px;
+  line-height: 1.45;
+}
+.builds-preview-panel h3 { margin: 0 0 6px; font-size: 12px; }
+.builds-preview-panel ul { margin: 6px 0 0; padding-left: 18px; }
+.builds-preview-panel .builds-preview-meta { display: grid; gap: 2px; margin: 6px 0; }
+.builds-preview-panel[hidden] { display: none !important; }
+.builds-submit { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+.agent-card { cursor: pointer; text-align: left; width: 100%; border: 1px solid transparent; background: transparent; color: inherit; font: inherit; }
+.agent-card.selected { border-color: color-mix(in srgb, var(--accent, #6cf) 50%, transparent); background: var(--bg-soft); }
+.agent-list-footnote { font-size: 10px; color: var(--muted); margin: 6px 4px 0; line-height: 1.35; }
+.col-right .agent-list { max-height: 200px; overflow: auto; }
