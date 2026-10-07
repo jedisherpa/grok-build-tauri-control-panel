@@ -199,12 +199,27 @@ impl WorktreeManager {
 
     /// Stage and commit everything in `path`. Returns false when there was
     /// nothing to commit.
+    ///
+    /// Uses one-shot `-c user.*` so Land/Sync work when the machine has no
+    /// global git identity (common on headless prove boxes — D-050).
     pub async fn commit_all(&self, path: &Path, message: &str) -> Result<bool> {
         run_git(path, &["add", "-A"]).await?;
         if self.is_clean(path).await? {
             return Ok(false);
         }
-        run_git(path, &["commit", "-m", message]).await?;
+        run_git(
+            path,
+            &[
+                "-c",
+                "user.email=bomb-code@local",
+                "-c",
+                "user.name=Bomb Code",
+                "commit",
+                "-m",
+                message,
+            ],
+        )
+        .await?;
         Ok(true)
     }
 
@@ -233,7 +248,22 @@ impl WorktreeManager {
     /// On conflict the merge is left IN PROGRESS (caller decides whether to
     /// abort — land aborts, sync leaves it for the agent to resolve).
     pub async fn merge(&self, path: &Path, reference: &str, message: &str) -> Result<MergeOutcome> {
-        match run_git(path, &["merge", "--no-ff", reference, "-m", message]).await {
+        match run_git(
+            path,
+            &[
+                "-c",
+                "user.email=bomb-code@local",
+                "-c",
+                "user.name=Bomb Code",
+                "merge",
+                "--no-ff",
+                reference,
+                "-m",
+                message,
+            ],
+        )
+        .await
+        {
             Ok(_) => Ok(MergeOutcome::Merged),
             Err(WorktreeError::Git(err)) => {
                 let files = run_git(path, &["diff", "--name-only", "--diff-filter=U"])
@@ -522,6 +552,18 @@ locked
         std::fs::write(repo.join("b.txt"), "two\n").unwrap();
         assert!(!mgr.is_clean(&repo).await.unwrap());
         assert!(mgr.commit_all(&repo, "add b").await.unwrap());
+        assert!(mgr.is_clean(&repo).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn commit_all_without_repo_identity() {
+        let (dir, repo) = temp_repo().await;
+        let mgr = test_manager(dir.path());
+        // Strip identity that temp_repo set — Land must still commit.
+        run_git(&repo, &["config", "--unset", "user.email"]).await.ok();
+        run_git(&repo, &["config", "--unset", "user.name"]).await.ok();
+        std::fs::write(repo.join("c.txt"), "c\n").unwrap();
+        assert!(mgr.commit_all(&repo, "land commit").await.unwrap());
         assert!(mgr.is_clean(&repo).await.unwrap());
     }
 
