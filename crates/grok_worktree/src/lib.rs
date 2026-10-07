@@ -199,18 +199,41 @@ impl WorktreeManager {
 
     /// Stage and commit everything in `path`. Returns false when there was
     /// nothing to commit.
+    ///
+    /// Uses one-shot `-c user.*` so Land/Sync work when the machine has no
+    /// global git identity (common on headless prove boxes — D-050).
     pub async fn commit_all(&self, path: &Path, message: &str) -> Result<bool> {
         run_git(path, &["add", "-A"]).await?;
         if self.is_clean(path).await? {
             return Ok(false);
         }
-        run_git(path, &["commit", "-m", message]).await?;
+        run_git(
+            path,
+            &[
+                "-c",
+                "user.email=bomb-code@local",
+                "-c",
+                "user.name=Bomb Code",
+                "commit",
+                "-m",
+                message,
+            ],
+        )
+        .await?;
         Ok(true)
     }
 
     /// True when the working tree has no staged or unstaged changes.
     pub async fn is_clean(&self, path: &Path) -> Result<bool> {
         let out = run_git(path, &["status", "--porcelain"]).await?;
+        Ok(out.trim().is_empty())
+    }
+
+    /// True when there are no modifications to **tracked** files (staged or
+    /// unstaged). Untracked paths are ignored — leftover agent deliverables in
+    /// the project folder (D-050) must not block Land merges.
+    pub async fn is_tracked_clean(&self, path: &Path) -> Result<bool> {
+        let out = run_git(path, &["status", "--porcelain", "-uno"]).await?;
         Ok(out.trim().is_empty())
     }
 
@@ -225,7 +248,22 @@ impl WorktreeManager {
     /// On conflict the merge is left IN PROGRESS (caller decides whether to
     /// abort — land aborts, sync leaves it for the agent to resolve).
     pub async fn merge(&self, path: &Path, reference: &str, message: &str) -> Result<MergeOutcome> {
-        match run_git(path, &["merge", "--no-ff", reference, "-m", message]).await {
+        match run_git(
+            path,
+            &[
+                "-c",
+                "user.email=bomb-code@local",
+                "-c",
+                "user.name=Bomb Code",
+                "merge",
+                "--no-ff",
+                reference,
+                "-m",
+                message,
+            ],
+        )
+        .await
+        {
             Ok(_) => Ok(MergeOutcome::Merged),
             Err(WorktreeError::Git(err)) => {
                 let files = run_git(path, &["diff", "--name-only", "--diff-filter=U"])
@@ -255,12 +293,88 @@ impl WorktreeManager {
         run_git(worktree_path, &["status", "--short"]).await
     }
 
-    /// Produce a full diff for the worktree.
+    /// Produce a full diff for the worktree, including untracked files.
+    ///
+    /// `git diff` / `git diff --cached` omit untracked paths (feature-deep2:
+    /// portal-spark.html was invisible). Append an untracked section from
+    /// `git status --short` plus a content preview for modest text files.
     pub async fn diff(&self, worktree_path: &Path) -> Result<String> {
-        let staged = run_git(worktree_path, &["diff", "--cached"]).await.unwrap_or_default();
+        let staged = run_git(worktree_path, &["diff", "--cached"])
+            .await
+            .unwrap_or_default();
         let unstaged = run_git(worktree_path, &["diff"]).await.unwrap_or_default();
-        Ok(format!("{staged}\n{unstaged}"))
+        let untracked = untracked_diff_section(worktree_path).await;
+        let mut parts = Vec::new();
+        if !staged.trim().is_empty() {
+            parts.push(staged);
+        }
+        if !unstaged.trim().is_empty() {
+            parts.push(unstaged);
+        }
+        if !untracked.trim().is_empty() {
+            parts.push(untracked);
+        }
+        Ok(parts.join("\n"))
     }
+}
+
+/// List untracked paths (status `??`) with a small content preview when safe.
+async fn untracked_diff_section(worktree_path: &Path) -> String {
+    let status = match run_git(
+        worktree_path,
+        &["status", "--short", "--untracked-files=all"],
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(_) => return String::new(),
+    };
+    let mut paths: Vec<String> = Vec::new();
+    for line in status.lines() {
+        let line = line.trim_end();
+        if let Some(path) = line.strip_prefix("?? ") {
+            let path = path.trim();
+            if path.is_empty() {
+                continue;
+            }
+            paths.push(path.to_string());
+        }
+    }
+    if paths.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("Untracked files:\n");
+    for path in paths {
+        if path.ends_with('/') {
+            out.push_str(&format!("  ?? {path}  (untracked directory)\n"));
+            continue;
+        }
+        let full = worktree_path.join(&path);
+        out.push_str(&format!("diff --git a/{path} b/{path}\n"));
+        out.push_str("new file mode 100644\n");
+        out.push_str(&format!("--- /dev/null\n+++ b/{path}\n"));
+        match tokio::fs::read(&full).await {
+            Ok(bytes) if bytes.len() <= 64 * 1024 && std::str::from_utf8(&bytes).is_ok() => {
+                let text = String::from_utf8_lossy(&bytes);
+                for line in text.lines() {
+                    out.push_str(&format!("+{line}\n"));
+                }
+                if !text.is_empty() && !text.ends_with('\n') {
+                    out.push('\n');
+                }
+            }
+            Ok(bytes) => {
+                out.push_str(&format!(
+                    "+[untracked binary or large file: {} bytes]\n",
+                    bytes.len()
+                ));
+            }
+            Err(e) => {
+                out.push_str(&format!("+[could not read: {e}]\n"));
+            }
+        }
+    }
+    out
 }
 
 fn validate_name(name: &str) -> Result<()> {
@@ -439,6 +553,33 @@ locked
         assert!(!mgr.is_clean(&repo).await.unwrap());
         assert!(mgr.commit_all(&repo, "add b").await.unwrap());
         assert!(mgr.is_clean(&repo).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn commit_all_without_repo_identity() {
+        let (dir, repo) = temp_repo().await;
+        let mgr = test_manager(dir.path());
+        // Strip identity that temp_repo set — Land must still commit.
+        run_git(&repo, &["config", "--unset", "user.email"]).await.ok();
+        run_git(&repo, &["config", "--unset", "user.name"]).await.ok();
+        std::fs::write(repo.join("c.txt"), "c\n").unwrap();
+        assert!(mgr.commit_all(&repo, "land commit").await.unwrap());
+        assert!(mgr.is_clean(&repo).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn tracked_clean_ignores_untracked() {
+        let (dir, repo) = temp_repo().await;
+        let mgr = test_manager(dir.path());
+        assert!(mgr.is_tracked_clean(&repo).await.unwrap());
+        std::fs::write(repo.join("untracked.txt"), "x\n").unwrap();
+        assert!(!mgr.is_clean(&repo).await.unwrap(), "untracked dirties is_clean");
+        assert!(
+            mgr.is_tracked_clean(&repo).await.unwrap(),
+            "untracked must not block Land"
+        );
+        std::fs::write(repo.join("a.txt"), "b\n").unwrap();
+        assert!(!mgr.is_tracked_clean(&repo).await.unwrap());
     }
 
     #[tokio::test]

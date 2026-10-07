@@ -168,6 +168,10 @@
     if (phase === "wait" || phase === "error" || phase === "done" || phase === "idle") {
       if (p.phase !== phase) phaseChanged = true;
       p.phase = phase;
+      // Stamp an end time so the Failed/Done timer stops advancing.
+      if ((phase === "error" || phase === "done") && !p.completedAt) {
+        p.completedAt = now;
+      }
     } else if (stickyTools) {
       // stay on tools; patches already applied
     } else if (next >= cur || p.phase === "wait") {
@@ -216,8 +220,19 @@
 
   function idleStatus(p, now = Date.now()) {
     if (normallyFinished(p) || !turnActive(p) || p.phase === "wait") return p;
+    // No user prompt yet → never invent a "Completion unconfirmed" ghost turn.
+    const userSent = !!(
+      p.promptChars ||
+      (p.stagesSeen && p.stagesSeen.send) ||
+      p.toolCount ||
+      (p.toolsActive || 0) > 0 ||
+      p.phase === "reply"
+    );
+    if (!userSent) {
+      return emptyPresence();
+    }
     p.completionUnconfirmed = true;
-    p.note = "Session idle · response completion unconfirmed";
+    p.note = "Session idle · no clear finish signal yet";
     p.lastSignalAt = now;
     return p;
   }
@@ -341,6 +356,19 @@
     return "indeterminate";
   }
 
+
+  /** Honest meter subtitle: never claim a Builds-style %; prefer idle/done copy. */
+  function completionLabelFor(p, show) {
+    if (!show) return "";
+    if (p.phase === "done" || p.sessionClosed) return "Turn finished · ready for next message";
+    if (p.phase === "error") return "Turn failed · see What's happening";
+    if (p.phase === "wait") return "Waiting for your approval";
+    if (p.completionUnconfirmed) return "Idle · no clear finish signal yet";
+    if (p.phase === "idle") return "Ready";
+    // Live activity meter is not a workflow percent (Builds has its own checkpoints).
+    return "Live activity · not a percent complete";
+  }
+
   /**
    * Single formatter all surfaces use.
    */
@@ -352,7 +380,12 @@
     const active = turnActive(p);
     const show =
       active || p.phase === "done" || p.phase === "error" || p.sessionClosed;
-    const elapsed = p.startedAt ? formatElapsed(now - p.startedAt) : "";
+    // Freeze the clock once the turn has ended (error / done / closed).
+    // play1 showed "Failed 3m 12s" still ticking after the thread failed.
+    const endAt = p.completedAt || (["error", "done"].includes(p.phase) || p.sessionClosed ? p.lastSignalAt : null);
+    const elapsed = p.startedAt
+      ? formatElapsed((endAt || now) - p.startedAt)
+      : "";
     const quietMs = p.lastSignalAt ? now - p.lastSignalAt : 0;
     const mood = resolveMood(p, now);
     const showFlavor =
@@ -366,7 +399,7 @@
     if (stall === "awaiting_user") title = "Needs you";
     else if (p.phase === "error") title = "Failed";
     else if (p.sessionClosed) title = "Turn ended · session closed";
-    else if (p.completionUnconfirmed) title = "Completion unconfirmed";
+    else if (p.completionUnconfirmed) title = "Idle · turn may still be open";
     else if (stall === "tool_hang") title = "Quiet · tool";
     else if (stall === "no_first_signal") title = "Quiet";
     else if (stall === "stream_gap") title = "Quiet";
@@ -428,7 +461,7 @@
       stalled: !!stall && stall !== "awaiting_user",
       meterMode: meterMode(p, stall),
       meterProgress: null,
-      completionLabel: show ? "Task completion unknown · activity only" : "",
+      completionLabel: completionLabelFor(p, show),
       stagesSeen: { ...p.stagesSeen },
       transition: p.transition,
       tierDock: 2,
@@ -466,6 +499,7 @@
     resolveMood,
     stageClass,
     formatPresence,
+    completionLabelFor,
     consumeTransition,
     BOMB_FLAVOR,
   };

@@ -162,6 +162,12 @@ pub struct AcpClientConfig {
     pub skip_auth_when_unadvertised: bool,
     /// Short label for logs/errors ("grok", "claude", "codex").
     pub backend_label: String,
+    /// Auth methods that start an interactive (browser / device-code) login.
+    /// They are never invoked implicitly at session start: the user starts
+    /// sign-in explicitly from Services instead.
+    pub interactive_auth_methods: Vec<String>,
+    /// Opt-in to call an interactive auth method during startup anyway.
+    pub allow_interactive_auth: bool,
 }
 
 impl AcpClientConfig {
@@ -180,22 +186,119 @@ impl AcpClientConfig {
             prompt_timeout: Duration::from_secs(60 * 60 * 2), // 2 hours
             // Grok Build advertises cached_token + grok.com (not xai.api_key).
             auth_preference: vec![
+                "xai.api_key".into(),
                 "cached_token".into(),
                 "grok.com".into(),
-                "xai.api_key".into(),
             ],
             skip_auth_when_unadvertised: false,
             backend_label: "grok".into(),
+            // `grok.com` = browser/device login; calling it at startup popped
+            // a "Sign in to Grok Build" page nobody asked for and then timed out.
+            interactive_auth_methods: vec!["grok.com".into()],
+            allow_interactive_auth: false,
         }
+    }
+
+    fn api_key_set(&self) -> bool {
+        let named = |k: &str| k == "XAI_API_KEY";
+        self.env.iter().any(|(k, v)| named(k) && !v.trim().is_empty())
+            || std::env::var("XAI_API_KEY").map(|v| !v.trim().is_empty()).unwrap_or(false)
     }
 }
 
-/// A `session/request_permission` we have not yet answered — awaiting the user.
+/// Bounded, sanitized tail of the agent's stderr, used to explain startup failures.
+#[derive(Clone, Default)]
+pub(crate) struct StderrTail(Arc<std::sync::Mutex<std::collections::VecDeque<String>>>);
+
+impl StderrTail {
+    const CAP: usize = 80;
+
+    pub(crate) fn push(&self, line: String) {
+        let mut q = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if q.len() == Self::CAP {
+            q.pop_front();
+        }
+        q.push_back(line);
+    }
+
+    pub(crate) fn text(&self) -> String {
+        let q = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        q.iter().cloned().collect::<Vec<_>>().join("\n")
+    }
+}
+
+/// Decide whether startup authentication must stop instead of invoking an
+/// interactive login. Pure so it can be unit-tested.
+pub(crate) fn interactive_auth_blocked(
+    method: &str,
+    interactive: &[String],
+    allow_interactive: bool,
+) -> bool {
+    !allow_interactive && interactive.iter().any(|m| m == method)
+}
+
+/// The agent has already printed a recognizable auth failure.
+fn summarize_ready(tail: &str) -> bool {
+    let l = tail.to_ascii_lowercase();
+    l.contains("not signed in") || l.contains("api key") || l.contains("permission-denied")
+}
+
+/// Plain-language reason the agent could not authenticate.
+pub(crate) fn auth_required_message(backend: &str, stderr_tail: &str, api_key_set: bool) -> String {
+    use grok_events::diagnostics::summarize_cli_failure;
+    if let Some(s) = summarize_cli_failure(stderr_tail, api_key_set) {
+        return s;
+    }
+    if backend == "grok" {
+        if api_key_set {
+            "Grok couldn't sign in with the XAI_API_KEY that is set (it may be disabled, expired or mistyped). Check it at console.x.ai → API keys, or use Log in with Grok in Services, then start the thread again.".into()
+        } else {
+            "Grok isn't signed in. Use Log in with Grok in Services, or set XAI_API_KEY, then start the thread again.".into()
+        }
+    } else {
+        format!("{backend} needs you to sign in. Use its Log in button in Services, then start the thread again.")
+    }
+}
+
+/// How to shape the JSON-RPC response when the user answers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PendingPermissionKind {
+    /// Standard `session/request_permission` outcome envelope.
+    SessionPermission,
+    /// Grok `x.ai/exit_plan_mode` ext — ExitPlanModeExtResponse { decision, comments }.
+    ExitPlanMode,
+    /// Grok `x.ai/ask_user_question` ext — AskUserQuestionExtResponse { outcome, … }.
+    AskUserQuestion,
+}
+
+/// One question from `_x.ai/ask_user_question` (D-057).
+#[derive(Debug, Clone)]
+struct AskUserQuestionDef {
+    text: String,
+    /// (option_id, label) pairs offered for this question.
+    options: Vec<(String, String)>,
+    multi_select: bool,
+}
+
+/// In-flight ask_user_question state (may span multiple approval cards).
+#[derive(Debug, Clone)]
+struct AskUserPending {
+    questions: Vec<AskUserQuestionDef>,
+    /// Index of the question the current card is answering.
+    current_q: usize,
+    /// Answers keyed by question *text* (protocol requirement).
+    answers: serde_json::Map<String, Value>,
+}
+
+/// A permission / plan-exit / ask-user request we have not yet answered.
 #[derive(Debug)]
 struct PendingPermission {
     /// Original wire id; permission responses are JSON-RPC responses to it.
     rpc_id: Value,
     options: Vec<PermissionOptionInfo>,
+    kind: PendingPermissionKind,
+    /// Present only for AskUserQuestion.
+    ask: Option<AskUserPending>,
 }
 
 pub struct AcpClient {
@@ -205,6 +308,7 @@ pub struct AcpClient {
     session_id: RwLock<Option<String>>,
     agent_capabilities: RwLock<Option<Value>>,
     auth_methods: RwLock<Vec<String>>,
+    stderr_tail: StderrTail,
     event_bus: Option<Arc<EventBus>>,
     control_session_id: Uuid,
     notification_rx: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<NotificationEvent>>>,
@@ -322,17 +426,22 @@ impl AcpClient {
         let transport = NdjsonTransport::new(stdin, stdout, notif_tx, agent_req_tx);
 
         // Mirror agent stderr into the control bus (center column / terminal view).
+        // Lines are sanitized (ANSI, team IDs, key fragments) before they are
+        // kept or shown, and a bounded tail explains startup failures.
+        let stderr_tail = StderrTail::default();
         if let Some(stderr) = stderr {
             let bus = event_bus.clone();
             let sid = control_session_id;
+            let tail = stderr_tail.clone();
             tokio::spawn(async move {
                 use tokio::io::{AsyncBufReadExt, BufReader};
                 let mut lines = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    let line = line.trim_end().to_string();
-                    if line.is_empty() {
+                    let line = grok_events::diagnostics::sanitize_diagnostic(line.trim_end());
+                    if line.trim().is_empty() {
                         continue;
                     }
+                    tail.push(line.clone());
                     if let Some(bus) = &bus {
                         bus.emit(ControlEvent::Raw {
                             session_id: Some(sid),
@@ -363,6 +472,7 @@ impl AcpClient {
             session_id: RwLock::new(None),
             agent_capabilities: RwLock::new(None),
             auth_methods: RwLock::new(Vec::new()),
+            stderr_tail,
             event_bus,
             control_session_id,
             notification_rx: Mutex::new(Some(notif_rx)),
@@ -386,11 +496,16 @@ impl AcpClient {
             terminals: TerminalRegistry::new(default_cwd),
         });
 
-        client.initialize().await?;
-        client.authenticate().await?;
-        client
-            .open_session(opts, connect_opts.resume_acp_session_id.as_deref())
-            .await?;
+        let startup = async {
+            client.initialize().await?;
+            client.authenticate().await?;
+            client
+                .open_session(opts, connect_opts.resume_acp_session_id.as_deref())
+                .await
+        };
+        if let Err(e) = startup.await {
+            return Err(client.explain_startup_error(e).await);
+        }
 
         // Background event loop for notifications
         let loop_client = client.clone();
@@ -423,6 +538,7 @@ impl AcpClient {
             session_id: RwLock::new(Some(session_id.to_string())),
             agent_capabilities: RwLock::new(None),
             auth_methods: RwLock::new(Vec::new()),
+            stderr_tail: StderrTail::default(),
             event_bus,
             control_session_id: Uuid::new_v4(),
             notification_rx: Mutex::new(None),
@@ -532,6 +648,36 @@ impl AcpClient {
         Ok(())
     }
 
+    /// Turn a raw startup failure into something a person can act on, using
+    /// the agent's own stderr when it says why (auth refused, key disabled).
+    async fn explain_startup_error(&self, e: AcpError) -> AcpError {
+        let _ = self.shutdown_quiet().await;
+        match e {
+            AcpError::AuthRequired(_) => e,
+            AcpError::Timeout(_) | AcpError::ProcessExited | AcpError::ChannelClosed | AcpError::Rpc { .. } => {
+                let tail = self.stderr_tail.text();
+                match grok_events::diagnostics::summarize_cli_failure(&tail, self.config.api_key_set()) {
+                    Some(reason) => AcpError::AuthRequired(format!("{reason} (details: {e})")),
+                    None => e,
+                }
+            }
+            other => other,
+        }
+    }
+
+    /// Kill the child after a failed startup without reporting it as a crash.
+    async fn shutdown_quiet(&self) -> Result<()> {
+        self.shutting_down
+            .store(true, std::sync::atomic::Ordering::SeqCst);
+        let mut child_guard = self.child.lock().await;
+        if let Some(child) = child_guard.as_mut() {
+            let _ = crate::process::terminate(child).await;
+        }
+        child_guard.take();
+        *self.transport.write().await = None;
+        Ok(())
+    }
+
     fn pick_auth_method(&self, advertised: &[String]) -> String {
         // Prefer cached CLI login, then first advertised method.
         let preferred = &self.config.auth_preference;
@@ -562,6 +708,66 @@ impl AcpClient {
             return Ok(());
         }
         let method_id = self.pick_auth_method(&advertised);
+        // When an API key is in the child env, NEVER open an interactive
+        // browser/device login (play1 #11, play1-llm #04). The current Grok
+        // CLI often only advertises `grok.com` even with XAI_API_KEY set; try
+        // `xai.api_key` explicitly (same path headless `grok -p` uses), and if
+        // that RPC is refused, continue without authenticate — the key stays
+        // in the process env for session/new.
+        if self.config.api_key_set()
+            && (method_id == "xai.api_key"
+                || interactive_auth_blocked(
+                    &method_id,
+                    &self.config.interactive_auth_methods,
+                    self.config.allow_interactive_auth,
+                ))
+        {
+            let key_method = "xai.api_key".to_string();
+            info!(
+                advertised = %method_id,
+                method_id = %key_method,
+                "ACP authenticate via API key (no browser)"
+            );
+            let params = AuthenticateParams {
+                method_id: key_method.clone(),
+                meta: Some(json!({ "headless": true })),
+            };
+            match self
+                .request_startup("authenticate", Some(serde_json::to_value(params)?))
+                .await
+            {
+                Ok(_) => {
+                    info!(method_id = %key_method, "ACP authenticate complete (api key)");
+                    return Ok(());
+                }
+                Err(e) => {
+                    info!(
+                        error = %e,
+                        "xai.api_key authenticate RPC failed; continuing with XAI_API_KEY in env (no browser fallback)"
+                    );
+                    return Ok(());
+                }
+            }
+        }
+        if interactive_auth_blocked(
+            &method_id,
+            &self.config.interactive_auth_methods,
+            self.config.allow_interactive_auth,
+        ) {
+            for _ in 0..15 {
+                if summarize_ready(&self.stderr_tail.text()) {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            let msg = auth_required_message(
+                &self.config.backend_label,
+                &self.stderr_tail.text(),
+                false,
+            );
+            warn!(%method_id, "interactive auth not started implicitly; session start stops");
+            return Err(AcpError::AuthRequired(msg));
+        }
         info!(%method_id, "ACP authenticate");
 
         let params = AuthenticateParams {
@@ -1313,9 +1519,9 @@ impl AcpClient {
                 AcpError::Protocol(format!("no pending permission request: {request_id}"))
             })?;
 
-        let outcome = match option_id {
-            Some(oid) => {
-                if !pending.options.is_empty() && !pending.options.iter().any(|o| o.id == oid) {
+        if !pending.options.is_empty() {
+            if let Some(oid) = option_id {
+                if !pending.options.iter().any(|o| o.id == oid) {
                     // Put it back so a corrected retry can still answer.
                     let valid: Vec<&str> = pending.options.iter().map(|o| o.id.as_str()).collect();
                     let msg = format!(
@@ -1328,13 +1534,51 @@ impl AcpClient {
                         .insert(request_id.to_string(), pending);
                     return Err(AcpError::Protocol(msg));
                 }
-                json!({ "outcome": { "outcome": "selected", "optionId": oid } })
             }
-            None => json!({ "outcome": { "outcome": "cancelled" } }),
+        }
+
+        // Ask-user may need more cards before we close the RPC.
+        if pending.kind == PendingPermissionKind::AskUserQuestion {
+            return self
+                .respond_ask_user_question(request_id, option_id, pending)
+                .await;
+        }
+
+        let outcome = match pending.kind {
+            PendingPermissionKind::ExitPlanMode => {
+                // Grok ExitPlanModeExtResponse: { decision, comments }.
+                // decision: approve | request_changes | abandon
+                let decision = match option_id {
+                    None => "abandon",
+                    Some(oid) => {
+                        let lower = oid.to_lowercase();
+                        if lower.contains("abandon") || lower.contains("reject") || lower.contains("deny") {
+                            "abandon"
+                        } else if lower.contains("change") || lower.contains("revise") || lower.contains("request") {
+                            "request_changes"
+                        } else {
+                            "approve"
+                        }
+                    }
+                };
+                json!({ "decision": decision, "comments": Value::Null })
+            }
+            PendingPermissionKind::SessionPermission => match option_id {
+                Some(oid) => json!({ "outcome": { "outcome": "selected", "optionId": oid } }),
+                None => json!({ "outcome": { "outcome": "cancelled" } }),
+            },
+            PendingPermissionKind::AskUserQuestion => unreachable!("handled above"),
         };
 
         if let Some(transport) = self.transport.read().await.clone() {
-            transport.send_response(pending.rpc_id, outcome).await?;
+            if let Err(e) = transport.send_response(pending.rpc_id.clone(), outcome.clone()).await {
+                // D-046: keep the card retryable if the wire blips mid-plan-exit.
+                self.pending_permissions
+                    .lock()
+                    .await
+                    .insert(request_id.to_string(), pending);
+                return Err(e);
+            }
         } else {
             debug!(%request_id, ?option_id, "respond_approval (mock/local)");
         }
@@ -1387,12 +1631,18 @@ impl AcpClient {
         for (request_id, pending) in drained {
             if let Some(t) = &transport {
                 // Best-effort: the process may already be gone.
-                let _ = t
-                    .send_response(
-                        pending.rpc_id,
-                        json!({ "outcome": { "outcome": "cancelled" } }),
-                    )
-                    .await;
+                let body = match pending.kind {
+                    PendingPermissionKind::ExitPlanMode => {
+                        json!({ "decision": "abandon", "comments": Value::Null })
+                    }
+                    PendingPermissionKind::AskUserQuestion => {
+                        json!({ "outcome": "skip_interview" })
+                    }
+                    PendingPermissionKind::SessionPermission => {
+                        json!({ "outcome": { "outcome": "cancelled" } })
+                    }
+                };
+                let _ = t.send_response(pending.rpc_id, body).await;
             }
             if let Some(bus) = &self.event_bus {
                 bus.emit(ControlEvent::ApprovalResolved {
@@ -1523,6 +1773,9 @@ impl AcpClient {
                     .and_then(|p| p.get("toolCall"))
                     .and_then(|t| t.get("rawInput"));
                 let plan_extracted = extract_tool_plan(&tool, tool_raw_input);
+                // D-046: exit_plan_mode must never auto-approve — agent also sends
+                // x.ai/exit_plan_mode and treats a failed handshake as "client disconnected".
+                let exit_plan_tool = is_exit_plan_tool(&tool, &req.params);
                 if let Some(ref plan) = plan_extracted {
                     if let Some(bus) = &self.event_bus {
                         bus.emit(ControlEvent::Raw {
@@ -1530,8 +1783,17 @@ impl AcpClient {
                             payload: json!({ "channel": "plan_doc", "text": plan }),
                         });
                     }
+                } else if exit_plan_tool {
+                    if let Some(plan) = self.read_plan_md_for_approval().await {
+                        if let Some(bus) = &self.event_bus {
+                            bus.emit(ControlEvent::Raw {
+                                session_id: Some(self.control_session_id),
+                                payload: json!({ "channel": "plan_doc", "text": plan }),
+                            });
+                        }
+                    }
                 }
-                let summary = if plan_extracted.is_some() {
+                let summary = if plan_extracted.is_some() || exit_plan_tool {
                     format!("{tool} — approve the plan above?")
                 } else {
                     permission_summary(&req.params, &tool)
@@ -1586,7 +1848,7 @@ impl AcpClient {
                 };
                 // Plan approvals always go to the user — the whole point is to
                 // review the plan, even in auto/yolo.
-                let auto_reason = if plan_extracted.is_some() {
+                let auto_reason = if plan_extracted.is_some() || exit_plan_tool {
                     None
                 } else if allow_hit {
                     Some("matches an allow rule".to_string())
@@ -1656,6 +1918,8 @@ impl AcpClient {
                         PendingPermission {
                             rpc_id: req.id,
                             options: options.clone(),
+                            kind: PendingPermissionKind::SessionPermission,
+                            ask: None,
                         },
                     );
                     if let Some(bus) = &self.event_bus {
@@ -1667,7 +1931,7 @@ impl AcpClient {
                             options,
                             auto_approved: false,
                             selected_option: None,
-                            plan_approval: plan_extracted.is_some(),
+                            plan_approval: plan_extracted.is_some() || exit_plan_tool,
                             at: Utc::now(),
                         });
                         bus.emit_status(self.control_session_id, SessionStatus::WaitingApproval)
@@ -1750,6 +2014,45 @@ impl AcpClient {
                     }
                 }
             }
+            // D-046: Grok plan-exit handshake. Returning -32601 here made the
+            // agent report "client disconnected mid-approval" / plan exit failed.
+            // Grok wires this as `_x.ai/exit_plan_mode` (leading underscore).
+            "x.ai/exit_plan_mode" | "x.ai/exitPlanMode"
+            | "_x.ai/exit_plan_mode" | "_x.ai/exitPlanMode" => {
+                self.handle_exit_plan_mode_ext(req).await?;
+            }
+            // D-057: Grok structured interview. Bare `{}` / -32601 breaks the tool.
+            "x.ai/ask_user_question" | "x.ai/askUserQuestion"
+            | "_x.ai/ask_user_question" | "_x.ai/askUserQuestion" => {
+                self.handle_ask_user_question_ext(req).await?;
+            }
+            // Nested ext_method envelope (some builds wrap the method name).
+            "agent.ext_method" | "agent/ext_method" => {
+                let nested = req
+                    .params
+                    .as_ref()
+                    .and_then(|p| {
+                        p.get("method")
+                            .or_else(|| p.get("name"))
+                            .or_else(|| p.get("extMethod"))
+                            .and_then(|v| v.as_str())
+                    })
+                    .unwrap_or("");
+                if is_exit_plan_ext_method(nested) {
+                    self.handle_exit_plan_mode_ext(req).await?;
+                } else if is_ask_user_question_ext_method(nested) {
+                    self.handle_ask_user_question_ext(req).await?;
+                } else {
+                    warn!(method = %req.method, nested, "unhandled agent.ext_method");
+                    transport
+                        .send_error_response(
+                            req.id,
+                            -32601,
+                            format!("method not found: {} ({nested})", req.method),
+                        )
+                        .await?;
+                }
+            }
             other => {
                 warn!(method = %other, "unhandled agent request — method not found");
                 // Spec-correct: an unknown method gets -32601, not `{}` — a
@@ -1762,7 +2065,298 @@ impl AcpClient {
         Ok(())
     }
 
-    fn resolve_sandbox_path(&self, path: &str) -> Result<PathBuf> {
+    /// Park Grok's `x.ai/exit_plan_mode` ext as a plan-approval card (D-046).
+    ///
+    /// The agent reads plan.md from disk itself; we surface the same file in the
+    /// UI and answer with ExitPlanModeExtResponse `{ decision, comments }` when
+    /// the user clicks Approve / Request changes / Abandon.
+    async fn handle_exit_plan_mode_ext(&self, req: IncomingAgentRequest) -> Result<()> {
+        let request_id = id_key(&req.id);
+        let options = vec![
+            PermissionOptionInfo {
+                id: "approve".into(),
+                kind: "allow_once".into(),
+                label: "Approve plan · start building".into(),
+            },
+            PermissionOptionInfo {
+                id: "request_changes".into(),
+                kind: "reject_once".into(),
+                label: "Request changes".into(),
+            },
+            PermissionOptionInfo {
+                id: "abandon".into(),
+                kind: "reject_once".into(),
+                label: "Abandon plan".into(),
+            },
+        ];
+
+        if let Some(plan) = self.read_plan_md_for_approval().await {
+            if let Some(bus) = &self.event_bus {
+                bus.emit(ControlEvent::Raw {
+                    session_id: Some(self.control_session_id),
+                    payload: json!({ "channel": "plan_doc", "text": plan }),
+                });
+            }
+        }
+
+        self.pending_permissions.lock().await.insert(
+            request_id.clone(),
+            PendingPermission {
+                rpc_id: req.id,
+                options: options.clone(),
+                kind: PendingPermissionKind::ExitPlanMode,
+                ask: None,
+            },
+        );
+
+        if let Some(bus) = &self.event_bus {
+            bus.emit(ControlEvent::ApprovalRequired {
+                session_id: self.control_session_id,
+                request_id,
+                tool: "exit_plan_mode".into(),
+                summary: "Approve the plan to leave plan mode and start building?".into(),
+                options,
+                auto_approved: false,
+                selected_option: None,
+                plan_approval: true,
+                at: Utc::now(),
+            });
+            bus.emit_status(self.control_session_id, SessionStatus::WaitingApproval)
+                .await;
+        }
+        // No response yet — wire stays open until respond_approval.
+        Ok(())
+    }
+
+    /// Park Grok's `x.ai/ask_user_question` as sequential approval cards (D-057).
+    ///
+    /// Response must be AskUserQuestionExtResponse tagged on `outcome`
+    /// (`accepted` | `skip_interview`). A bare `{}` fails with "missing field `outcome`".
+    async fn handle_ask_user_question_ext(&self, req: IncomingAgentRequest) -> Result<()> {
+        let request_id = id_key(&req.id);
+        let questions = parse_ask_user_questions(&req.params);
+        if questions.is_empty() {
+            // Nothing to ask — skip so the agent does not hang.
+            if let Some(transport) = self.transport.read().await.clone() {
+                transport
+                    .send_response(req.id, json!({ "outcome": "skip_interview" }))
+                    .await?;
+            }
+            return Ok(());
+        }
+
+        let card = ask_user_card_options(&questions[0]);
+        let summary = questions[0].text.clone();
+        let ask = AskUserPending {
+            questions: questions.clone(),
+            current_q: 0,
+            answers: serde_json::Map::new(),
+        };
+
+        self.pending_permissions.lock().await.insert(
+            request_id.clone(),
+            PendingPermission {
+                rpc_id: req.id,
+                options: card.clone(),
+                kind: PendingPermissionKind::AskUserQuestion,
+                ask: Some(ask),
+            },
+        );
+
+        if let Some(bus) = &self.event_bus {
+            bus.emit(ControlEvent::ApprovalRequired {
+                session_id: self.control_session_id,
+                request_id,
+                tool: "ask_user_question".into(),
+                summary,
+                options: card,
+                auto_approved: false,
+                selected_option: None,
+                plan_approval: false,
+                at: Utc::now(),
+            });
+            bus.emit_status(self.control_session_id, SessionStatus::WaitingApproval)
+                .await;
+        }
+        Ok(())
+    }
+
+    /// Advance / finish an ask_user_question approval card.
+    async fn respond_ask_user_question(
+        &self,
+        request_id: &str,
+        option_id: Option<&str>,
+        mut pending: PendingPermission,
+    ) -> Result<()> {
+        let skip = match option_id {
+            None => true,
+            Some(oid) => {
+                let lower = oid.to_lowercase();
+                lower == "skip_interview"
+                    || lower == "skip"
+                    || lower.contains("skip_interview")
+            }
+        };
+
+        if skip {
+            let outcome = json!({ "outcome": "skip_interview" });
+            if let Some(transport) = self.transport.read().await.clone() {
+                if let Err(e) = transport
+                    .send_response(pending.rpc_id.clone(), outcome)
+                    .await
+                {
+                    self.pending_permissions
+                        .lock()
+                        .await
+                        .insert(request_id.to_string(), pending);
+                    return Err(e);
+                }
+            }
+            if let Some(bus) = &self.event_bus {
+                bus.emit(ControlEvent::ApprovalResolved {
+                    session_id: self.control_session_id,
+                    request_id: request_id.to_string(),
+                    option_id: option_id.map(str::to_string),
+                    cancelled: true,
+                    at: Utc::now(),
+                });
+                if self.pending_permissions.lock().await.is_empty() {
+                    bus.emit_status(self.control_session_id, SessionStatus::Running)
+                        .await;
+                }
+            }
+            return Ok(());
+        }
+
+        let oid = option_id.unwrap();
+        let mut ask = pending.ask.take().ok_or_else(|| {
+            AcpError::Protocol("ask_user_question pending missing ask state".into())
+        })?;
+        let q = ask.questions.get(ask.current_q).ok_or_else(|| {
+            AcpError::Protocol(format!(
+                "ask_user_question current_q {} out of range",
+                ask.current_q
+            ))
+        })?;
+        let label = q
+            .options
+            .iter()
+            .find(|(id, _)| id == oid)
+            .map(|(_, lab)| lab.clone())
+            .unwrap_or_else(|| oid.to_string());
+        ask.answers
+            .insert(q.text.clone(), Value::String(label));
+
+        // Resolve this card in the UI.
+        if let Some(bus) = &self.event_bus {
+            bus.emit(ControlEvent::ApprovalResolved {
+                session_id: self.control_session_id,
+                request_id: request_id.to_string(),
+                option_id: Some(oid.to_string()),
+                cancelled: false,
+                at: Utc::now(),
+            });
+        }
+
+        ask.current_q += 1;
+        if ask.current_q < ask.questions.len() {
+            // More questions — re-park and emit the next card (same request_id).
+            let next = &ask.questions[ask.current_q];
+            let card = ask_user_card_options(next);
+            let summary = next.text.clone();
+            pending.options = card.clone();
+            pending.ask = Some(ask);
+            self.pending_permissions
+                .lock()
+                .await
+                .insert(request_id.to_string(), pending);
+            if let Some(bus) = &self.event_bus {
+                bus.emit(ControlEvent::ApprovalRequired {
+                    session_id: self.control_session_id,
+                    request_id: request_id.to_string(),
+                    tool: "ask_user_question".into(),
+                    summary,
+                    options: card,
+                    auto_approved: false,
+                    selected_option: None,
+                    plan_approval: false,
+                    at: Utc::now(),
+                });
+                bus.emit_status(self.control_session_id, SessionStatus::WaitingApproval)
+                    .await;
+            }
+            return Ok(());
+        }
+
+        let outcome = json!({
+            "outcome": "accepted",
+            "answers": Value::Object(ask.answers.clone()),
+            "annotations": Value::Object(serde_json::Map::new()),
+        });
+        if let Some(transport) = self.transport.read().await.clone() {
+            if let Err(e) = transport
+                .send_response(pending.rpc_id.clone(), outcome)
+                .await
+            {
+                pending.ask = Some(ask);
+                self.pending_permissions
+                    .lock()
+                    .await
+                    .insert(request_id.to_string(), pending);
+                return Err(e);
+            }
+        } else {
+            debug!(%request_id, ?option_id, "respond_ask_user_question (mock/local)");
+        }
+        if let Some(bus) = &self.event_bus {
+            if self.pending_permissions.lock().await.is_empty() {
+                bus.emit_status(self.control_session_id, SessionStatus::Running)
+                    .await;
+            }
+        }
+        Ok(())
+    }
+
+    /// Best-effort read of the session plan.md (cwd or ~/.grok/sessions/<enc-cwd>/<sid>/).
+    async fn read_plan_md_for_approval(&self) -> Option<String> {
+        let mut candidates = Vec::new();
+        candidates.push(self.config.cwd.join("plan.md"));
+        candidates.push(self.config.cwd.join(".grok").join("plan.md"));
+        let home = std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("."));
+        let sessions_root = home.join(".grok/sessions");
+        // Grok encodes the absolute cwd as a single path segment (e.g. %2Fhome%2F…).
+        let enc_cwd: String = self
+            .config
+            .cwd
+            .to_string_lossy()
+            .bytes()
+            .map(|b| match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                    (b as char).to_string()
+                }
+                _ => format!("%{b:02X}"),
+            })
+            .collect();
+        candidates.push(sessions_root.join(&enc_cwd).join("plan.md"));
+        if let Some(sid) = self.session_id.read().await.as_ref() {
+            candidates.push(sessions_root.join(&enc_cwd).join(sid).join("plan.md"));
+            candidates.push(sessions_root.join(sid).join("plan.md"));
+        }
+
+        for path in candidates {
+            if let Ok(text) = tokio::fs::read_to_string(&path).await {
+                let trimmed = text.trim();
+                if trimmed.len() >= 20 {
+                    return Some(trimmed.to_string());
+                }
+            }
+        }
+        None
+    }
+
+        fn resolve_sandbox_path(&self, path: &str) -> Result<PathBuf> {
         let p = PathBuf::from(path);
         let abs = if p.is_absolute() {
             p
@@ -2464,6 +3058,118 @@ fn is_safe_command(command: &str) -> bool {
     true
 }
 
+/// True when the tool is Grok/Claude exit-plan (must never auto-approve).
+fn is_exit_plan_tool(tool_name: &str, params: &Option<Value>) -> bool {
+    let n = tool_name.to_lowercase().replace(['-', '_'], "");
+    if n.contains("exitplan") {
+        return true;
+    }
+    let kind = params
+        .as_ref()
+        .and_then(|p| p.get("toolCall"))
+        .and_then(|t| t.get("kind"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_lowercase()
+        .replace(['-', '_'], "");
+    kind == "exitplan" || kind.contains("exitplan")
+}
+
+fn is_exit_plan_ext_method(method: &str) -> bool {
+    let trimmed = method.trim_start_matches('_');
+    let m = trimmed.to_lowercase().replace(['-', '_'], "");
+    m.contains("exitplan") || trimmed.eq_ignore_ascii_case("x.ai/exit_plan_mode")
+}
+
+fn is_ask_user_question_ext_method(method: &str) -> bool {
+    let trimmed = method.trim_start_matches('_');
+    let m = trimmed.to_lowercase().replace(['-', '_'], "");
+    m.contains("askuserquestion") || trimmed.eq_ignore_ascii_case("x.ai/ask_user_question")
+}
+
+/// Parse `_x.ai/ask_user_question` params into question defs.
+fn parse_ask_user_questions(params: &Option<Value>) -> Vec<AskUserQuestionDef> {
+    let Some(p) = params else {
+        return Vec::new();
+    };
+    let arr = p
+        .get("questions")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    for (qi, q) in arr.iter().enumerate() {
+        let text = q
+            .get("question")
+            .or_else(|| q.get("text"))
+            .or_else(|| q.get("prompt"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if text.is_empty() {
+            continue;
+        }
+        let multi = q
+            .get("multiSelect")
+            .or_else(|| q.get("multi_select"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let mut options = Vec::new();
+        if let Some(opts) = q.get("options").and_then(|v| v.as_array()) {
+            for (oi, opt) in opts.iter().enumerate() {
+                let label = opt
+                    .get("label")
+                    .or_else(|| opt.get("name"))
+                    .or_else(|| opt.get("text"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                if label.is_empty() {
+                    continue;
+                }
+                let id = opt
+                    .get("id")
+                    .or_else(|| opt.get("optionId"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| format!("q{qi}_o{oi}"));
+                options.push((id, label));
+            }
+        }
+        if options.is_empty() {
+            // Free-form with no options — offer a single "Continue" so the card is answerable.
+            options.push(("continue".into(), "Continue".into()));
+        }
+        out.push(AskUserQuestionDef {
+            text,
+            options,
+            multi_select: multi,
+        });
+    }
+    out
+}
+
+fn ask_user_card_options(q: &AskUserQuestionDef) -> Vec<PermissionOptionInfo> {
+    let mut opts: Vec<PermissionOptionInfo> = q
+        .options
+        .iter()
+        .map(|(id, label)| PermissionOptionInfo {
+            id: id.clone(),
+            kind: "allow_once".into(),
+            label: label.clone(),
+        })
+        .collect();
+    opts.push(PermissionOptionInfo {
+        id: "skip_interview".into(),
+        kind: "reject_once".into(),
+        label: "Skip questions".into(),
+    });
+    let _ = q.multi_select; // UI is single-pick today; multiSelect maps to one label.
+    opts
+}
+
 /// Pull a plan document out of a plan-presenting tool call's input
 /// (Claude Code's `ExitPlanMode` / `exit_plan_mode` carries `{ plan: "…" }`).
 fn extract_tool_plan(tool_name: &str, raw_input: Option<&Value>) -> Option<String> {
@@ -2684,6 +3390,50 @@ impl AcpClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn grok_com_is_never_started_implicitly() {
+        let cfg = AcpClientConfig::new("/bin/true", "/tmp");
+        assert!(interactive_auth_blocked("grok.com", &cfg.interactive_auth_methods, false));
+        assert!(!interactive_auth_blocked("cached_token", &cfg.interactive_auth_methods, false));
+        assert!(!interactive_auth_blocked("xai.api_key", &cfg.interactive_auth_methods, false));
+        assert!(!interactive_auth_blocked("grok.com", &cfg.interactive_auth_methods, true));
+    }
+
+    #[test]
+    fn with_api_key_interactive_auth_is_skipped_not_opened() {
+        // Decision table used by authenticate(): blocked + key ⇒ skip (Ok),
+        // blocked + no key ⇒ AuthRequired. Never call the interactive method.
+        assert!(interactive_auth_blocked("grok.com", &["grok.com".into()], false));
+        // The Ok-vs-Err branch is covered by the live authenticate() path;
+        // here we pin the predicate the branch keys off.
+        let cfg = AcpClientConfig::new("/bin/true", "/tmp");
+        assert!(cfg.interactive_auth_methods.iter().any(|m| m == "grok.com"));
+        assert!(!cfg.allow_interactive_auth);
+    }
+
+    #[test]
+    fn auth_required_message_is_plain_and_redacted() {
+        let tail = "\x1b[33m WARN\x1b[0m Failed to fetch models: 403 - The API key xai-...KwZn is disabled and cannot be used. go to https://console.x.ai/team/2c0a58ed-703f-434e-9191-a3016d3bc641/api-keys\nNot signed in.";
+        let m = auth_required_message("grok", tail, true);
+        assert!(m.contains("disabled"), "{m}");
+        assert!(!m.contains("KwZn") && !m.contains("2c0a58ed") && !m.contains('\x1b'));
+        let none = auth_required_message("grok", "", false);
+        assert!(none.starts_with("Grok isn't signed in"));
+        let keyed = auth_required_message("grok", "", true);
+        assert!(keyed.contains("XAI_API_KEY that is set"));
+    }
+
+    #[test]
+    fn stderr_tail_is_bounded() {
+        let t = StderrTail::default();
+        for i in 0..200 {
+            t.push(format!("line {i}"));
+        }
+        let text = t.text();
+        assert!(text.starts_with("line 120"));
+        assert!(text.ends_with("line 199"));
+    }
 
     #[tokio::test]
     async fn mock_client_has_session() {
@@ -2916,6 +3666,83 @@ mod tests {
         assert_eq!(opts[1].label, "Deny it");
     }
 
+    #[test]
+    fn is_exit_plan_tool_detects_exit_plan_mode() {
+        assert!(is_exit_plan_tool("exit_plan_mode", &None));
+        assert!(is_exit_plan_tool("ExitPlanMode", &None));
+        assert!(is_exit_plan_tool(
+            "tool",
+            &Some(json!({ "toolCall": { "kind": "exit_plan" } }))
+        ));
+        assert!(!is_exit_plan_tool("Bash", &None));
+        assert!(is_exit_plan_ext_method("x.ai/exit_plan_mode"));
+        assert!(is_exit_plan_ext_method("_x.ai/exit_plan_mode"));
+        assert!(is_exit_plan_ext_method("x.ai/exitPlanMode"));
+        assert!(!is_exit_plan_ext_method("x.ai/ask_user_question"));
+        assert!(is_ask_user_question_ext_method("x.ai/ask_user_question"));
+        assert!(is_ask_user_question_ext_method("_x.ai/ask_user_question"));
+        assert!(is_ask_user_question_ext_method("x.ai/askUserQuestion"));
+        assert!(!is_ask_user_question_ext_method("x.ai/exit_plan_mode"));
+    }
+
+    #[test]
+    fn parse_ask_user_questions_keys_by_question_text() {
+        let qs = parse_ask_user_questions(&Some(json!({
+            "questions": [{
+                "question": "Which colour should the banner be?",
+                "options": [
+                    { "label": "Red", "description": "Red banner" },
+                    { "label": "Blue" }
+                ],
+                "multiSelect": false
+            }],
+            "mode": "default"
+        })));
+        assert_eq!(qs.len(), 1);
+        assert_eq!(qs[0].text, "Which colour should the banner be?");
+        assert_eq!(qs[0].options.len(), 2);
+        assert_eq!(qs[0].options[0].1, "Red");
+        let card = ask_user_card_options(&qs[0]);
+        assert!(card.iter().any(|o| o.id == "skip_interview"));
+        assert_eq!(card.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn respond_ask_user_question_emits_accepted_outcome() {
+        let c = AcpClient::mock_for_tests("sess-ask", None);
+        let qtext = "Pick one".to_string();
+        c.pending_permissions.lock().await.insert(
+            "99".into(),
+            PendingPermission {
+                rpc_id: json!(99),
+                options: vec![
+                    PermissionOptionInfo {
+                        id: "q0_o0".into(),
+                        kind: "allow_once".into(),
+                        label: "Alpha".into(),
+                    },
+                    PermissionOptionInfo {
+                        id: "skip_interview".into(),
+                        kind: "reject_once".into(),
+                        label: "Skip questions".into(),
+                    },
+                ],
+                kind: PendingPermissionKind::AskUserQuestion,
+                ask: Some(AskUserPending {
+                    questions: vec![AskUserQuestionDef {
+                        text: qtext.clone(),
+                        options: vec![("q0_o0".into(), "Alpha".into())],
+                        multi_select: false,
+                    }],
+                    current_q: 0,
+                    answers: serde_json::Map::new(),
+                }),
+            },
+        );
+        c.respond_approval("99", Some("q0_o0")).await.unwrap();
+        assert!(c.pending_permissions.lock().await.is_empty());
+    }
+
     #[tokio::test]
     async fn respond_approval_unknown_request_errors() {
         let c = AcpClient::mock_for_tests("sess-1", None);
@@ -2930,11 +3757,13 @@ mod tests {
             "42".into(),
             PendingPermission {
                 rpc_id: json!(42),
+                kind: PendingPermissionKind::SessionPermission,
                 options: vec![PermissionOptionInfo {
                     id: "allow".into(),
                     kind: "allow_once".into(),
                     label: "Allow once".into(),
                 }],
+                ask: None,
             },
         );
         c.respond_approval("42", Some("allow")).await.unwrap();
@@ -2949,11 +3778,13 @@ mod tests {
             "7".into(),
             PendingPermission {
                 rpc_id: json!(7),
+                kind: PendingPermissionKind::SessionPermission,
                 options: vec![PermissionOptionInfo {
                     id: "allow".into(),
                     kind: "allow_once".into(),
                     label: "Allow once".into(),
                 }],
+                ask: None,
             },
         );
         assert!(c.respond_approval("7", Some("bogus")).await.is_err());

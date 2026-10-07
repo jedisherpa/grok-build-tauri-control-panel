@@ -31,7 +31,15 @@ const sandbox = {
   window:{BombBuildsHost:{refreshActivity(){},async openSession(){}},addEventListener(){}},
   document:{activeElement:null,hidden:false,addEventListener(){}},
   $:element,escapeHtml:value=>String(value).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;'),
-  invoke:async command=>command==='list_builds'?structuredClone(response):command==='list_sessions'?[]:2,
+  invoke:async (command, args)=>{
+  if(command==='list_builds') return structuredClone(response);
+  if(command==='list_sessions') return [];
+  if(command==='get_build_concurrency'||command==='set_build_concurrency') return 2;
+  if(command==='preview_build'){
+    return {dry_run:true,would_persist:false,would_spawn_agents:false,project_root:args.spec.project_root,repository:'/repo',head_commit:'abc123',write_set:args.spec.write_set,objective:args.spec.objective,max_repairs:args.spec.max_repairs,roles:[{role:'planner',backend:'grok',model:null}],dependencies:[],predicted_queue_state:'queued',concurrency_limit:2,clean_working_tree:true,notes:['Dry run only: nothing was saved and no native agents were started.']};
+  }
+  return null;
+},
   setInterval(){},Date,console
 };
 const context = createContext(sandbox);
@@ -66,3 +74,27 @@ response=[null];await api.refresh();
 assert.equal(api.sessionSummary('impl-session').fresh,false,'malformed host response cannot be current');
 assert.equal(api.sessionSummary('impl-session').text,'100% workflow checkpoints · 6/6 completed','malformed response preserves last good data');
 console.log('builds.test.mjs: actual refresh rollback/retry, malformed data and escaping passed');
+
+// Dry-run preview path: fills form fields and clicks Preview without create_build.
+element('builds-project').value = '/fixture';
+element('builds-objective').value = 'preview only';
+element('builds-scope').value = 'src\ntests';
+element('builds-repairs').value = '2';
+for (const role of ['planner','implementer','auditor','verifier']) {
+  element(`builds-${role}-engine`).value = 'grok';
+  element(`builds-${role}-model`).value = '';
+}
+element('builds-dependencies').selectedOptions = [];
+let created = false;
+const prevInvoke = sandbox.invoke;
+sandbox.invoke = async (command, args) => {
+  if (command === 'create_build') { created = true; throw new Error('create must not run during dry-run'); }
+  return prevInvoke(command, args);
+};
+await element('builds-preview').onclick();
+assert.equal(created, false, 'dry-run must not create a build');
+assert.equal(element('builds-preview-panel').hidden, false, 'preview panel visible');
+assert.ok(element('builds-preview-panel').innerHTML.includes('Dry-run preview'));
+assert.ok(element('builds-preview-panel').innerHTML.includes('No agents were started'));
+assert.ok(element('builds-status').textContent.includes('Dry run ok'));
+console.log('builds.test.mjs: dry-run preview path passed');

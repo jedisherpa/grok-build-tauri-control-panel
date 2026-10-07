@@ -17,16 +17,44 @@
 
   async function refreshList() {
     const request = ++H.request;
+    const queryEl = $("history-query");
+    const sourceEl = $("history-source");
+    const subEl = $("history-subagents");
+    const query = String(queryEl?.value || "").trim();
+    const source = String(sourceEl?.value || "");
     try {
-      const result = await invoke("history_search", { query: $("history-query").value, source: $("history-source").value, offset: H.offset, includeSubagents: $("history-subagents").checked });
+      const result = await invoke("history_search", {
+        query,
+        source,
+        offset: Number(H.offset) || 0,
+        includeSubagents: !!(subEl && subEl.checked),
+      });
       if (request !== H.request) return;
-      H.total = result.total;
-      $("history-count").textContent = `${result.total ? H.offset + 1 : 0}–${Math.min(H.offset + result.threads.length, result.total)} of ${result.total}`;
+      const threads = Array.isArray(result?.threads) ? result.threads : [];
+      const total = Number(result?.total) || 0;
+      H.total = total;
+      $("history-count").textContent = `${total ? H.offset + 1 : 0}–${Math.min(H.offset + threads.length, total)} of ${total}`;
       $("history-prev").disabled = H.offset === 0;
       $("history-next").disabled = H.offset + 100 >= H.total;
-      $("history-list").innerHTML = result.threads.map(t => `<button class="history-row${H.selected?.id === t.id ? " selected" : ""}" data-id="${esc(t.id)}"><span class="history-row-title">${esc(t.title)}</span><span class="history-row-meta">${esc(names[t.source] || t.source)} · ${t.message_count} messages${t.origin_id.includes("/subagent/") ? " · subagent" : t.parent_id ? " · linked thread" : ""}</span><span class="history-row-project">${esc(t.cwd || t.coverage)}</span></button>`).join("") || '<p class="empty-hint">No matching conversations.</p>';
-      $("history-list").querySelectorAll(".history-row").forEach(b => b.onclick = () => select(b.dataset.id));
-    } catch (e) { $("history-status").textContent = `History unavailable: ${e}`; }
+      if (!threads.length) {
+        const hint = query
+          ? `No conversations match “${esc(query)}”. Clear the search to browse the library.`
+          : "No matching conversations. Scan local histories if the library looks empty.";
+        $("history-list").innerHTML = `<p class="empty-hint">${hint}</p>`;
+      } else {
+        $("history-list").innerHTML = threads.map(t => {
+          const origin = String(t.origin_id || "");
+          const parent = String(t.parent_id || "");
+          return `<button class="history-row${H.selected?.id === t.id ? " selected" : ""}" data-id="${esc(t.id)}"><span class="history-row-title">${esc(t.title)}</span><span class="history-row-meta">${esc(names[t.source] || t.source)} · ${t.message_count || 0} messages${origin.includes("/subagent/") ? " · subagent" : parent ? " · linked thread" : ""}</span><span class="history-row-project">${esc(t.cwd || t.coverage || "")}</span></button>`;
+        }).join("");
+        $("history-list").querySelectorAll(".history-row").forEach(b => b.onclick = () => select(b.dataset.id));
+      }
+    } catch (e) {
+      const msg = e?.message || String(e);
+      $("history-status").textContent = `History unavailable: ${msg}`;
+      $("history-list").innerHTML = `<p class="empty-hint">Search failed: ${esc(msg)}</p>`;
+      if (typeof toastError === "function") toastError(e);
+    }
   }
 
   function renderMessages() {
@@ -115,7 +143,11 @@
         $("history-status").textContent = "Scanning local histories… source files remain unchanged. Large libraries can take several minutes.";
         result = await invoke("history_scan");
       } else {
-        const path = await window.__TAURI__.dialog.open({ multiple: false, filters: [{ name: "Conversation exports", extensions: ["json", "zip"] }] });
+        const openDialog = window.__TAURI__?.dialog?.open;
+        if (typeof openDialog !== "function") {
+          throw new Error("Import needs the desktop file dialog (Tauri dialog plugin).");
+        }
+        const path = await openDialog({ multiple: false, filters: [{ name: "Conversation exports", extensions: ["json", "zip"] }] });
         if (!path) return;
         $("history-status").textContent = "Importing conversation export…";
         result = await invoke("history_import", { path });
@@ -132,9 +164,21 @@
   $("history-scan").onclick = () => mutate("scan");
   $("history-import").onclick = () => mutate("import");
   let debounce;
-  $("history-query").oninput = () => { clearTimeout(debounce); debounce = setTimeout(() => { H.offset = 0; refreshList(); }, 250); };
-  $("history-subagents").onchange = () => { H.offset = 0; refreshList(); };
-  $("history-source").onchange = () => { H.offset = 0; refreshList(); };
+  // Debounce search; do not touch the input value/DOM (avoids caret jumps).
+  if ($("history-query")) {
+    $("history-query").addEventListener("input", () => {
+      clearTimeout(debounce);
+      debounce = setTimeout(() => { H.offset = 0; refreshList(); }, 280);
+    });
+  }
+  $("history-clear") && ($("history-clear").onclick = () => {
+    if ($("history-query")) $("history-query").value = "";
+    H.offset = 0;
+    refreshList();
+    $("history-query")?.focus();
+  });
+  $("history-subagents") && ($("history-subagents").onchange = () => { H.offset = 0; refreshList(); });
+  $("history-source") && ($("history-source").onchange = () => { H.offset = 0; refreshList(); });
   $("history-prev").onclick = () => { H.offset = Math.max(0, H.offset - 100); refreshList(); };
   $("history-next").onclick = () => { H.offset += 100; refreshList(); };
   $("history-more").onclick = async () => {

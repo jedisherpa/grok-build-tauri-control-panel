@@ -2,7 +2,7 @@
    Move original elements; never clone controls or dispatch coding commands. */
 (function (global) {
   "use strict";
-  const STORAGE = "bomb-code:panel-cubes:v1";
+  const STORAGE = "bomb-code:panel-cubes:v3";
   function bounded(rect, bounds, collapsed = false) {
     const width = Math.max(160, bounds.width), height = Math.max(120, bounds.height);
     const w = Math.min(width - 36, Math.max(148, Number(rect.width) || 190));
@@ -28,6 +28,15 @@
       p.rect = bounded(p.rect, bounds(), !p.expanded);
       Object.assign(p.element.style, { left: `${p.rect.x}px`, top: `${p.rect.y}px`, width: `${p.rect.width}px`, height: `${p.rect.height}px` });
       mask();
+    }
+    /** Right-rail cubes should stay docked to the window's right edge (play1 #16/#26). */
+    function dockRight(p) {
+      const b = bounds();
+      p.rect = { ...p.rect, x: Math.max(12, b.width - p.rect.width - 24) };
+      place(p);
+    }
+    function isRightRail(id) {
+      return ["now", "agents", "tools", "details", "view", "log", "preview"].includes(id);
     }
     function expand(p, expanded, persist = true) {
       if (p.expanded === expanded) { p.body.hidden = !expanded; if (expanded && p.rect.height <= 34) { p.rect.height = Math.max(56, p.expandedHeight || 140); place(p); } return; }
@@ -105,9 +114,69 @@
       const child = right?.querySelector(selector), content = child?.closest(".right-block") || child;
       cube(id, title, content, defaults.get(id), toggleId ? doc.querySelector(toggleId) : null, id === "now" ? [doc.getElementById("now-elapsed"), doc.getElementById("btn-refresh"), doc.getElementById("activity-bomb")] : []);
     });
+    /** Keep cubes out of the sticky composer band (round4 Play B ~960×670). */
+    function clampAboveComposer(p) {
+      const b = bounds();
+      const reserve = Math.min(160, Math.max(120, Math.floor(b.height * 0.18)));
+      const maxBottom = Math.max(40, b.height - reserve);
+      if (p.rect.y + p.rect.height > maxBottom) {
+        p.rect = {
+          ...p.rect,
+          y: Math.max(12, maxBottom - p.rect.height),
+          height: Math.min(p.rect.height, Math.max(34, maxBottom - 12)),
+        };
+      }
+    }
     const reset = doc.createElement("button"); reset.type = "button"; reset.className = "spatial-cubes-reset"; reset.textContent = "Reset cubes"; reset.title = "Restore the small cubes around your working surface"; layer.appendChild(reset);
-    listen(reset, "click", () => { defaults = defaultRects(); panels.forEach(p => { p.userPlaced = false; p.rect = { ...defaults.get(p.id), height: p.expanded ? defaults.get(p.id).height : 34 }; p.expandedHeight = Math.max(76, defaults.get(p.id).height); place(p); }); save(); });
-    listen(win, "resize", () => { defaults = defaultRects(); panels.forEach(p => { if (!p.userPlaced) { p.rect = { ...defaults.get(p.id) }; p.expandedHeight = Math.max(76, p.rect.height); } place(p); }); save(); });
+    let lastBounds = bounds();
+    function applyDefaultLayout(expandedKeep) {
+      defaults = defaultRects();
+      const b = bounds();
+      panels.forEach(p => {
+        const d = defaults.get(p.id);
+        if (!d) return;
+        let rect = { ...d, height: (expandedKeep && p.expanded) ? Math.max(d.height, p.expandedHeight || d.height) : (p.expanded ? d.height : 34) };
+        if (isRightRail(p.id)) rect.x = Math.max(12, b.width - rect.width - 24);
+        if (!isRightRail(p.id)) rect.x = Math.min(rect.x, Math.max(12, b.width - rect.width - 12));
+        p.userPlaced = false;
+        p.rect = rect;
+        p.expandedHeight = Math.max(76, d.height);
+        clampAboveComposer(p);
+        place(p);
+      });
+    }
+    function reflowOnResize() {
+      const b = bounds();
+      const enlarged = b.width > lastBounds.width + 24 || b.height > lastBounds.height + 24;
+      const shrunk = b.width < lastBounds.width - 24 || b.height < lastBounds.height - 24;
+      lastBounds = { ...b };
+      if (enlarged || shrunk) {
+        applyDefaultLayout(true);
+        try { win.localStorage.removeItem(STORAGE); } catch { /* ignore */ }
+        save();
+        return;
+      }
+      defaults = defaultRects();
+      panels.forEach(p => {
+        if (!p.userPlaced) {
+          const d = defaults.get(p.id);
+          if (d) {
+            p.rect = { ...d, height: p.expanded ? Math.max(d.height, p.expandedHeight || d.height) : 34 };
+            p.expandedHeight = Math.max(76, d.height);
+          }
+        }
+        if (isRightRail(p.id)) p.rect = { ...p.rect, x: Math.max(12, b.width - p.rect.width - 24) };
+        clampAboveComposer(p);
+        place(p);
+      });
+      save();
+    }
+    listen(reset, "click", () => {
+      applyDefaultLayout(false);
+      try { win.localStorage.removeItem(STORAGE); } catch { /* ignore */ }
+      save();
+    });
+    listen(win, "resize", reflowOnResize);
     listen(doc, "bomb-code:view-selected", () => win.queueMicrotask(mask));
     const observer = new win.ResizeObserver(mask); panels.forEach(p => observer.observe(p.element)); cleanup.push(() => observer.disconnect());
     return { elements: () => panels.map(p => p.element), destroy() { if (destroyed) return; destroyed = true; cleanup.forEach(fn => fn()); panels.forEach(p => { p.extraAnchors.forEach(([node, marker]) => marker.replaceWith(node)); if (p.toggleAnchor) p.toggleAnchor.replaceWith(p.fold); p.anchor.replaceWith(p.content); }); if (brand) { brand.classList.remove("spatial-floating-brand"); left.prepend(brand); } layer.remove(); doc.documentElement.classList.remove("has-panel-cubes"); background?.setExclusionElements?.([], "panel-cubes"); scene?.setExclusionElements?.([], "panel-cubes"); } };

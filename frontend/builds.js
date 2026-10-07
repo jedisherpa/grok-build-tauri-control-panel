@@ -20,7 +20,7 @@
   function selectBuild(id) { B.selected = id; const index = B.builds.findIndex(w => w.id === id); if (index >= 0) B.graphPage = Math.floor(index / 24); renderList(); renderGraph(); renderDetail(); }
   function checkpointText(w) {
     const p = C.progress(w);
-    return p ? `${p.percent}% workflow checkpoints · ${p.completed}/${p.total} completed` : 'Workflow completion unknown';
+    return p ? `${p.percent}% workflow checkpoints · ${p.completed}/${p.total} completed` : 'No workflow checkpoints yet';
   }
   function renderGraph() {
     const viewport = $('collaboration-graph');
@@ -45,7 +45,7 @@
     if ($('edges-next')) $('edges-next').onclick = () => { B.edgePage++; renderGraph(); };
     $('collaboration-links').querySelectorAll('[data-graph-build]').forEach(button => button.onclick = () => selectBuild(button.dataset.graphBuild));
     const unlinked = B.sessions.filter(s => !C.sessionLink(B.builds, s.id));
-    $('collaboration-sessions').innerHTML = unlinked.length ? `<p class="builds-help">No recorded build links for these sessions. Completion unknown; shared names or folders do not establish collaboration.</p>${unlinked.map(s => `<button class="btn ghost builds-session" data-session="${esc(s.id)}">${esc(s.id.slice(0,8))} · ${esc(s.backend || s.mode || 'native')} · ${esc(s.status)} · completion unknown</button>`).join('')}` : '<p class="builds-help">No other live native sessions in this snapshot.</p>';
+    $('collaboration-sessions').innerHTML = unlinked.length ? `<p class="builds-help">No recorded build links for these sessions. Shared names or folders do not establish collaboration.</p>${unlinked.map(s => `<button class="btn ghost builds-session" data-session="${esc(s.id)}">${esc(s.id.slice(0,8))} · ${esc(s.backend || s.mode || 'native')} · ${esc(s.status)} · not linked to a build</button>`).join('')}` : '<p class="builds-help">No other live native sessions in this snapshot.</p>';
     $('collaboration-sessions').querySelectorAll('[data-session]').forEach(button => button.onclick = () => window.BombBuildsHost.openSession(button.dataset.session).catch(e => notice(String(e), true)));
   }
   function renderProgress(w) {
@@ -127,25 +127,80 @@
     } catch (e) { notice(String(e), true); }
     finally { B.busy = false; renderDetail(); }
   }
-  $('builds-form').onsubmit = async event => {
-    event.preventDefault();
-    if (B.busy) return;
-    const spec = {
+
+  function collectSpec() {
+    return {
       project_root: $('builds-project').value.trim(), objective: $('builds-objective').value.trim(),
       write_set: $('builds-scope').value.split('\n').map(s => s.trim()).filter(Boolean),
       max_repairs: Number($('builds-repairs').value),
       roles: Object.fromEntries(roles.map(role => [role, { backend: $(`builds-${role}-engine`).value, model: $(`builds-${role}-model`).value.trim() || null }]))
     };
-    B.busy = true; $('builds-create').disabled = true;
+  }
+  function renderPreview(preview) {
+    const panel = $('builds-preview-panel');
+    if (!panel) return;
+    if (!preview) { panel.hidden = true; panel.innerHTML = ''; return; }
+    const queue = queueText(preview.predicted_queue_state) || preview.predicted_queue_state || '';
+    const rolesHtml = (preview.roles || []).map(r => `<li>${esc(r.role)} · ${esc(r.backend)}${r.model ? ` · ${esc(r.model)}` : ' · configured default'}</li>`).join('');
+    const depsHtml = (preview.dependencies || []).length
+      ? (preview.dependencies || []).map(d => `<li>${esc(d.id.slice(0, 8))} · ${esc(d.objective.slice(0, 80))} · ${esc(d.status)}${d.accepted ? ' · accepted' : ''}</li>`).join('')
+      : '<li>None selected</li>';
+    const notes = (preview.notes || []).map(n => `<li>${esc(n)}</li>`).join('');
+    panel.hidden = false;
+    panel.innerHTML = `<h3>Dry-run preview</h3>
+<p class="builds-help">No build was saved. No worktree was created. No agents were started.</p>
+<div class="builds-preview-meta">
+<div><strong>Project</strong> · ${esc(preview.project_root || '')}</div>
+<div><strong>HEAD</strong> · ${esc((preview.head_commit || '').slice(0, 12))}</div>
+<div><strong>Write paths</strong> · ${esc((preview.write_set || []).join(', '))}</div>
+<div><strong>Repairs</strong> · ${esc(String(preview.max_repairs ?? ''))}</div>
+<div><strong>Concurrency limit</strong> · ${esc(String(preview.concurrency_limit ?? ''))}</div>
+<div><strong>Predicted queue</strong> · ${esc(queue)}</div>
+</div>
+<details open><summary>Role engines</summary><ul>${rolesHtml}</ul></details>
+<details><summary>Prerequisites</summary><ul>${depsHtml}</ul></details>
+<ul>${notes}</ul>`;
+  }
+  async function dryRun() {
+    if (B.busy) return;
+    const spec = collectSpec();
+    if (!spec.project_root || !spec.objective || !spec.write_set.length) {
+      notice('Fill project, objective and write paths before previewing.', true);
+      return;
+    }
+    B.busy = true;
+    if ($('builds-preview')) $('builds-preview').disabled = true;
+    if ($('builds-create')) $('builds-create').disabled = true;
+    notice('Validating build without starting agents…');
+    try {
+      const dependencies = Array.from($('builds-dependencies').selectedOptions, option => option.value);
+      const preview = await invoke('preview_build', { spec, dependencies });
+      renderPreview(preview);
+      notice('Dry run ok — review the preview. Nothing was submitted.');
+    } catch (e) {
+      renderPreview(null);
+      notice(String(e), true);
+    } finally {
+      B.busy = false;
+      if ($('builds-preview')) $('builds-preview').disabled = false;
+      if ($('builds-create')) $('builds-create').disabled = false;
+    }
+  }
+  $('builds-form').onsubmit = async event => {
+    event.preventDefault();
+    if (B.busy) return;
+    const spec = collectSpec();
+    B.busy = true; $('builds-create').disabled = true; if ($('builds-preview')) $('builds-preview').disabled = true;
     notice('Submitting the reviewed build and its prerequisites…');
     try {
       const dependencies = Array.from($('builds-dependencies').selectedOptions, option => option.value);
       const workflow = await invoke('create_build', { spec, dependencies });
-      B.selected = workflow.id; B.signature = ''; $('builds-new').open = false;
+      B.selected = workflow.id; B.signature = ''; $('builds-new').open = false; renderPreview(null);
       await refresh(); notice('Build submitted. Review its queue state and approve the full plan when planning completes.');
     } catch (e) { notice(String(e), true); }
-    finally { B.busy = false; $('builds-create').disabled = false; renderDetail(); }
+    finally { B.busy = false; $('builds-create').disabled = false; if ($('builds-preview')) $('builds-preview').disabled = false; renderDetail(); }
   };
+  if ($('builds-preview')) $('builds-preview').onclick = () => dryRun();
   $('builds-use-project').onclick = () => {
     $('builds-project').value = $('cwd').value;
     if (!$('builds-project').value) notice('Choose a project with the project selector, or enter its absolute folder path.', true);

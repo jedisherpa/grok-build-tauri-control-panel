@@ -14,6 +14,7 @@
     <link rel="stylesheet" href="joe-companion.css" />
     <link rel="stylesheet" href="word-shapes.css" />
     <link rel="stylesheet" href="meaning-memory.css" />
+    <script type="module" src="vendor/model-viewer.min.js"></script>
   </head>
   <body>
     <div id="spatial-background" aria-hidden="true"></div>
@@ -44,6 +45,7 @@
           <button class="nav-item" data-view="memory" title="Memory">
             <span class="nav-icon">◈</span> Memory
           </button>
+          <button class="nav-item" data-view="scheduler" title="Scheduler"><span class="nav-icon">⏱</span> Scheduler</button>
           <button class="nav-item" data-view="settings" title="System">
             <span class="nav-icon">⚙</span> System
           </button>
@@ -53,7 +55,8 @@
           <div class="section-label">
             <span>Projects</span>
             <span class="section-actions">
-              <button id="btn-new-project" class="icon-btn" title="New project — choose a folder">📁+</button>
+              <button id="btn-new-project" class="icon-btn" title="New project — choose a folder" aria-label="Add a project">📁+</button>
+              <button id="btn-add-project-cta" class="btn primary projects-empty-cta" type="button">Add a project to start</button>
               <button id="btn-new-session" class="icon-btn" title="New thread in the active project">+</button>
             </span>
           </div>
@@ -66,7 +69,7 @@
           <div id="auth-box" class="auth-box">
             <div class="section-label services-label">
               <span id="status-bomb" class="px-bomb md mood-idle tier-satellite" title="Starting…">
-                <img src="assets/logo.png" alt="" />
+                <img class="bomb-face" src="assets/platonic-solids-poster.png" alt="" /><model-viewer class="bomb-solid" src="assets/platonic-solids.glb" poster="assets/platonic-solids-poster.png" alt="" auto-rotate rotation-per-second="18deg" interaction-prompt="none" shadow-intensity="0.2" exposure="1.05" disable-zoom disable-pan disable-tap touch-action="none" tabindex="-1"></model-viewer>
               </span>
               <span>Services</span>
               <button id="btn-refresh-services" class="icon-btn" title="Re-check sign-in status">⟳</button>
@@ -144,9 +147,14 @@
                 <label>What should be built?<textarea id="builds-objective" rows="4" maxlength="32768" placeholder="Describe the change and the checks that will demonstrate it works." required></textarea></label>
                 <div class="builds-form-columns"><label>Allowed write paths<textarea id="builds-scope" rows="3" placeholder="src/feature
 tests/feature" spellcheck="false" required></textarea><span class="builds-help">One relative file or folder per line. Enter . to permit the entire project.</span></label><label>Maximum repair rounds<input id="builds-repairs" type="number" min="0" max="10" value="2" required /><span class="builds-help">After the first attempt. Repeated findings stop the build early.</span></label></div>
-                <label>Prerequisite builds<select id="builds-dependencies" multiple size="4" aria-describedby="builds-dependencies-help"></select><span id="builds-dependencies-help" class="builds-help">Optional. Select with Command-click to add or remove prerequisites. This build starts after you accept every selected result. Dependencies govern start order; each build has its own worktree. Earlier worktrees and results are supplied as context; their code is not combined automatically.</span></label>
+                <label>Prerequisite builds<select id="builds-dependencies" multiple size="4" aria-describedby="builds-dependencies-help"></select><span id="builds-dependencies-help" class="builds-help">Optional. Select with <span data-mod-click>Ctrl-click</span> to add or remove prerequisites. This build starts after you accept every selected result. Dependencies govern start order; each build has its own worktree. Earlier worktrees and results are supplied as context; their code is not combined automatically.</span></label>
                 <details class="builds-routes"><summary>Role engines and models</summary><div id="builds-routes" class="builds-route-grid"></div><p class="builds-help">A blank model uses the engine's configured default. Reviewers use Plan mode; implementation uses Ask with native tool approvals.</p></details>
-                <div class="builds-submit"><button id="builds-create" class="btn primary" type="submit">Submit reviewed build</button><span class="builds-help">Starts when its prerequisites, slot and write paths are available. Implementation waits for your plan approval.</span></div>
+                <div class="builds-submit">
+                  <button id="builds-preview" class="btn ghost" type="button">Preview dry run</button>
+                  <button id="builds-create" class="btn primary" type="submit">Submit reviewed build</button>
+                  <span class="builds-help">Preview validates the form and predicted queue without saving a build or starting agents. Submit starts when its prerequisites, slot and write paths are available; implementation still waits for your plan approval.</span>
+                </div>
+                <div id="builds-preview-panel" class="builds-preview-panel" hidden aria-live="polite"></div>
               </form>
             </details>
             <section class="builds-collaboration" aria-labelledby="collaboration-title"><div class="builds-heading"><h2 id="collaboration-title">Collaboration</h2><span id="collaboration-snapshot" class="builds-help"></span></div><p class="builds-help">Arrows show recorded prerequisites. Select a build to inspect its role sessions and handoffs. Sessions without a recorded link remain separate.</p><div id="collaboration-graph" class="collaboration-viewport" aria-label="Build dependency graph"></div><div id="collaboration-links" class="collaboration-links"></div><details class="collaboration-unlinked"><summary>Other live sessions</summary><div id="collaboration-sessions"></div></details></section>
@@ -157,7 +165,7 @@ tests/feature" spellcheck="false" required></textarea><span class="builds-help">
           <header class="history-header"><h1>History</h1><p>Search your conversations across tools. Original histories stay in their source apps.</p>
             <div class="history-actions"><button id="history-scan" class="btn">Scan local histories</button><button id="history-import" class="btn ghost">Import ChatGPT / Claude export</button></div>
             <div id="history-status" role="status">Loading library…</div>
-            <div class="history-search"><input id="history-query" type="search" placeholder="Search conversations and message text" aria-label="Search history" /><select id="history-source" aria-label="History source"><option value="">All sources</option><option value="codex">Codex</option><option value="claude_code">Claude Code</option><option value="grok">Grok</option><option value="chatgpt">ChatGPT</option><option value="claude">Claude app</option><option value="terminal">Terminal commands</option></select><label class="history-subagents"><input id="history-subagents" type="checkbox" /> Include related threads</label></div>
+            <div class="history-search"><input id="history-query" type="search" placeholder="Search conversations and message text" aria-label="Search history" autocomplete="off" spellcheck="false" /><button id="history-clear" class="btn ghost" type="button" title="Clear search">Clear</button><select id="history-source" aria-label="History source"><option value="">All sources</option><option value="codex">Codex</option><option value="claude_code">Claude Code</option><option value="grok">Grok</option><option value="chatgpt">ChatGPT</option><option value="claude">Claude app</option><option value="terminal">Terminal commands</option></select><label class="history-subagents"><input id="history-subagents" type="checkbox" /> Include related threads</label></div>
           </header>
           <div class="history-workspace"><div class="history-list-panel"><div id="history-list" class="history-list"></div><div class="history-pagination"><button id="history-prev" class="btn ghost">Previous</button><span id="history-count"></span><button id="history-next" class="btn ghost">Next</button></div></div>
           <article class="history-reader"><div id="history-reader-head"><p>Select a conversation to read it.</p><p class="muted">Imported conversations are reference material. They carry no execution permissions or approval.</p></div><div id="history-messages"></div><button id="history-more" class="btn ghost" hidden>Load more messages</button></article></div>
@@ -226,7 +234,7 @@ tests/feature" spellcheck="false" required></textarea><span class="builds-help">
           <div id="transcript" class="transcript" aria-live="polite">
             <div class="welcome">
               <div class="welcome-hero">
-                <span class="px-bomb xl mood-ready" aria-hidden="true"><img src="assets/logo.png" alt="" /></span>
+                <span class="px-bomb xl mood-ready" aria-hidden="true"><img class="bomb-face" src="assets/platonic-solids-poster.png" alt="" /><model-viewer class="bomb-solid" src="assets/platonic-solids.glb" poster="assets/platonic-solids-poster.png" alt="" auto-rotate rotation-per-second="18deg" interaction-prompt="none" shadow-intensity="0.2" exposure="1.05" disable-zoom disable-pan disable-tap touch-action="none" tabindex="-1"></model-viewer></span>
                 <h2 class="welcome-title">A place to build.</h2>
               </div>
               <p>Choose your project, select an engine, and begin with a plan.</p>
@@ -237,7 +245,7 @@ tests/feature" spellcheck="false" required></textarea><span class="builds-help">
           <div id="turn-dock" class="turn-dock" aria-hidden="true">
             <div class="turn-dock-main">
               <span id="turn-bomb" class="px-bomb lg mood-idle tier-dock" aria-hidden="true">
-                <img src="assets/logo.png" alt="" />
+                <img class="bomb-face" src="assets/platonic-solids-poster.png" alt="" /><model-viewer class="bomb-solid" src="assets/platonic-solids.glb" poster="assets/platonic-solids-poster.png" alt="" auto-rotate rotation-per-second="18deg" interaction-prompt="none" shadow-intensity="0.2" exposure="1.05" disable-zoom disable-pan disable-tap touch-action="none" tabindex="-1"></model-viewer>
               </span>
               <div class="turn-dock-copy">
                 <div class="turn-dock-title-row">
@@ -256,21 +264,22 @@ tests/feature" spellcheck="false" required></textarea><span class="builds-help">
               <li data-stage="reply" class="stage">Reply</li>
               <li data-stage="done" class="stage">Done</li>
             </ol>
-            <div class="turn-dock-meter" data-mode="idle" role="img" aria-label="Activity only; task completion unknown"><i id="turn-meter-bar"></i></div><div id="turn-completion" class="turn-completion muted"></div>
+            <div class="turn-dock-meter" data-mode="idle" role="img" aria-label="Turn activity meter; not a percent complete"><i id="turn-meter-bar"></i></div><div id="turn-completion" class="turn-completion muted"></div>
           </div>
           <footer class="composer" id="composer">
             <div class="composer-meta">
               <span id="composer-session" class="muted">no session</span>
               <span id="composer-phase" class="composer-phase" style="display:none"></span>
               <span id="composer-model" class="muted"></span>
-              <span id="thread-git-row" class="thread-git-row" style="display:none">
-                <span id="thread-branch" class="thread-branch muted"></span>
+              <span id="thread-git-row" class="thread-git-row" style="display:none" role="group" aria-label="Bring worktree changes into the project">
+                <span id="thread-branch" class="thread-branch muted" title="This thread writes in an isolated worktree, not the project folder"></span>
                 <button id="btn-sync-thread" class="btn ghost" type="button"
-                  title="Merge the project's latest changes into this thread's worktree">⟳ Sync</button>
-                <button id="btn-land-thread" class="btn" type="button"
-                  title="Merge this thread's work back into the project">⬆ Land</button>
+                  title="Pull the project branch into this worktree (resolve conflicts here, then Land)">⟳ Sync from project</button>
+                <button id="btn-land-thread" class="btn primary" type="button"
+                  title="Commit worktree changes and merge them into the project folder — use this instead of copying files by hand">⬆ Land into project</button>
               </span>
             </div>
+            <div id="composer-gate-hint" class="composer-gate-hint" style="display:none" role="status" aria-live="polite"></div>
             <div class="composer-row">
               <textarea
                 id="prompt"
@@ -314,6 +323,7 @@ tests/feature" spellcheck="false" required></textarea><span class="builds-help">
 
         <section id="view-mcp" class="view">
           <div class="pane-pad">
+            <h1 id="mcp-page-heading" class="page-heading">MCP</h1>
             <div class="toolbar">
               <button id="btn-mcp-refresh" class="btn">↻ Refresh</button>
               <button id="btn-mcp-doctor-all" class="btn" title="Run health checks on every server">Check all</button>
@@ -326,7 +336,7 @@ tests/feature" spellcheck="false" required></textarea><span class="builds-help">
               <span class="muted">Add from catalog:</span>
               <select id="mcp-catalog" title="Template"></select>
               <input id="mcp-name" type="text" placeholder="instance name (optional)" title="Defaults to the template id" />
-              <input id="mcp-paths" type="text" placeholder="allowed paths, comma-separated" class="grow" style="display:none" />
+              <input id="mcp-paths" type="text" placeholder="allowed paths (required for filesystem), comma-separated absolute dirs" class="grow" />
               <button id="btn-mcp-add" class="btn primary">Add</button>
             </div>
             <div class="mcp-cred-section">
@@ -344,10 +354,12 @@ tests/feature" spellcheck="false" required></textarea><span class="builds-help">
 
         <section id="view-worktrees" class="view">
           <div class="pane-pad">
+            <h1 id="worktrees-page-heading" class="page-heading">Worktrees</h1>
             <div class="toolbar">
               <button id="btn-wt-refresh" class="btn">↻ Refresh</button>
               <span class="muted">Worktrees across your projects — 🌱 rows belong to threads.</span>
             </div>
+            <p class="builds-help" id="wt-land-help">Agent edits stay in the thread worktree until you <strong>Land into project</strong> (composer or row button). That commits + merges into the project folder — no hand-copying. Use <strong>Sync from project</strong> first if Land reports conflicts.</p>
             <div id="wt-list" class="wt-list">
               <div class="empty-hint">No projects yet — add one from the sidebar.</div>
             </div>
@@ -382,7 +394,7 @@ tests/feature" spellcheck="false" required></textarea><span class="builds-help">
                 <button id="recall-stop" class="btn ghost" disabled>Pause after this batch</button>
                 <button id="recall-refresh" class="btn ghost">Check coverage</button>
               </div>
-              <p id="recall-status" role="status">Recall is ready to check.</p>
+              <p id="recall-status" role="status">No local recall index yet — click “Build / refresh local index” before searching.</p>
               <details><summary>Coverage and sources</summary><p id="recall-coverage" class="muted"></p></details>
               <div id="recall-results" class="recall-results"></div>
               <button id="recall-prepare" class="btn" disabled>Prepare selected context for Joe</button>
@@ -422,10 +434,57 @@ tests/feature" spellcheck="false" required></textarea><span class="builds-help">
             <div id="mem-list" class="mem-list">
               <div class="empty-hint">No notes yet</div>
             </div>
-            <div class="toolbar">
-              <input id="mem-content" type="text" placeholder="note (e.g. 'we use pnpm, never npm')" class="grow" />
-              <input id="mem-tags" type="text" placeholder="tags, comma-separated" />
-              <button id="btn-mem-add" class="btn primary">Add</button>
+            <div class="toolbar mem-compose" role="form" aria-label="Add a memory note">
+              <input id="mem-content" type="text" placeholder="note (e.g. 'we use pnpm, never npm')" class="grow" autocomplete="off" />
+              <input id="mem-tags" type="text" placeholder="tags, comma-separated" autocomplete="off" />
+              <button id="btn-mem-add" class="btn primary" type="button">Add</button>
+            </div>
+          </div>
+        </section>
+
+
+        <section id="view-scheduler" class="view">
+          <header class="scheduler-header">
+            <div class="scheduler-heading">
+              <div>
+                <h1>Scheduler</h1>
+                <p>Recurring and one-shot agent routines. Every job needs an absolute working directory. New jobs stay paused until you enable them.</p>
+              </div>
+              <button id="scheduler-refresh" class="btn ghost" type="button">Refresh</button>
+            </div>
+            <div id="scheduler-status" role="status" aria-live="polite">Loading scheduled jobs…</div>
+          </header>
+          <div class="scheduler-content">
+            <details id="scheduler-new" class="scheduler-new" open>
+              <summary>Create scheduled job</summary>
+              <form id="scheduler-form" class="scheduler-form">
+                <label>Name<input id="scheduler-name" type="text" maxlength="120" placeholder="nightly status check" required autocomplete="off" /></label>
+                <label>Prompt / command<textarea id="scheduler-prompt" rows="3" maxlength="8000" placeholder="What should the agent do each time this fires?" required></textarea></label>
+                <label>Working directory (required)<input id="scheduler-cwd" type="text" placeholder="/absolute/project/path" spellcheck="false" required /></label>
+                <button id="scheduler-use-project" class="btn ghost" type="button">Use selected project</button>
+                <div class="scheduler-form-columns">
+                  <label>Schedule type
+                    <select id="scheduler-kind" aria-label="Schedule type">
+                      <option value="interval" selected>Interval (seconds)</option>
+                      <option value="cron">Cron (UTC)</option>
+                      <option value="once">One-shot delay</option>
+                    </select>
+                  </label>
+                  <label id="scheduler-field-interval">Interval seconds<input id="scheduler-interval" type="number" min="1" step="1" value="3600" /></label>
+                  <label id="scheduler-field-cron" hidden>Cron expression<input id="scheduler-cron" type="text" placeholder="0 9 * * *" spellcheck="false" /></label>
+                  <label id="scheduler-field-once" hidden>Delay seconds<input id="scheduler-once" type="number" min="0" step="1" value="60" /></label>
+                  <label>Max runs (optional)<input id="scheduler-max-runs" type="number" min="1" step="1" placeholder="unlimited" /></label>
+                </div>
+                <label class="scheduler-enable-row"><input id="scheduler-enable" type="checkbox" /> Enable immediately (otherwise create paused)</label>
+                <p class="scheduler-help">Safe default is paused. Enabling may spawn a headless Plan-mode agent when the schedule fires — confirm if you check Enable immediately.</p>
+                <div class="scheduler-submit">
+                  <button id="scheduler-create" class="btn primary" type="submit">Create job</button>
+                </div>
+              </form>
+            </details>
+            <div class="scheduler-workspace">
+              <div id="scheduler-list" class="scheduler-list" aria-label="Scheduled jobs"></div>
+              <article id="scheduler-detail" class="scheduler-detail"><p class="empty-hint">Select a job to inspect schedule, next run, and controls.</p></article>
             </div>
           </div>
         </section>
@@ -562,7 +621,7 @@ tests/feature" spellcheck="false" required></textarea><span class="builds-help">
         <header class="col-header">
           <div class="title">
             <span id="activity-bomb" class="px-bomb md mood-idle" aria-hidden="true">
-              <img src="assets/logo.png" alt="" />
+              <img class="bomb-face" src="assets/platonic-solids-poster.png" alt="" /><model-viewer class="bomb-solid" src="assets/platonic-solids.glb" poster="assets/platonic-solids-poster.png" alt="" auto-rotate rotation-per-second="18deg" interaction-prompt="none" shadow-intensity="0.2" exposure="1.05" disable-zoom disable-pan disable-tap touch-action="none" tabindex="-1"></model-viewer>
             </span>
             Activity
           </div>
@@ -582,10 +641,11 @@ tests/feature" spellcheck="false" required></textarea><span class="builds-help">
         <div class="right-block">
           <button class="section-label agent-talk-header" id="agents-toggle" type="button" aria-expanded="true">
             <span>Agents</span>
+            <span class="section-meta muted" id="agents-count"></span>
             <span class="section-meta muted" id="agents-caret">▾</span>
           </button>
           <div id="agent-list" class="agent-list">
-            <div class="empty-hint">No active agents</div>
+            <div class="empty-hint">No live ACP processes</div>
           </div>
         </div>
 
@@ -656,6 +716,7 @@ tests/feature" spellcheck="false" required></textarea><span class="builds-help">
     </div>
     <script src="world.js"></script>
     <script src="presence.js"></script>
+    <script src="diagnostics.js"></script>
     <script src="thread-drafts.js"></script>
     <script src="app.js"></script>
     <script src="history.js"></script>
@@ -666,6 +727,7 @@ tests/feature" spellcheck="false" required></textarea><span class="builds-help">
     <script src="meaning-memory.js"></script>
     <script src="collaboration.js"></script>
     <script src="builds.js"></script>
+    <script src="scheduler.js"></script>
     <script src="spatial-world.js"></script>
     <script src="spatial-host.js"></script>
     <script src="spatial-faces.js"></script>

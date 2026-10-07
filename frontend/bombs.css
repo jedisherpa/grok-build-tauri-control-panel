@@ -34,7 +34,8 @@
   overflow: visible;
 }
 .px-bomb img,
-.px-bomb .bomb-face {
+.px-bomb .bomb-face,
+.px-bomb model-viewer.bomb-solid {
   width: 100%;
   height: 100%;
   object-fit: contain;
@@ -43,6 +44,17 @@
   image-rendering: crisp-edges;
   filter: drop-shadow(0 0 0 transparent);
   transform-origin: 50% 70%;
+}
+/* GLB viewer — keep smooth (not pixelated), transparent chrome */
+.px-bomb model-viewer.bomb-solid {
+  image-rendering: auto;
+  background-color: transparent;
+  --poster-color: transparent;
+  overflow: hidden;
+  border: 0;
+  position: absolute;
+  inset: 0;
+  z-index: 1;
 }
 /* Bigger scale across the app */
 .px-bomb.xs { --bomb-size: 16px; }
@@ -73,18 +85,21 @@
    - ambient: soft breathe + faint wick when armed
    - satellite: larger icon, static body; wick only on armed moods
 */
-.px-bomb.tier-satellite img {
+.px-bomb.tier-satellite img,
+.px-bomb.tier-satellite model-viewer.bomb-solid {
   animation: none !important;
 }
 /* satellites still get wick when mood is armed (see .wick-on rules below) */
 
-.px-bomb.tier-ambient img {
+.px-bomb.tier-ambient img,
+.px-bomb.tier-ambient model-viewer.bomb-solid {
   animation: bomb-breathe 3.6s ease-in-out infinite;
   opacity: 0.92;
 }
 
 /* Enter transition on phase change */
-.px-bomb.is-entering img {
+.px-bomb.is-entering img,
+.px-bomb.is-entering model-viewer.bomb-solid {
   animation: bomb-mood-enter 0.35s ease-out both !important;
 }
 
@@ -119,14 +134,16 @@
 }
 
 /* ── Mood: idle ──────────────────────────────────────────────────────────── */
-.px-bomb.mood-idle img {
+.px-bomb.mood-idle img,
+.px-bomb.mood-idle model-viewer.bomb-solid {
   animation: bomb-breathe 3.2s ease-in-out infinite;
   opacity: 0.9;
 }
 /* no wick when cold */
 
 /* ── Mood: ready (soft fuse glow) ────────────────────────────────────────── */
-.px-bomb.mood-ready img {
+.px-bomb.mood-ready img,
+.px-bomb.mood-ready model-viewer.bomb-solid {
   animation: bomb-breathe 2.4s ease-in-out infinite;
   filter: drop-shadow(0 0 5px color-mix(in srgb, var(--ok) 45%, transparent));
 }
@@ -140,7 +157,8 @@
 }
 
 /* ── Mood: thinking — lit wick burning down the fuse ─────────────────────── */
-.px-bomb.mood-thinking img {
+.px-bomb.mood-thinking img,
+.px-bomb.mood-thinking model-viewer.bomb-solid {
   animation: bomb-think-bounce 1.25s ease-in-out infinite;
   filter: drop-shadow(0 0 8px color-mix(in srgb, var(--bomb-fuse) 55%, transparent));
 }
@@ -161,7 +179,8 @@
 }
 
 /* ── Mood: running / stall — fuse still lit, calmer ──────────────────────── */
-.px-bomb.mood-running img {
+.px-bomb.mood-running img,
+.px-bomb.mood-running model-viewer.bomb-solid {
   animation: bomb-breathe 1.5s ease-in-out infinite;
   filter: drop-shadow(0 0 7px color-mix(in srgb, var(--bomb-fuse) 50%, transparent));
 }
@@ -179,7 +198,8 @@
 }
 
 /* ── Mood: tooling — wick + work chips ───────────────────────────────────── */
-.px-bomb.mood-tooling img {
+.px-bomb.mood-tooling img,
+.px-bomb.mood-tooling model-viewer.bomb-solid {
   animation: bomb-tool-nod 1.3s ease-in-out infinite;
   filter: drop-shadow(0 0 7px color-mix(in srgb, var(--tool) 50%, transparent));
 }
@@ -198,7 +218,8 @@
 }
 
 /* ── Mood: stream — productive burn ──────────────────────────────────────── */
-.px-bomb.mood-stream img {
+.px-bomb.mood-stream img,
+.px-bomb.mood-stream model-viewer.bomb-solid {
   animation: bomb-stream-glow 1.6s ease-in-out infinite;
   filter: drop-shadow(0 0 8px color-mix(in srgb, var(--agent) 55%, transparent));
 }
@@ -216,7 +237,8 @@
 }
 
 /* ── Mood: boom / success ────────────────────────────────────────────────── */
-.px-bomb.mood-boom img {
+.px-bomb.mood-boom img,
+.px-bomb.mood-boom model-viewer.bomb-solid {
   animation: bomb-boom-pop 0.55s cubic-bezier(0.2, 1.4, 0.4, 1) both;
   filter: drop-shadow(0 0 12px color-mix(in srgb, var(--bomb-ok) 70%, transparent));
 }
@@ -237,7 +259,8 @@
 }
 
 /* ── Mood: error / fail — smoke from snuffed wick ────────────────────────── */
-.px-bomb.mood-error img {
+.px-bomb.mood-error img,
+.px-bomb.mood-error model-viewer.bomb-solid {
   animation: bomb-error-wobble 0.45s ease-in-out 2;
   filter: drop-shadow(0 0 6px color-mix(in srgb, var(--bomb-err) 55%, transparent))
     grayscale(0.25);
@@ -258,7 +281,8 @@
 }
 
 /* ── Mood: wait / approval — amber fuse holding ──────────────────────────── */
-.px-bomb.mood-wait img {
+.px-bomb.mood-wait img,
+.px-bomb.mood-wait model-viewer.bomb-solid {
   animation: bomb-breathe 2.2s ease-in-out infinite;
   filter: drop-shadow(0 0 8px color-mix(in srgb, var(--bomb-wait) 60%, transparent));
   opacity: 0.98;
@@ -739,9 +763,11 @@
 /* ── Reduced motion ──────────────────────────────────────────────────────── */
 @media (prefers-reduced-motion: reduce) {
   .px-bomb img,
+  .px-bomb model-viewer.bomb-solid,
   .px-bomb::before,
   .px-bomb::after,
   .px-bomb.is-entering img,
+  .px-bomb.is-entering model-viewer.bomb-solid,
   .thinking-strip,
   .thinking-strip .fuse-meter > i,
   .composer.busy::before,
@@ -752,8 +778,11 @@
     animation: none !important;
   }
   .px-bomb.mood-thinking img,
+  .px-bomb.mood-thinking model-viewer.bomb-solid,
   .px-bomb.mood-running img,
-  .px-bomb.mood-stream img {
+  .px-bomb.mood-running model-viewer.bomb-solid,
+  .px-bomb.mood-stream img,
+  .px-bomb.mood-stream model-viewer.bomb-solid {
     filter: drop-shadow(0 0 4px var(--bomb-fuse));
   }
   .turn-dock-meter[data-mode="indeterminate"] > i {

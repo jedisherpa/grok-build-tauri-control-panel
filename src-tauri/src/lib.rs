@@ -90,6 +90,7 @@ pub fn run() {
             builds::set_build_concurrency,
             builds::list_builds,
             builds::create_build,
+            builds::preview_build,
             builds::approve_build_plan,
             builds::accept_build,
             builds::cancel_build,

@@ -53,7 +53,7 @@ for (const chars of [1, 800, 1000000]) {
   const view = P.formatPresence(active);
   assert(view.meterMode === 'indeterminate', 'reply activity is indeterminate');
   assert(view.meterProgress === null, 'no fabricated percentage');
-  assert(view.completionLabel.includes('unknown'), 'unknown completion is explicit');
+  assert(view.completionLabel.includes('Live activity') || view.completionLabel.includes('not a percent'), 'live activity copy is honest');
 }
 for (const phase of ['done','error','tools']) {
   const active = P.emptyPresence(); active.phase = phase;
@@ -65,7 +65,7 @@ let uncertain = P.markToolStart(P.emptyPresence(), "read", 1000);
 uncertain = P.idleStatus(uncertain, 1100);
 assert(uncertain.phase === "tools" && uncertain.toolsActive === 1, "Idle retains open tools");
 assert(!P.normallyFinished(uncertain), "Idle cannot supply a completion receipt");
-assert(P.formatPresence(uncertain, { now: 1200 }).title === "Completion unconfirmed", "missing boundary is visible");
+assert(P.formatPresence(uncertain, { now: 1200 }).title === "Idle · turn may still be open", "missing boundary is visible");
 let waiting = P.applySignal(P.emptyPresence(), "wait", { note: "approval pending" }, 1000);
 waiting = P.idleStatus(waiting, 1100);
 assert(waiting.phase === "wait" && waiting.note === "approval pending", "Idle retains pending approval phase");
@@ -98,6 +98,27 @@ waiting = P.finishPrompt(waiting, "end_turn", 1300);
 assert(waiting.phase === "wait" && !P.closeCompletedSession(waiting), "turn ending does not erase pending permission");
 assert(P.finishPrompt(P.applySignal(P.emptyPresence(), "wait", {}, 1000), "max_tokens", 1100).phase === "wait", "truncation does not hide a pending permission");
 
+
+// Ghost startup Idle with no user prompt clears presence (llm-retry #04/#06)
+{
+  let g = P.applySignal(P.emptyPresence(), "think", { note: "handshake" }, 1000);
+  g = P.idleStatus(g, 1100);
+  assert(g.phase === "idle" && !g.completionUnconfirmed && !g.promptChars, "ghost startup Idle clears");
+}
+
+// Failed timer freezes (play1 #14 / #27)
+{
+  let f = P.emptyPresence();
+  const t0 = 1_000_000;
+  f = P.applySignal(f, "send", { promptChars: 5 }, t0);
+  f = P.applySignal(f, "error", { note: "failed" }, t0 + 5_000);
+  assert(f.phase === "error" && f.completedAt === t0 + 5_000, "error stamps completedAt");
+  const v1 = P.formatPresence(f, { now: t0 + 5_000 });
+  const v2 = P.formatPresence(f, { now: t0 + 65_000 });
+  assert(v1.elapsed === v2.elapsed, "Failed elapsed must not keep counting");
+  assert(v1.title === "Failed", "title Failed");
+}
+
 // Exercise the actual app handler with native state stores; no UI or provider.
 const appSource = readFileSync(join(__dirname, "app.js"), "utf8");
 const start = appSource.indexOf("function handleControlEvent(ev) {");
@@ -112,7 +133,8 @@ const native = {
   openToolsFor: () => open,
   endTurnPresence: (sid, phase, note) => { open.clear(); nativePresence.set(sid, P.applySignal(nativePresence.get(sid), phase, { note, toolsActive: 0 })); },
   noteTurn: (phase, patch, sid) => nativePresence.set(sid, P.applySignal(nativePresence.get(sid), phase, patch)),
-  endAgentStream() {}, clearBoomTimer() {}, appendTranscript() {}, pushEvent() {}, refreshSessions() {}, talkNote() {}, sweepToolsForSession() {},
+  endAgentStream() {}, clearBoomTimer() {}, appendTranscript() {}, pushEvent() {}, refreshSessions() {}, talkNote() {}, sweepToolsForSession() {}, renderTranscript() {}, updateSendButton() {}, pushFinalExplainFromReply() {}, explainListFor: () => [], renderExplainFeed() {},
+  userStartedTurn: (p) => !!(p && (p.promptChars || p.stagesSeen?.send || p.toolCount || (p.toolsActive || 0) > 0 || p.phase === "wait" || p.phase === "reply")),
   nowIso: () => new Date().toISOString(), shortId: sid => sid,
 };
 runInContext(handler, createContext(native));
@@ -132,4 +154,19 @@ assert(nativePresence.get("a").phase === "error" && !P.normallyFinished(nativePr
 nativePresence.set("a", P.finishPrompt(P.emptyPresence(), "end_turn", Date.now()));
 native.handleControlEvent({ type: "error", session_id: "a", message: "later provider fault" });
 assert(nativePresence.get("a").phase === "error" && !P.normallyFinished(nativePresence.get("a")), "later provider error is never masked by completion");
+
+// D-049: idle/done copy is clear — never "Task completion unknown".
+{
+  const done = P.finishPrompt(P.emptyPresence(), "end_turn", 1000);
+  const doneView = P.formatPresence(done, { now: 1100 });
+  assert(doneView.completionLabel.includes("Turn finished") || doneView.completionLabel.includes("ready"), "done label is clear");
+  assert(!/unknown/i.test(doneView.completionLabel), "done label avoids unknown");
+  const idle = P.emptyPresence();
+  assert(P.formatPresence(idle).completionLabel === "", "hidden idle has empty label");
+  const live = P.emptyPresence(); live.phase = "think"; live.startedAt = 1; live.lastSignalAt = 1;
+  const liveView = P.formatPresence(live, { now: 2 });
+  assert(!/Task completion unknown/i.test(liveView.completionLabel), "live label avoids Task completion unknown");
+}
+
 console.log("presence.test.mjs: all passed");
+

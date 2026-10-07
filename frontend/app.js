@@ -4,7 +4,9 @@
 
 const $ = (id) => document.getElementById(id);
 
-const LOGO = "assets/logo.png";
+const SOLID_POSTER = "assets/platonic-solids-poster.png";
+const SOLID_GLB = "assets/platonic-solids.glb";
+const SOLID_3D_SIZES = new Set(["md", "lg", "xl"]);
 const P = window.BombPresence;
 if (!P || typeof P.emptyPresence !== "function") {
   console.error("BombPresence missing — presence.js failed to load before app.js");
@@ -121,12 +123,41 @@ function clearBoomTimer(sid) {
   }
 }
 
+function prefersReducedMotion() {
+  return !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+}
+
+function solidMediaHtml(size = "sm") {
+  // Poster always present — WebKitGTK with compositing disabled may not paint WebGL.
+  const poster = `<img class="bomb-face" src="${SOLID_POSTER}" alt="" />`;
+  if (!SOLID_3D_SIZES.has(size)) return poster;
+  // One WebGL context per hero/status icon — avoid for xs/sm list spam.
+  const rotate = prefersReducedMotion()
+    ? ""
+    : ' auto-rotate rotation-per-second="18deg"';
+  return (
+    poster +
+    `<model-viewer class="bomb-solid" src="${SOLID_GLB}" poster="${SOLID_POSTER}" ` +
+    `alt=""${rotate} interaction-prompt="none" ` +
+    `shadow-intensity="0.2" exposure="1.05" disable-zoom disable-pan disable-tap ` +
+    `touch-action="none" tabindex="-1"></model-viewer>`
+  );
+}
+
+function respectSolidMotionPreference() {
+  const reduce = prefersReducedMotion();
+  document.querySelectorAll("model-viewer.bomb-solid").forEach((el) => {
+    if (reduce) el.removeAttribute("auto-rotate");
+    else if (!el.hasAttribute("auto-rotate")) el.setAttribute("auto-rotate", "");
+  });
+}
+
 function bombHtml(mood = "idle", size = "sm", extraClass = "") {
   const wick =
     ["thinking", "stream", "tooling", "wait", "ready", "running"].includes(mood)
       ? " wick-on"
       : "";
-  return `<span class="px-bomb ${size} mood-${mood} tier-satellite${wick} ${extraClass}" aria-hidden="true"><img src="${LOGO}" alt="" /></span>`;
+  return `<span class="px-bomb ${size} mood-${mood} tier-satellite${wick} ${extraClass}" aria-hidden="true">${solidMediaHtml(size)}</span>`;
 }
 
 function moodFromStatus(status) {
@@ -202,6 +233,22 @@ function isNoiseAgentText(text) {
 }
 
 /** Start or advance the turn with a concrete signal (selected session by default). */
+
+/** True once the user has sent a prompt on this presence (not startup noise). */
+function userStartedTurn(p) {
+  if (!p) return false;
+  // Tools / wait mean a real agent turn is under way even if stagesSeen.send
+  // was lost; pure startup "think" with none of these is a phantom.
+  return !!(
+    p.promptChars ||
+    (p.stagesSeen && p.stagesSeen.send) ||
+    p.toolCount ||
+    (p.toolsActive || 0) > 0 ||
+    p.phase === "wait" ||
+    p.phase === "reply"
+  );
+}
+
 function noteTurn(phase, patch = {}, sid = null) {
   if (!P) return;
   const target = sid || state.selectedSession;
@@ -307,7 +354,11 @@ function updateBombChrome() {
 
     const meter = document.querySelector(".turn-dock-meter");
     const bar = $("turn-meter-bar");
-    if (meter) meter.setAttribute("data-mode", view.meterMode);
+    if (meter) {
+      meter.setAttribute("data-mode", view.meterMode);
+      const aria = view.completionLabel || "Ready · no active turn";
+      meter.setAttribute("aria-label", aria);
+    }
     const completion = $("turn-completion");
     const workflow = window.BombBuilds?.sessionSummary(state.selectedSession);
     if (completion) completion.textContent = workflow
@@ -536,6 +587,12 @@ async function askConfirm(message, { title = "Bomb Code", kind = "warning" } = {
   return window.confirm(message);
 }
 
+function toastOk(msg) {
+  try {
+    pushEvent(String(msg || ""), "ok", null, { force: true });
+  } catch (_) {}
+}
+
 function toastError(e) {
   const msg = e?.message || String(e);
   pushEvent(msg, "err", "error", { force: true, milestone: true });
@@ -555,6 +612,7 @@ function activateView(name) {
   // Per-view refresh hooks: data views load themselves on entry.
   if (name === "history" && window.BombHistory) window.BombHistory.refresh();
   if (name === "builds" && window.BombBuilds) window.BombBuilds.refresh();
+  if (name === "scheduler" && window.BombScheduler) window.BombScheduler.refresh();
   if (name === "worktrees") refreshWorktrees();
   if (name === "mcp") refreshMcpView();
   if (name === "memory") refreshMemoryView();
@@ -577,6 +635,64 @@ function getTranscript(sessionId) {
   return state.transcriptBySession.get(sessionId);
 }
 
+
+/** Roles that may sit between stream chunks without ending a reply segment.
+ *  user / approval / error always hard-stop. tool / plan may bridge when the
+ *  previous agent bubble has incomplete markdown (round4b bold split). */
+const STREAM_SOFT_ROLES = {
+  agent: new Set(["term", "system", "thought"]),
+  thought: new Set(["term", "system"]),
+  term: new Set(["system"]),
+};
+/** tool/plan may sit between agent chunks only to finish broken markdown. */
+const STREAM_MD_BRIDGE_ROLES = new Set(["tool", "plan"]);
+
+/** True when body ends mid-fence / mid-bold / mid-inline-code. */
+function incompleteMarkdownTail(body) {
+  const t = String(body || "");
+  if (!t) return false;
+  const fences = (t.match(/```/g) || []).length;
+  if (fences % 2 === 1) return true;
+  const bolds = (t.match(/\*\*/g) || []).length;
+  if (bolds % 2 === 1) return true;
+  // Strip complete fences, then look for an unclosed inline backtick.
+  const noFences = t.replace(/```[\s\S]*?```/g, "");
+  const ticks = (noFences.match(/`/g) || []).length;
+  if (ticks % 2 === 1) return true;
+  return false;
+}
+
+/**
+ * Index of the bubble a streaming chunk should join, or -1.
+ * Reopens a recently closed same-role agent/thought bubble when only soft
+ * noise sits after it (round4 S5). Also reopens across tool/plan when the
+ * prior agent bubble has incomplete markdown (round4b "**" split).
+ */
+function findStreamCoalesceIndex(list, role, hopsMax = 40) {
+  if (!list || !list.length) return -1;
+  const soft = STREAM_SOFT_ROLES[role] || new Set(["term", "system"]);
+  let bridged = false;
+  for (let i = list.length - 1, hops = 0; i >= 0 && hops < hopsMax; i--, hops++) {
+    const entry = list[i];
+    if (entry.role === role) {
+      if (entry.streaming) return i;
+      if (role === "agent" || role === "thought") {
+        if (!bridged) return i;
+        if (role === "agent" && incompleteMarkdownTail(entry.body)) return i;
+        return -1;
+      }
+      return -1;
+    }
+    if (soft.has(entry.role)) continue;
+    if (role === "agent" && STREAM_MD_BRIDGE_ROLES.has(entry.role)) {
+      bridged = true;
+      continue;
+    }
+    return -1; // user / approval / error (or other)
+  }
+  return -1;
+}
+
 function appendTranscript(sessionId, role, body, at = nowIso(), opts = {}) {
   if (!sessionId) return;
   state.transcriptRevisionBySession.set(sessionId, (state.transcriptRevisionBySession.get(sessionId) || 0) + 1);
@@ -585,24 +701,24 @@ function appendTranscript(sessionId, role, body, at = nowIso(), opts = {}) {
   const stream = !!opts.stream;
 
   // Coalesce streaming agent/thought/term chunks into one live block (TTY feel).
-  // Interleaved ACP noise (term/tool/plan rows) must not split a response —
-  // look back past it to find the still-streaming block of the same role.
+  // Soft noise (term/thought) must not split a response; tools/approvals do.
+  // Late fragments after prompt_finished reopen the closed bubble (round4 S5).
   if (stream && (role === "agent" || role === "thought" || role === "term") && list.length) {
-    for (let i = list.length - 1, hops = 0; i >= 0 && hops < 8; i--, hops++) {
+    const i = findStreamCoalesceIndex(list, role);
+    if (i >= 0) {
       const entry = list[i];
-      if (entry.role === role && entry.streaming) {
-        // Rotate giant stream blocks: one multi-MB text node re-escaped on
-        // every render tanks the whole transcript.
-        if ((entry.body || "").length > 64_000) {
-          entry.streaming = false;
-          break;
-        }
+      // Rotate giant stream blocks: one multi-MB text node re-escaped on
+      // every render tanks the whole transcript.
+      if ((entry.body || "").length > 64_000) {
+        entry.streaming = false;
+      } else {
         if (role === "term") {
           entry.body = (entry.body || "") + (entry.body ? "\n" : "") + text;
         } else {
           entry.body = (entry.body || "") + text;
         }
         entry.at = at;
+        entry.streaming = true; // reopen if late fragment after close
         // Hidden ACP rows still buffer (the toggle can reveal them later)
         // but must not touch the DOM — patching would hit a visible bubble.
         const visible = role !== "term" || state.showAcpLines;
@@ -615,9 +731,6 @@ function appendTranscript(sessionId, role, body, at = nowIso(), opts = {}) {
         }
         return;
       }
-      // Skip over noise rows that landed mid-stream; stop at real content.
-      if (entry.role === "term" || entry.role === "tool" || entry.role === "plan") continue;
-      break;
     }
   }
 
@@ -760,15 +873,20 @@ function endAgentStream(sessionId) {
   if (!sessionId) return;
   const list = getTranscript(sessionId);
   if (!list.length) return;
-  const last = list[list.length - 1];
-  if (last.streaming) {
-    last.streaming = false;
-    if (sessionId === state.selectedSession) {
-      const root = $("transcript");
-      const blocks = root?.querySelectorAll(".t-block");
-      const el = blocks?.[blocks.length - 1];
-      el?.classList.remove("streaming");
+  let closed = false;
+  // Clear any live stream in the recent tail (agent may not be last if a
+  // term/tool row already landed). Re-render so markdown/fences apply —
+  // patchLastTranscriptBody writes raw textContent while streaming.
+  for (let i = list.length - 1, hops = 0; i >= 0 && hops < 40; i--, hops++) {
+    const entry = list[i];
+    if (entry.streaming) {
+      entry.streaming = false;
+      closed = true;
     }
+    if (entry.role === "user") break;
+  }
+  if (closed && sessionId === state.selectedSession) {
+    renderTranscript();
   }
 }
 
@@ -791,18 +909,79 @@ function explainListFor(sid) {
   return state.explainBySession.get(sid);
 }
 
+
+/** When a turn goes idle/done, push a final What's happening card from the
+ *  coalesced agent reply so the narrator does not stay on "is writing…" (round4 S6). */
+function pushFinalExplainFromReply(sessionId) {
+  if (!sessionId || !state.explainerEnabled) return;
+  const entries = getTranscript(sessionId);
+  let body = "";
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i];
+    if (e.role === "agent" && e.body) {
+      body = String(e.body);
+      break;
+    }
+    if (e.role === "user") break;
+  }
+  const plain = body
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/`([^`\n]+)`/g, "$1")
+    .replace(/\*\*([^*\n]+)\*\*/g, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+  const clip = plain.length > 240 ? `${plain.slice(0, 237)}…` : plain;
+  const text = clip
+    ? `The agent finished and replied: ${clip}`
+    : "The agent finished its reply.";
+  const list = explainListFor(sessionId);
+  const last = list[list.length - 1];
+  if (last && last.kind === "done") return;
+  if (last && /finished(?: its)? reply|replied:/i.test(last.text || "")) return;
+  list.push({ text, kind: "done", requestId: null, at: nowIso() });
+  if (list.length > 50) list.splice(0, list.length - 50);
+  state.explainPending = false;
+  if (sessionId === state.selectedSession) renderExplainFeed();
+}
+
+function explainLooksMidTurn(text) {
+  return /\b(started a new reply|is writing|drafting|calling (?:a |the )?tool|thinking through|queued up a tool|paused while waiting|waiting on the next model)\b/i.test(
+    String(text || "")
+  );
+}
+
 function handleExplainEvent(sid, payload) {
   if (!sid) return;
   const kind = String(payload.kind || "tick");
+  const presence = presenceFor(sid);
+  const turnOver =
+    !!P && (P.normallyFinished(presence) || presence.phase === "idle" || presence.phase === "done");
   if (kind === "pending") {
+    // Do not leave a leftover "thinking…" line after the turn is idle (round4b).
+    if (turnOver) {
+      state.explainPending = false;
+      if (sid === state.selectedSession) renderExplainFeed();
+      return;
+    }
     state.explainPending = true;
     if (sid === state.selectedSession) renderExplainFeed();
     return;
   }
   state.explainPending = false;
-  const text = String(payload.text || "").trim();
+  const D = (typeof window !== "undefined" && window.BombDiagnostics);
+  const text = (D ? D.sanitize(String(payload.text || "")) : String(payload.text || "")).trim();
   if (!text) return;
   const list = explainListFor(sid);
+  const hasDone = list.some(
+    (e) =>
+      e.kind === "done" ||
+      /finished(?: its)? (?:short )?reply|finished and replied|idle again/i.test(e.text || "")
+  );
+  // Drop late out-of-order narrator cards after idle (round4b B05b/B07).
+  if (kind !== "done" && (turnOver || hasDone) && explainLooksMidTurn(text)) {
+    if (sid === state.selectedSession) renderExplainFeed();
+    return;
+  }
   list.push({ text, kind, requestId: payload.requestId || null, at: payload.at || nowIso() });
   if (list.length > 50) list.splice(0, list.length - 50);
 
@@ -850,7 +1029,7 @@ function renderExplainFeed() {
         const cls = e.kind === "approval" ? " approval" : e.kind === "error" ? " error" : "";
         return `<div class="explain-card${cls}">
   <div class="explain-ts">${escapeHtml(shortTime(e.at))}${e.kind === "approval" ? " · about the approval" : ""}</div>
-  <div class="explain-text">${escapeHtml(e.text)}</div>
+  <div class="explain-text">${renderMarkdown(e.text)}</div>
 </div>`;
       })
       .join("") + pending;
@@ -886,6 +1065,19 @@ function resolveApprovalEntry(sessionId, requestId, resolution) {
   }
   if (sessionId === state.selectedSession) {
     renderTranscript();
+  }
+}
+
+
+function scrollPendingApprovalIntoView() {
+  const root = $("transcript");
+  if (!root) return;
+  const pending = root.querySelector(".t-block.approval.pending");
+  if (!pending) return;
+  try {
+    pending.scrollIntoView({ block: "nearest", behavior: "smooth" });
+  } catch (_) {
+    pending.scrollIntoView(false);
   }
 }
 
@@ -1095,6 +1287,8 @@ function renderTranscript() {
     scrollTranscriptBottom();
   }
   updateBombChrome();
+  queueMicrotask(scrollPendingApprovalIntoView);
+
 }
 
 // ── Threads / agents ────────────────────────────────────────────────────
@@ -1313,48 +1507,66 @@ function updateThreadGitRow(sess) {
   const isolated = !!(sess && (sess.projectRoot || sess.project_root));
   row.style.display = isolated ? "" : "none";
   if (isolated) {
-    $("thread-branch").textContent = `🌱 ${sess.worktree || "worktree"}`;
+    $("thread-branch").textContent = `🌱 ${sess.worktree || "worktree"} · land to merge into project`;
   }
 }
 
-async function landThread() {
-  const id = state.selectedSession;
+async function landThread(sessionId) {
+  const id = (typeof sessionId === "string" && sessionId) || state.selectedSession;
   if (!id) return;
   const btn = $("btn-land-thread");
+  const rowBtns = [...document.querySelectorAll(".wt-land")].filter((b) => b.dataset.id === id);
   if (btn) btn.disabled = true;
+  rowBtns.forEach((b) => { b.disabled = true; });
   try {
     const res = await invoke("land_thread", { id });
     const sess = state.sessions.find((s) => s.id === id);
     if (res.status === "landed") {
       if (sess) sess.needsSync = false;
-      pushEvent(`⬆ landed into ${res.targetBranch}`, "ok", "boom", { force: true, milestone: true });
+      const where = res.targetBranch || "project";
+      pushEvent(
+        `⬆ Landed into project (${where}) — worktree changes are now in the project folder`,
+        "ok",
+        "boom",
+        { force: true, milestone: true }
+      );
+      toastOk(`Landed into ${where}. Open the project folder to use the files — no manual copy needed.`);
     } else {
       if (sess) sess.needsSync = true;
       pushEvent(
-        `landing conflicted (${(res.files || []).join(", ")}) — hit Sync, let the agent resolve, land again`,
+        `Land hit conflicts (${(res.files || []).join(", ")}) — Sync from project, let this thread's agent resolve, then Land again`,
         "err",
         "wait",
         { force: true, milestone: true }
       );
     }
     renderThreads();
+    if ($("view-worktrees")?.classList.contains("active")) refreshWorktrees();
   } catch (e) {
     toastError(e);
   } finally {
     if (btn) btn.disabled = false;
+    rowBtns.forEach((b) => { b.disabled = false; });
   }
 }
 
-async function syncThread() {
-  const id = state.selectedSession;
+async function syncThread(sessionId) {
+  const id = (typeof sessionId === "string" && sessionId) || state.selectedSession;
   if (!id) return;
   const btn = $("btn-sync-thread");
+  const rowBtns = [...document.querySelectorAll(".wt-sync")].filter((b) => b.dataset.id === id);
   if (btn) btn.disabled = true;
+  rowBtns.forEach((b) => { b.disabled = true; });
   try {
+    // Open the owning thread so conflict prompts land in the right composer.
+    if (sessionId && state.selectedSession !== id) {
+      try { await selectSession(id); } catch (_) {}
+    }
     const res = await invoke("sync_thread", { id });
     const sess = state.sessions.find((s) => s.id === id);
     if (res.status === "synced") {
-      pushEvent(`⟳ synced from ${res.targetBranch}`, "ok", null, { force: true });
+      pushEvent(`⟳ Synced project (${res.targetBranch}) into this worktree`, "ok", null, { force: true });
+      toastOk(`Synced from ${res.targetBranch}. Worktree is up to date with the project.`);
     } else {
       // Conflicts live in the worktree now — prefill a resolution prompt so
       // one click + send puts this thread's own agent on conflict duty.
@@ -1363,17 +1575,19 @@ async function syncThread() {
       if (promptBox && !promptBox.value.trim()) {
         promptBox.value = `Merge conflicts from ${res.targetBranch} were left in this worktree (${files}). Resolve them, keeping both sides' intent, then commit the result.`;
       }
-      pushEvent(`sync left conflicts in ${files} — prompt prefilled, send it to let the agent resolve`, "err", "wait", {
+      pushEvent(`Sync left conflicts in ${files} — prompt prefilled; Send so this thread's agent can resolve, then Land into project`, "err", "wait", {
         force: true,
         milestone: true,
       });
     }
     if (sess && res.status === "synced") sess.needsSync = false;
     renderThreads();
+    if ($("view-worktrees")?.classList.contains("active")) refreshWorktrees();
   } catch (e) {
     toastError(e);
   } finally {
     if (btn) btn.disabled = false;
+    rowBtns.forEach((b) => { b.disabled = false; });
   }
 }
 
@@ -1410,36 +1624,68 @@ async function deleteThread(id) {
 
 function renderAgents() {
   const root = $("agent-list");
+  const countEl = $("agents-count");
   const live = state.sessions.filter((s) => s.live !== false && !String(s.status || "").includes("saved"));
+  const saved = state.sessions.filter((s) => s.live === false || String(s.status || "").includes("saved"));
+  if (countEl) {
+    countEl.textContent = live.length
+      ? `${live.length} live${saved.length ? ` · ${saved.length} saved` : ""}`
+      : saved.length
+        ? `${saved.length} saved in Threads`
+        : "";
+  }
   if (!live.length) {
-    root.innerHTML = `<div class="empty-hint">No live agents · saved threads stay in Threads</div>`;
+    root.innerHTML = `<div class="empty-hint">No live ACP processes right now. ${
+      saved.length
+        ? `${saved.length} saved thread${saved.length === 1 ? "" : "s"} stay under Projects &amp; threads and resume on send.`
+        : "Start a thread or submit a reviewed build to attach agents."
+    } Backend can run several live sessions at once (for example Builds plan/implement/audit roles); this panel lists every live process, not a fake multi-list.</div>`;
+    updateBombChrome();
     return;
   }
-  root.innerHTML = live
-    .map((s) => {
-      const status = String(s.status || "?").toLowerCase();
-      const badgeCls = status.includes("run")
-        ? "running"
-        : status.includes("fail") || status.includes("cancel")
-          ? "failed"
-          : "idle";
-      const bombMood = moodFromStatus(status);
-      const runCls = status.includes("run") ? "running" : "";
-      const workflow = window.BombBuilds?.sessionSummary(s.id);
-      return `<div class="agent-card ${runCls}">
-  <div class="name">${bombHtml(bombMood, "sm")}${escapeHtml(String(s.mode || "acp").toUpperCase())} · ${escapeHtml(shortId(s.id))}</div>
+  root.innerHTML =
+    live
+      .map((s) => {
+        const status = String(s.status || "?").toLowerCase();
+        const badgeCls = status.includes("run")
+          ? "running"
+          : status.includes("fail") || status.includes("cancel")
+            ? "failed"
+            : "idle";
+        const bombMood = moodFromStatus(status);
+        const runCls = status.includes("run") ? "running" : "";
+        const selected = s.id === state.selectedSession ? "selected" : "";
+        const workflow = window.BombBuilds?.sessionSummary(s.id);
+        const title = s.label
+          ? escapeHtml(s.label)
+          : `${escapeHtml(String(s.mode || "acp").toUpperCase())} · ${escapeHtml(shortId(s.id))}`;
+        return `<button type="button" class="agent-card ${runCls} ${selected}" data-session="${escapeHtml(s.id)}" aria-pressed="${s.id === state.selectedSession}" title="Open this live session">
+  <div class="name">${bombHtml(bombMood, "sm")}${title}</div>
   <div class="meta"><span class="badge ${badgeCls}">${bombHtml(bombMood, "xs")}${escapeHtml(status)}</span>
-  <span class="muted">${escapeHtml(s.model || "")}</span></div>
+  <span class="muted">${escapeHtml(s.model || "")}</span>
+  <span class="muted">${escapeHtml(shortId(s.id))}</span></div>
   <div class="path">${escapeHtml(s.cwd || "")}</div>
-  <div class="path">${workflow ? `${escapeHtml(workflow.role)} · build ${escapeHtml(shortId(workflow.id))} · ${escapeHtml(workflow.text)}${workflow.fresh ? '' : ' · last known snapshot'}` : 'Task completion unknown · no recorded build link'}</div>
+  <div class="path">${workflow ? `${escapeHtml(workflow.role)} · build ${escapeHtml(shortId(workflow.id))} · ${escapeHtml(workflow.text)}${workflow.fresh ? "" : " · last known snapshot"}` : "Standalone session · not linked to a Builds workflow"}</div>
   ${
     s.mcpServers?.length || s.mcp_servers?.length
       ? `<div class="path">mcp: ${escapeHtml((s.mcpServers || s.mcp_servers || []).join(", "))}</div>`
       : ""
   }
-</div>`;
-    })
-    .join("");
+</button>`;
+      })
+      .join("") +
+    `<p class="agent-list-footnote">${
+      live.length === 1
+        ? `Showing the one live ACP process. ${saved.length ? `${saved.length} saved thread${saved.length === 1 ? "" : "s"} remain in Projects & threads. ` : ""}More cards appear here when additional sessions are live (Builds roles or extra started threads).`
+        : `Showing ${live.length} live ACP processes. Click a card to open that session. Saved threads stay in Projects & threads.`
+    }</p>`;
+  root.querySelectorAll("[data-session]").forEach((button) => {
+    button.onclick = () => {
+      const id = button.dataset.session;
+      if (!id) return;
+      window.BombBuildsHost?.openSession?.(id).catch((e) => toastError(e));
+    };
+  });
   updateBombChrome();
 }
 
@@ -1624,17 +1870,17 @@ function handleControlEvent(ev) {
         pushEvent(`thinking · ${shortId(sid)}`, "", null, { force: true });
       }
     } else {
+      // Prefer coalesced transcript length so "What's happening" / presence
+      // match the visible reply (llm-retry #11 said ~30 chars for a long answer).
+      const total = (body || "").length;
       const prev = p.replyChars || 0;
       p = P.applySignal(p, "reply", {
-        replyChars: prev + text.length,
+        replyChars: total,
         preview: clipPreview(body),
       });
       commitPresence(sid, p);
-      if (
-        isSelected &&
-        (prev === 0 || Math.floor((prev + text.length) / 400) > Math.floor(prev / 400))
-      ) {
-        pushEvent(`reply · ${formatCount(prev + text.length)} chars`, "", null, { force: true });
+      if (isSelected && (prev === 0 || Math.floor(total / 400) > Math.floor(prev / 400))) {
+        pushEvent(`reply · ${formatCount(total)} chars`, "", null, { force: true });
       }
     }
   } else if (type === "tool_call" || type === "toolCall") {
@@ -1731,7 +1977,9 @@ function handleControlEvent(ev) {
     // Only nudge presence during an actual turn — agents emit an initial plan
     // right after session start, which left the dock stuck on "thinking".
     if (sid && P.turnActive(presenceFor(sid))) {
-      noteTurn("think", { note: pe.title || "plan update" }, sid);
+      if (userStartedTurn(presenceFor(sid))) {
+        noteTurn("think", { note: pe.title || "plan update" }, sid);
+      }
     }
   } else if (type === "session_created" || type === "sessionCreated") {
     appendTranscript(sid, "term", `session ready · ${shortId(sid)}`);
@@ -1763,6 +2011,23 @@ function handleControlEvent(ev) {
       pushEvent(`response stopped · ${reason} · ${shortId(sid)}`, "err", null, { force: true });
     }
     commitPresence(sid, p);
+    if (P.normallyFinished(p) || p.phase === "done") {
+      pushFinalExplainFromReply(sid);
+    } else if (p.phase === "error") {
+      // Clear stale "is writing" on hard stop.
+      const list = explainListFor(sid);
+      const last = list[list.length - 1];
+      if (last && /is writing/i.test(last.text || "")) {
+        list.push({
+          text: `The reply stopped (${reason}).`,
+          kind: "error",
+          requestId: null,
+          at: nowIso(),
+        });
+        state.explainPending = false;
+        if (sid === state.selectedSession) renderExplainFeed();
+      }
+    }
   } else if (type === "session_status_changed" || type === "sessionStatusChanged") {
     const st = String(ev.status || "").toLowerCase();
     appendTranscript(sid, "term", `status → ${ev.status}`);
@@ -1774,6 +2039,9 @@ function handleControlEvent(ev) {
         endAgentStream(sid);
         sweepToolsForSession(sid, "failed");
         endTurnPresence(sid, "error", String(ev.status));
+        // Composer status comes from sess.status; ensure the bar refreshes now.
+        renderTranscript();
+        updateSendButton();
       } else if (st.includes("cancel")) {
         endAgentStream(sid);
         const p = presenceFor(sid);
@@ -1783,13 +2051,30 @@ function handleControlEvent(ev) {
           endTurnPresence(sid, "error", "Cancelled");
         }
       } else if (st.includes("idle") || st.includes("complete")) {
-        endAgentStream(sid);
-        // Idle can also be a timeout. Keep tools and permission state until
-        // a typed response boundary or explicit cancellation arrives.
-        commitPresence(sid, P.idleStatus(presenceFor(sid)));
+        // Do NOT endAgentStream on Idle — status can flicker Idle mid-turn and
+        // that fractured streaming replies into many AGENT bubbles (llm-retry #12).
+        // prompt_finished / cancel / fail / tool_call still close the stream.
+        const p = presenceFor(sid);
+        if (!userStartedTurn(p)) {
+          // Startup reached Idle with no user prompt — clear phantom presence
+          // (llm-retry #04/#06 Thinking → Completion unconfirmed).
+          commitPresence(sid, P.emptyPresence());
+        } else {
+          commitPresence(sid, P.idleStatus(p));
+        }
+        if (P.normallyFinished(presenceFor(sid)) || presenceFor(sid).phase === "idle") {
+          state.explainPending = false;
+          if (sid === state.selectedSession) renderExplainFeed();
+        }
+        updateSendButton();
       } else if (st.includes("run")) {
         const p = presenceFor(sid);
-        noteTurn(P.turnActive(p) && p.phase !== "wait" ? p.phase : "think", { note: "Session running" }, sid);
+        // Ignore bare Running during startup handshake (no user turn yet).
+        // Still accept Running after a completed/closed turn so a later cancel
+        // is not masked by the old receipt (presence.test.mjs).
+        if (userStartedTurn(p) || P.normallyFinished(p) || p.sessionClosed) {
+          noteTurn(P.turnActive(p) && p.phase !== "wait" ? p.phase : "think", { note: "Session running" }, sid);
+        }
       }
     }
     refreshSessions();
@@ -1814,8 +2099,12 @@ function handleControlEvent(ev) {
     if (!state.ready) setStatus("error", ev.message || "error");
     if (sid) {
       endAgentStream(sid);
-      appendTranscript(sid, "error", ev.message || "error");
+      appendTranscript(sid, "error", (typeof window !== "undefined" && window.BombDiagnostics)
+        ? (typeof window !== "undefined" && window.BombDiagnostics).sanitize(ev.message || "error")
+        : (ev.message || "error"));
       endTurnPresence(sid, "error", ev.message || "error");
+      renderTranscript();
+      updateSendButton();
     }
   } else if (type === "approval_required" || type === "approvalRequired") {
     const autoApproved = !!(ev.auto_approved ?? ev.autoApproved);
@@ -1879,6 +2168,8 @@ function handleControlEvent(ev) {
       if (sess && payload.label) {
         sess.label = String(payload.label);
         renderThreads();
+        // Force Open-face dropdown to rebuild with the new label (round4b).
+        document.dispatchEvent(new CustomEvent("bomb-code:thread-selected"));
       }
       return;
     }
@@ -1889,8 +2180,12 @@ function handleControlEvent(ev) {
         if (P.normallyFinished(p)) {
           // Usage may arrive after the response. It is not a new turn.
           p.contextTokens = n; commitPresence(sid, p);
-        } else if (P.turnActive(p) || p.phase === "idle") {
-          noteTurn(p.phase === "idle" ? "think" : p.phase, { contextTokens: n }, sid);
+        } else if (userStartedTurn(p) && P.turnActive(p)) {
+          noteTurn(p.phase, { contextTokens: n }, sid);
+        } else if (sid) {
+          // Startup / idle usage: record tokens without opening a phantom turn.
+          p.contextTokens = n;
+          commitPresence(sid, p);
         }
       }
       return;
@@ -1898,17 +2193,26 @@ function handleControlEvent(ev) {
     if (payload?.channel === "term" && payload?.line) {
       // Only the owning session's thread gets the line — never the selected
       // one as a fallback (another session's stderr showed up mid-thread).
+      // Sanitize: strip ANSI and redact team IDs / key fragments before display.
+      const D = (typeof window !== "undefined" && window.BombDiagnostics);
+      const rawLine = String(payload.line);
+      const line = D ? D.sanitize(rawLine) : rawLine;
       if (!sid) {
-        pushEvent(String(payload.line).slice(0, 120), "", null);
+        pushEvent(line.slice(0, 120), "", null);
         return;
       }
-      appendTranscript(sid, "term", String(payload.line), nowIso(), { stream: true });
+      appendTranscript(sid, "term", line, nowIso(), { stream: true });
       if (/session\/prompt still open after/i.test(String(payload.line))) {
         commitPresence(sid, P.idleStatus(presenceFor(sid)));
-      } else if (P.turnActive(presenceFor(sid)) && !presenceFor(sid).completionUnconfirmed && !P.normallyFinished(presenceFor(sid))) {
+      } else if (
+        userStartedTurn(presenceFor(sid)) &&
+        P.turnActive(presenceFor(sid)) &&
+        !presenceFor(sid).completionUnconfirmed &&
+        !P.normallyFinished(presenceFor(sid))
+      ) {
         noteTurn(
-          presenceFor(sid).phase === "idle" ? "think" : presenceFor(sid).phase,
-          { note: String(payload.line).slice(0, 80) },
+          presenceFor(sid).phase,
+          { note: line.slice(0, 80) },
           sid
         );
       }
@@ -1923,14 +2227,20 @@ function handleControlEvent(ev) {
       if (!sid) return; // agent text without a session id has nowhere to go
       appendTranscript(sid, "agent", maybe, nowIso(), { stream: true });
       const p = presenceFor(sid);
-      noteTurn(
-        "reply",
-        {
-          replyChars: (p.replyChars || 0) + maybe.length,
-          preview: clipPreview(maybe),
-        },
-        sid
-      );
+      {
+        const list = getTranscript(sid);
+        const last = list[list.length - 1];
+        const total =
+          last && last.role === "agent" ? (last.body || "").length : (p.replyChars || 0) + maybe.length;
+        noteTurn(
+          "reply",
+          {
+            replyChars: total,
+            preview: clipPreview(last?.body || maybe),
+          },
+          sid
+        );
+      }
     } else if (sid) {
       // Unrecognized payload for a known session → its own thread, clipped.
       const dump = JSON.stringify(payload);
@@ -1989,12 +2299,20 @@ function renderServices(list) {
     name.textContent = s.displayName;
     const meta = document.createElement("div");
     meta.className = "svc-meta";
-    meta.textContent = !s.runnable
-      ? "can't launch"
-      : s.loggedIn
-        ? [s.account, s.plan].filter(Boolean).join(" · ") || "signed in"
-        : "not signed in";
-    meta.title = [s.message, s.launch && `runs: ${s.launch}`].filter(Boolean).join("\n");
+    // play1 #23 / play1-llm #01 — show more than the bare env var name.
+    if (!s.runnable) {
+      meta.textContent = "can't launch";
+    } else if (envKey && s.loggedIn) {
+      meta.textContent = `${s.plan || "API key"} · in use`;
+      meta.title = (s.message || "Using an API key from the environment")
+        + "\nIf sessions fail to authenticate, enable or replace the key at console.x.ai → API keys.";
+    } else if (s.loggedIn) {
+      meta.textContent = [s.account, s.plan].filter(Boolean).join(" · ") || "signed in";
+      meta.title = [s.message, s.launch && `runs: ${s.launch}`].filter(Boolean).join("\n");
+    } else {
+      meta.textContent = "not signed in";
+      meta.title = s.message || "Sign in to use this backend";
+    }
     text.append(name, meta);
 
     row.append(dot, text);
@@ -2275,8 +2593,23 @@ async function refreshSessions() {
       await loadTranscriptFromDb(state.selectedSession);
       renderTranscript();
       updateBombChrome();
+      updateSendButton();
     } else {
+      // Refresh composer status/model without rebuilding the transcript DOM
+      // (rebuilding on every status change used to destroy scroll; play1 #5/#14
+      // showed the composer stuck on "starting" after the thread failed).
+      const sid = state.selectedSession;
+      const sess = state.sessions.find((s) => s.id === sid);
+      if (sid && sess) {
+        const backendName = String(sess.backend || "grok").toLowerCase();
+        const el = $("composer-session");
+        if (el) el.textContent = `${shortId(sid)} · ${sess.status || "?"}`;
+        const mel = $("composer-model");
+        if (mel) mel.textContent = [backendName, sess.model].filter(Boolean).join(" · ");
+        updateThreadGitRow(sess);
+      }
       updateBombChrome();
+      updateSendButton();
     }
   } catch (e) {
     toastError(e);
@@ -2644,7 +2977,9 @@ function recentProjects() {
 }
 
 function setProjectCwd(path, { remember = true } = {}) {
-  const p = String(path || "").trim().replace(/\/+$/, "");
+  // Native pickers / typed paths sometimes land on the .git dir (play1 D-026).
+  let p = String(path || "").trim().replace(/\/+$/, "");
+  p = p.replace(/\/\.git$/i, "");
   if (remember) state.cwdDirty = false; // explicit choice supersedes typing
   $("cwd").value = p;
   $("project-chip-name").textContent = p || "choose project";
@@ -2666,6 +3001,14 @@ function setProjectCwd(path, { remember = true } = {}) {
   }
 }
 
+
+function updateProjectsEmptyCta() {
+  const cta = $("btn-add-project-cta");
+  if (!cta) return;
+  const has = (state.projects || []).length > 0 || (state.sessions || []).length > 0;
+  cta.style.display = has ? "none" : "";
+}
+
 async function loadProjects() {
   try {
     const projects = await invoke("list_projects");
@@ -2673,6 +3016,7 @@ async function loadProjects() {
   } catch (_) {
     state.projects = [];
   }
+  updateProjectsEmptyCta();
 }
 
 function renderProjectRecents() {
@@ -2740,7 +3084,9 @@ function wireProjectChip() {
   });
   $("btn-browse-folder").onclick = async () => {
     try {
-      const picked = await window.__TAURI__.dialog.open({
+      const dialog = window.__TAURI__?.dialog;
+      if (!dialog?.open) throw new Error("Open via the desktop app (folder picker unavailable).");
+      const picked = await dialog.open({
         directory: true,
         multiple: false,
         title: "Choose project folder",
@@ -2830,7 +3176,18 @@ function wireModeButtons() {
   };
   $("plan-mode")?.addEventListener("click", () => pick("plan"));
   $("auto-mode")?.addEventListener("click", () => pick("auto"));
-  $("always-approve")?.addEventListener("click", () => pick("yolo"));
+  $("always-approve")?.addEventListener("click", async () => {
+    if (currentApprovalMode() === "yolo") {
+      pick("ask");
+      return;
+    }
+    const go = await askConfirm(
+      "Yolo auto-approves every tool — including destructive commands (rm, sudo, force-push). Continue?",
+      { title: "Enable yolo?", kind: "warning" },
+    );
+    if (!go) return;
+    pick("yolo");
+  });
   // Worktree isolation applies at thread START only (no live toggle).
   $("worktree-mode")?.addEventListener("click", () => {
     setMode("worktree-mode", !modeOn("worktree-mode"));
@@ -2941,7 +3298,80 @@ async function loadBackends() {
     $("agent-model-custom").style.display =
       $("agent-model").value === CUSTOM_MODEL_VALUE ? "" : "none";
     localStorage.setItem(`bomb.model.${sel.value}`, $("agent-model").value);
+    // Reflect selection immediately (llm-retry: label lagged until Send).
+    const mel = $("composer-model");
+    if (mel) {
+      const backendName = String(sel.value || "grok").toLowerCase();
+      mel.textContent = [backendName, currentModel()].filter(Boolean).join(" · ");
+    }
+    const sess = state.sessions.find((s) => s.id === state.selectedSession);
+    if (sess) sess.model = currentModel();
   };
+}
+
+
+/** Session is still spinning up (local flag or registry status). */
+function sessionIsStarting() {
+  if (state.startingSession) return true;
+  const sess = state.sessions.find((s) => s.id === state.selectedSession);
+  return String(sess?.status || "").toLowerCase().includes("start");
+}
+
+/**
+ * Keep keystrokes in #prompt while a thread starts so typing cannot land in
+ * rename fields / spatial chrome and produce a truncated "Loo" send (round4b).
+ */
+function holdComposerFocus(ms = 12000) {
+  const prompt = $("prompt");
+  if (!prompt) return;
+  const until = Date.now() + ms;
+  const refocus = () => {
+    if (!sessionIsStarting() && Date.now() > until) {
+      prompt.removeEventListener("blur", onBlur);
+      return;
+    }
+    if (document.activeElement !== prompt) {
+      try {
+        prompt.focus({ preventScroll: true });
+      } catch (_) {
+        prompt.focus();
+      }
+    }
+  };
+  const onBlur = () => {
+    if (sessionIsStarting()) requestAnimationFrame(refocus);
+  };
+  prompt.addEventListener("blur", onBlur);
+  refocus();
+  // Catch printable keys that landed elsewhere during start.
+  if (!state._composerFocusTrap) {
+    state._composerFocusTrap = (e) => {
+      if (!sessionIsStarting()) return;
+      const el = document.activeElement;
+      if (el && el.id === "prompt") return;
+      // feature-deep2: History / MCP / Memory / Builds inputs must keep their
+      // keystrokes. Only redirect orphan keys from chrome (not form fields).
+      if (el && (el.tagName === "TEXTAREA" || el.tagName === "INPUT" || el.tagName === "SELECT" || el.isContentEditable)) {
+        return;
+      }
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.key.length === 1 || e.key === "Backspace" || e.key === "Enter") {
+        e.preventDefault();
+        e.stopPropagation();
+        refocus();
+        if (e.key === "Backspace") {
+          prompt.value = prompt.value.slice(0, -1);
+        } else if (e.key === "Enter") {
+          // Buffer only — never send while starting.
+          return;
+        } else if (e.key.length === 1) {
+          prompt.value += e.key;
+        }
+        prompt.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+    };
+    document.addEventListener("keydown", state._composerFocusTrap, true);
+  }
 }
 
 async function startAcp() {
@@ -2949,6 +3379,8 @@ async function startAcp() {
   const startBtn = $("btn-start-acp");
   if (state.startingSession) return; // double-click guard
   state.startingSession = true;
+  holdComposerFocus();
+  updateSendButton();
   if (newBtn) newBtn.disabled = true;
   if (startBtn) startBtn.disabled = true;
   try {
@@ -3041,6 +3473,15 @@ async function startAcp() {
     state.startingSession = false;
     if (newBtn) newBtn.disabled = false;
     if (startBtn) startBtn.disabled = false;
+    updateSendButton();
+    const prompt = $("prompt");
+    if (prompt) {
+      try {
+        prompt.focus({ preventScroll: true });
+      } catch (_) {
+        prompt.focus();
+      }
+    }
   }
 }
 
@@ -3056,13 +3497,31 @@ async function sendPrompt() {
       });
       return;
     }
-    // Sending into a still-starting session fails backend-side; don't spin up
-    // turn presence for a prompt that can't be delivered yet.
+    // Sending into a still-starting or already-failed session fails backend-side
+    // (or silently no-ops). Gate with a visible reason and leave the prompt alone.
+    if (state.startingSession) {
+      holdComposerFocus();
+      pushEvent(
+        "Session is still starting — your message stays here until it's ready.",
+        "err",
+        "wait",
+        { force: true, milestone: true }
+      );
+      updateSendButton();
+      return;
+    }
     const selectedSess = state.sessions.find((s) => s.id === state.selectedSession);
-    if (selectedSess && String(selectedSess.status || "").toLowerCase().includes("start")) {
-      pushEvent("session is still starting — give it a second, then send", "err", "wait", {
-        force: true,
-      });
+    const gate = (typeof window !== "undefined" && window.BombDiagnostics)
+      ? (typeof window !== "undefined" && window.BombDiagnostics).composerGate(state.selectedSession, selectedSess?.status)
+      : { canSend: true, reason: "" };
+    if (!gate.canSend) {
+      pushEvent(gate.reason, "err", "wait", { force: true, milestone: true });
+      const hint = $("composer-gate-hint");
+      if (hint) {
+        hint.textContent = gate.reason;
+        hint.style.display = "block";
+      }
+      updateSendButton();
       return;
     }
     if (!state.selectedSession) {
@@ -3144,26 +3603,31 @@ async function sendPrompt() {
 
 // Wire buttons
 $("btn-new-session").onclick = startAcp;
-$("btn-new-project") &&
-  ($("btn-new-project").onclick = async () => {
-    try {
-      const picked = await window.__TAURI__.dialog.open({
-        directory: true,
-        multiple: false,
-        title: "Choose a project folder",
-        defaultPath: $("cwd").value || undefined,
-      });
-      if (picked) {
-        setProjectCwd(picked); // registers the project + makes it active
-        pushEvent(`project added · ${String(picked).split("/").filter(Boolean).pop()}`, "ok", null, {
-          force: true,
-        });
-        await startAcp(); // open a thread in the new project and switch to it
-      }
-    } catch (e) {
-      toastError(e);
+async function addProjectFlow() {
+  try {
+    const dialog = window.__TAURI__?.dialog;
+    if (!dialog?.open) {
+      throw new Error("Open via the desktop app (folder picker unavailable).");
     }
-  });
+    const picked = await dialog.open({
+      directory: true,
+      multiple: false,
+      title: "Choose a project folder",
+      defaultPath: $("cwd").value || undefined,
+    });
+    if (picked) {
+      setProjectCwd(picked); // registers the project + makes it active
+      pushEvent(`project added · ${String(picked).split("/").filter(Boolean).pop()}`, "ok", null, {
+        force: true,
+      });
+      await startAcp(); // open a thread in the new project and switch to it
+    }
+  } catch (e) {
+    toastError(e);
+  }
+}
+$("btn-new-project") && ($("btn-new-project").onclick = () => addProjectFlow());
+$("btn-add-project-cta") && ($("btn-add-project-cta").onclick = () => addProjectFlow());
 // Service rows are re-rendered on every status change, so delegate.
 $("services") &&
   ($("services").onclick = async (e) => {
@@ -3486,8 +3950,8 @@ $("btn-dev-server").onclick = startDevServer;
 $("btn-dev-stop").onclick = stopDevServer;
 $("btn-dev-open").onclick = openDevServer;
 $("btn-dev-folder").onclick = revealProject;
-$("btn-land-thread") && ($("btn-land-thread").onclick = landThread);
-$("btn-sync-thread") && ($("btn-sync-thread").onclick = syncThread);
+$("btn-land-thread") && ($("btn-land-thread").onclick = () => landThread());
+$("btn-sync-thread") && ($("btn-sync-thread").onclick = () => syncThread());
 // Send doubles as Stop while a turn is running.
 $("btn-send").onclick = () => {
   if (turnActive() && state.selectedSession) {
@@ -3501,9 +3965,30 @@ function updateSendButton() {
   const btn = $("btn-send");
   if (!btn) return;
   const busy = turnActive() && !!state.selectedSession;
+  const sess = state.sessions.find((s) => s.id === state.selectedSession);
+  const gate = (typeof window !== "undefined" && window.BombDiagnostics)
+    ? (typeof window !== "undefined" && window.BombDiagnostics).composerGate(state.selectedSession, sess?.status)
+    : { canSend: true, reason: "" };
+  const starting = !!state.startingSession || sessionIsStarting();
+  const startReason = "Session is still starting — your message stays here until it's ready.";
+  const blocked = !busy && (!gate.canSend || starting);
+  const blockReason = starting ? startReason : gate.reason;
   btn.textContent = busy ? "Stop" : "Send";
+  btn.disabled = blocked;
+  btn.title = blocked ? blockReason : "";
   btn.classList.toggle("danger", busy);
   btn.classList.toggle("primary", !busy);
+  const hint = $("composer-gate-hint");
+  if (hint) {
+    if (blocked) {
+      hint.textContent = blockReason;
+      hint.style.display = "block";
+    } else {
+      // Clear stale "still starting" even while a real turn shows Stop (llm-retry #06).
+      hint.textContent = "";
+      hint.style.display = "none";
+    }
+  }
 }
 async function cancelCurrentTurn() {
   try {
@@ -3548,6 +4033,23 @@ document.addEventListener("keydown", (e) => {
 // MCP view
 /** Populate the MCP catalog picker from the backend catalog (single source
  *  of truth for ids, titles, and which servers need credentials). */
+function syncMcpPathsVisibility() {
+  const sel = $("mcp-catalog");
+  const paths = $("mcp-paths");
+  if (!sel || !paths) return;
+  const isFs = sel.value === "filesystem";
+  paths.style.display = isFs ? "" : "none";
+  paths.required = isFs;
+  if (isFs && !paths.value.trim()) {
+    // Default to the active project so Add is one click (feature-deep2).
+    const project =
+      ($("cwd") && $("cwd").value.trim()) ||
+      state.projects?.[0] ||
+      "";
+    if (project) paths.value = project;
+  }
+}
+
 async function loadMcpCatalog() {
   try {
     const cat = await invoke("list_mcp_catalog");
@@ -3561,6 +4063,8 @@ async function loadMcpCatalog() {
           return `<option value="${escapeHtml(e.id)}">${escapeHtml(e.title || e.id)}${escapeHtml(needs)}</option>`;
         })
         .join("");
+      // change handler does not fire on first populate — sync paths now.
+      syncMcpPathsVisibility();
     }
   } catch (e) {
     console.warn("mcp catalog load failed", e);
@@ -3807,16 +4311,40 @@ $("btn-mcp-doctor-all") && ($("btn-mcp-doctor-all").onclick = () => runMcpDoctor
 // Paths input only applies to filesystem servers — hide it otherwise.
 $("mcp-catalog") &&
   ($("mcp-catalog").onchange = () => {
-    const isFs = $("mcp-catalog").value === "filesystem";
-    const paths = $("mcp-paths");
-    if (paths) paths.style.display = isFs ? "" : "none";
+    syncMcpPathsVisibility();
   });
 
 $("btn-mcp-add").onclick = async () => {
   try {
     const fromCatalog = $("mcp-catalog").value;
-    const name = $("mcp-name").value || fromCatalog;
-    const paths = parseCsv($("mcp-paths").value);
+    const name = ($("mcp-name").value || fromCatalog || "").trim();
+    if (!fromCatalog) {
+      throw new Error("Pick a catalog template before Add.");
+    }
+    let paths = parseCsv($("mcp-paths")?.value || "");
+    if (fromCatalog === "filesystem") {
+      if (!paths.length) {
+        const project =
+          ($("cwd") && $("cwd").value.trim()) ||
+          state.projects?.[0] ||
+          "";
+        if (project) {
+          paths = [project];
+          if ($("mcp-paths")) $("mcp-paths").value = project;
+        }
+      }
+      if (!paths.length) {
+        syncMcpPathsVisibility();
+        $("mcp-paths")?.focus();
+        throw new Error(
+          "Filesystem MCP needs at least one absolute allowed path (e.g. your project folder)."
+        );
+      }
+      const bad = paths.find((p) => !String(p).startsWith("/"));
+      if (bad) {
+        throw new Error(`Allowed path must be absolute: ${bad}`);
+      }
+    }
     const request = {
       name,
       fromCatalog,
@@ -3841,10 +4369,18 @@ $("btn-mcp-add").onclick = async () => {
     };
     await invoke("add_mcp_server", { request });
     $("mcp-name").value = "";
+    if ($("mcp-paths") && fromCatalog === "filesystem") {
+      // Keep last paths for the next add; visibility stays correct.
+      syncMcpPathsVisibility();
+    }
     pushEvent(`mcp ${name} added`, "ok", null, { force: true });
+    const out = $("mcp-out");
+    if (out) { out.style.display = ""; out.textContent = `Added “${name}”.`; }
     refreshMcpView();
   } catch (e) {
     toastError(e);
+    const out = $("mcp-out");
+    if (out) { out.style.display = ""; out.textContent = `Add failed: ${e?.message || e}`; }
   }
 };
 $("btn-cred-set").onclick = async () => {
@@ -3972,9 +4508,14 @@ async function refreshWorktrees() {
           isThread ? `<span class="badge branch">🌱 thread</span>` : "",
           w.locked ? `<span class="badge needs-sync">locked</span>` : "",
         ].join("");
+        const landSync = owner
+          ? `<button class="btn primary wt-land" data-id="${escapeHtml(owner.id)}" title="Commit + merge this worktree into the project folder">⬆ Land into project</button>
+             <button class="btn ghost wt-sync" data-id="${escapeHtml(owner.id)}" title="Pull project branch into this worktree">⟳ Sync</button>`
+          : "";
         const actions = isPrimary
           ? ""
-          : `<button class="btn ghost wt-diff" data-path="${escapeHtml(String(w.path))}">Diff</button>
+          : `${landSync}
+             <button class="btn ghost wt-diff" data-path="${escapeHtml(String(w.path))}">Diff</button>
              <button class="btn ghost danger wt-remove" data-repo="${escapeHtml(repo)}" data-path="${escapeHtml(String(w.path))}">Remove</button>`;
         return `<div class="wt-row">
   <div class="wt-row-main">
@@ -3998,6 +4539,12 @@ async function refreshWorktrees() {
 
   root.querySelectorAll(".wt-open-thread").forEach((el) => {
     el.onclick = () => selectSession(el.dataset.id);
+  });
+  root.querySelectorAll(".wt-land").forEach((el) => {
+    el.onclick = () => landThread(el.dataset.id);
+  });
+  root.querySelectorAll(".wt-sync").forEach((el) => {
+    el.onclick = () => syncThread(el.dataset.id);
   });
   root.querySelectorAll(".wt-diff").forEach((el) => {
     el.onclick = async () => {
@@ -4097,15 +4644,22 @@ async function refreshMemoryView() {
   if (projectScope) scopes.add(projectScope);
   for (const e of entries) scopes.add(e.scope);
   const prev = scopeSel.value || projectScope || "global";
-  scopeSel.innerHTML = [...scopes]
-    .map((s) => {
-      const label =
-        s === projectScope
-          ? `${activeProject.split("/").filter(Boolean).pop()} (this project)`
-          : s;
-      return `<option value="${escapeHtml(s)}"${s === prev ? " selected" : ""}>${escapeHtml(label)}</option>`;
-    })
-    .join("");
+  const scopeSig = [...scopes].sort().join("|") + `|proj:${projectScope || ""}`;
+  if (scopeSel.dataset.sig !== scopeSig) {
+    // Avoid rewriting <select> while the user types in the note field (cursor jumps).
+    scopeSel.innerHTML = [...scopes]
+      .map((s) => {
+        const label =
+          s === projectScope
+            ? `${activeProject.split("/").filter(Boolean).pop()} (this project)`
+            : s;
+        return `<option value="${escapeHtml(s)}"${s === prev ? " selected" : ""}>${escapeHtml(label)}</option>`;
+      })
+      .join("");
+    scopeSel.dataset.sig = scopeSig;
+  } else if ([...scopes].includes(prev)) {
+    scopeSel.value = prev;
+  }
 
   const shown = entries
     .filter((e) => e.scope === scopeSel.value)
@@ -4138,22 +4692,46 @@ async function refreshMemoryView() {
 }
 
 $("mem-scope") && ($("mem-scope").onchange = refreshMemoryView);
-$("btn-mem-add").onclick = async () => {
+
+async function addMemoryNote() {
+  const input = $("mem-content");
+  if (!input) return;
+  const content = input.value.trim();
+  if (!content) {
+    input.focus();
+    return;
+  }
+  const selStart = input.selectionStart;
   try {
-    const content = $("mem-content").value.trim();
-    if (!content) return;
     await invoke("memory_add", {
       scope: $("mem-scope").value || "global",
       content,
       tags: parseCsv($("mem-tags")?.value || ""),
     });
-    $("mem-content").value = "";
+    input.value = "";
     if ($("mem-tags")) $("mem-tags").value = "";
-    refreshMemoryView();
+    await refreshMemoryView();
+    input.focus();
   } catch (e) {
     toastError(e);
+    // Restore caret roughly where the user was if add failed mid-edit.
+    try {
+      input.focus();
+      input.setSelectionRange(selStart, selStart);
+    } catch (_) {}
   }
-};
+}
+
+if ($("btn-mem-add")) $("btn-mem-add").onclick = () => addMemoryNote();
+// feature-deep: Enter did nothing in the note field
+if ($("mem-content")) {
+  $("mem-content").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      addMemoryNote();
+    }
+  });
+}
 $("btn-mem-digest") &&
   ($("btn-mem-digest").onclick = async () => {
     const btn = $("btn-mem-digest");
@@ -4786,7 +5364,23 @@ setInterval(() => {
   }
 }, 1000);
 
+
+/** Linux/Windows: Ctrl-click; macOS: Command-click (play1 #04). */
+function fillModClickLabels() {
+  const isMac = /Mac|iPhone|iPad/.test(navigator.platform || "")
+    || (navigator.userAgentData && navigator.userAgentData.platform === "macOS");
+  const label = isMac ? "Command-click" : "Ctrl-click";
+  document.querySelectorAll("[data-mod-click]").forEach((el) => {
+    el.textContent = label;
+  });
+}
+
 async function boot() {
+  respectSolidMotionPreference();
+  try {
+    window.matchMedia("(prefers-reduced-motion: reduce)").addEventListener("change", respectSolidMotionPreference);
+  } catch (_) { /* older WebKit */ }
+  fillModClickLabels();
   // Every boot step is independent — one failure must not take down the rest
   // (a failed listen() used to die as an unhandled rejection and nothing
   // loaded; a failed refreshStatus skipped session loading entirely).

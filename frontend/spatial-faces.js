@@ -170,6 +170,7 @@
         previous.rect = primaryRect();
       }
       const target = next && faces.get(next);
+      const hadFace = !!target;
       selected = next;
       if (target) { removePreview(target); scene.setWorkspaceRect?.(target.rect); }
       else if (next && available.has(next)) {
@@ -177,7 +178,62 @@
         const rect = faces.size ? previewRect(bounds(), occupied) : primaryRect();
         faces.set(next, { id: next, rect }); scene.setWorkspaceRect?.(rect);
       }
-      faces.forEach(face => { if (face.id !== selected) ensurePreview(face); }); mask();
+      faces.forEach(face => { if (face.id !== selected) ensurePreview(face); });
+      // Expand only when the new thread had no stored face geometry (Play B leftover
+      // face covering a fresh thread). Promote keeps the preview's own rect and
+      // leaves the demoted thread at its prior workspace geometry.
+      if (!hadFace) {
+        restoreWorkingSurface();
+        tuckOverlappingContextFaces();
+      }
+      mask();
+    }
+    function tuckOverlappingContextFaces() {
+      const b = bounds();
+      const ws = (selected && faces.get(selected)?.rect) || primaryRect();
+      let i = 0;
+      faces.forEach((face) => {
+        if (face.id === selected) return;
+        if (!overlaps(face.rect, ws, 8)) return;
+        face.rect = boundedRect({
+          x: Math.max(12, b.width - 340),
+          y: 155 + (i % 5) * 40,
+          width: 300,
+          height: Math.min(220, Math.max(160, b.height - 320)),
+        }, b);
+        i += 1;
+        place(face);
+      });
+    }
+    /** Fill most of the scene for the working face; leave right-rail + composer. */
+    function restoreWorkingSurface() {
+      const b = bounds();
+      if (!selected) return;
+      const rect = boundedRect({
+        x: 12,
+        y: 155,
+        width: Math.max(280, b.width - 280),
+        height: Math.max(200, b.height - 155 - 140),
+      }, b);
+      scene.setWorkspaceRect?.(rect);
+      const sel = faces.get(selected);
+      if (sel) sel.rect = rect;
+    }
+    /** Park non-selected context faces as small cards, not over the composer. */
+    function tuckContextFaces() {
+      const b = bounds();
+      let i = 0;
+      faces.forEach((face) => {
+        if (face.id === selected) return;
+        face.rect = boundedRect({
+          x: Math.max(12, b.width - 340),
+          y: 155 + (i % 5) * 40,
+          width: 300,
+          height: Math.min(220, Math.max(160, b.height - 320)),
+        }, b);
+        i += 1;
+        place(face);
+      });
     }
     function openFace(id) {
       if (!rows(getState().sessions).some(row => row.id === id)) { notice.textContent = "Choose an available thread."; return; }
@@ -198,12 +254,17 @@
       if (destroyed) return;
       syncSelection();
       const source = getState(), sessions = rows(source.sessions);
-      const signature = sessions.map(session => `${session.id}:${session.label || ""}:${session.backend || ""}`).join("|");
+      // Include selected so a new thread forces a rebuild; labels must refresh
+      // when the narrator renames a thread (round4b stale dropdown).
+      const signature = `${selected || ""}|` + sessions.map(session => `${session.id}:${session.label || ""}:${session.backend || ""}`).join("|");
       if (picker.dataset.signature !== signature) {
         const before = picker.value; picker.replaceChildren();
         sessions.forEach(session => { const option = doc.createElement("option"); option.value = session.id; option.textContent = `${session.label || `Thread ${session.id.slice(0, 8)}`} · ${session.backend || "engine unreported"}`; picker.appendChild(option); });
         picker.dataset.signature = signature;
-        picker.value = sessions.some(session => session.id === before) ? before : sessions.find(session => session.id !== selected)?.id || sessions[0]?.id || "";
+        const prefer = sessions.find(session => session.id !== selected && session.id === before)
+          || sessions.find(session => session.id !== selected)
+          || sessions[0];
+        picker.value = prefer?.id || "";
       }
       open.disabled = !sessions.length;
       const available = new Set(sessions.map(session => session.id));
@@ -220,7 +281,13 @@
     listen(movePrimary, "keydown", event => { if (!/^Arrow(Left|Right|Up|Down)$/.test(event.key) || event.metaKey || event.ctrlKey || event.altKey) return; event.preventDefault(); const step = event.shiftKey ? 32 : 12, rect = primaryRect(); scene.setWorkspaceRect?.(boundedRect({ ...rect, x: rect.x + (event.key === "ArrowRight" ? step : event.key === "ArrowLeft" ? -step : 0), y: rect.y + (event.key === "ArrowDown" ? step : event.key === "ArrowUp" ? -step : 0) }, bounds())); mask(); });
     listen(doc, "bomb-code:thread-selected", refresh);
     listen(doc, "bomb-code:view-selected", () => { win.queueMicrotask(refresh); });
-    const observer = new win.ResizeObserver(() => { faces.forEach(face => { if (face.id !== selected) place(face); }); mask(); }); observer.observe(root); cleanup.push(() => observer.disconnect());
+    const observer = new win.ResizeObserver(() => {
+      // Auto reflow on resize so enlarge does not keep small-window face positions
+      // covering Send (round4 Play B — no Reset+Arrange ritual required).
+      restoreWorkingSurface();
+      tuckContextFaces();
+      mask();
+    }); observer.observe(root); cleanup.push(() => observer.disconnect());
     timer = win.setInterval(refresh, 700);
     refresh();
     return { refresh, openFace, promote, arrange: arrangeFaces, getState: () => ({ selected, openFaces: [...faces.keys()] }), destroy() { if (destroyed) return; destroyed = true; win.clearInterval(timer); faces.forEach(removePreview); cleanup.forEach(fn => fn()); background?.setExclusionElements?.([], "secondary-faces"); scene.setExclusionElements?.([], "secondary-faces"); root.classList.remove("spatial-has-faces"); layer.remove(); toolbar.remove(); movePrimary.remove(); } };
