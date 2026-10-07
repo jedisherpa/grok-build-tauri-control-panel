@@ -1978,7 +1978,9 @@ impl AcpClient {
             }
             // D-046: Grok plan-exit handshake. Returning -32601 here made the
             // agent report "client disconnected mid-approval" / plan exit failed.
-            "x.ai/exit_plan_mode" | "x.ai/exitPlanMode" => {
+            // Grok wires this as `_x.ai/exit_plan_mode` (leading underscore).
+            "x.ai/exit_plan_mode" | "x.ai/exitPlanMode"
+            | "_x.ai/exit_plan_mode" | "_x.ai/exitPlanMode" => {
                 self.handle_exit_plan_mode_ext(req).await?;
             }
             // Nested ext_method envelope (some builds wrap the method name).
@@ -2839,8 +2841,9 @@ fn is_exit_plan_tool(tool_name: &str, params: &Option<Value>) -> bool {
 }
 
 fn is_exit_plan_ext_method(method: &str) -> bool {
-    let m = method.to_lowercase().replace(['-', '_'], "");
-    m.contains("exitplan") || method.eq_ignore_ascii_case("x.ai/exit_plan_mode")
+    let trimmed = method.trim_start_matches('_');
+    let m = trimmed.to_lowercase().replace(['-', '_'], "");
+    m.contains("exitplan") || trimmed.eq_ignore_ascii_case("x.ai/exit_plan_mode")
 }
 
 /// Pull a plan document out of a plan-presenting tool call's input
@@ -3349,6 +3352,7 @@ mod tests {
         ));
         assert!(!is_exit_plan_tool("Bash", &None));
         assert!(is_exit_plan_ext_method("x.ai/exit_plan_mode"));
+        assert!(is_exit_plan_ext_method("_x.ai/exit_plan_mode"));
         assert!(is_exit_plan_ext_method("x.ai/exitPlanMode"));
         assert!(!is_exit_plan_ext_method("x.ai/ask_user_question"));
     }
