@@ -3933,6 +3933,23 @@ document.addEventListener("keydown", (e) => {
 // MCP view
 /** Populate the MCP catalog picker from the backend catalog (single source
  *  of truth for ids, titles, and which servers need credentials). */
+function syncMcpPathsVisibility() {
+  const sel = $("mcp-catalog");
+  const paths = $("mcp-paths");
+  if (!sel || !paths) return;
+  const isFs = sel.value === "filesystem";
+  paths.style.display = isFs ? "" : "none";
+  paths.required = isFs;
+  if (isFs && !paths.value.trim()) {
+    // Default to the active project so Add is one click (feature-deep2).
+    const project =
+      ($("cwd") && $("cwd").value.trim()) ||
+      state.projects?.[0] ||
+      "";
+    if (project) paths.value = project;
+  }
+}
+
 async function loadMcpCatalog() {
   try {
     const cat = await invoke("list_mcp_catalog");
@@ -3946,6 +3963,8 @@ async function loadMcpCatalog() {
           return `<option value="${escapeHtml(e.id)}">${escapeHtml(e.title || e.id)}${escapeHtml(needs)}</option>`;
         })
         .join("");
+      // change handler does not fire on first populate — sync paths now.
+      syncMcpPathsVisibility();
     }
   } catch (e) {
     console.warn("mcp catalog load failed", e);
@@ -4192,16 +4211,40 @@ $("btn-mcp-doctor-all") && ($("btn-mcp-doctor-all").onclick = () => runMcpDoctor
 // Paths input only applies to filesystem servers — hide it otherwise.
 $("mcp-catalog") &&
   ($("mcp-catalog").onchange = () => {
-    const isFs = $("mcp-catalog").value === "filesystem";
-    const paths = $("mcp-paths");
-    if (paths) paths.style.display = isFs ? "" : "none";
+    syncMcpPathsVisibility();
   });
 
 $("btn-mcp-add").onclick = async () => {
   try {
     const fromCatalog = $("mcp-catalog").value;
-    const name = $("mcp-name").value || fromCatalog;
-    const paths = parseCsv($("mcp-paths").value);
+    const name = ($("mcp-name").value || fromCatalog || "").trim();
+    if (!fromCatalog) {
+      throw new Error("Pick a catalog template before Add.");
+    }
+    let paths = parseCsv($("mcp-paths")?.value || "");
+    if (fromCatalog === "filesystem") {
+      if (!paths.length) {
+        const project =
+          ($("cwd") && $("cwd").value.trim()) ||
+          state.projects?.[0] ||
+          "";
+        if (project) {
+          paths = [project];
+          if ($("mcp-paths")) $("mcp-paths").value = project;
+        }
+      }
+      if (!paths.length) {
+        syncMcpPathsVisibility();
+        $("mcp-paths")?.focus();
+        throw new Error(
+          "Filesystem MCP needs at least one absolute allowed path (e.g. your project folder)."
+        );
+      }
+      const bad = paths.find((p) => !String(p).startsWith("/"));
+      if (bad) {
+        throw new Error(`Allowed path must be absolute: ${bad}`);
+      }
+    }
     const request = {
       name,
       fromCatalog,
@@ -4226,10 +4269,18 @@ $("btn-mcp-add").onclick = async () => {
     };
     await invoke("add_mcp_server", { request });
     $("mcp-name").value = "";
+    if ($("mcp-paths") && fromCatalog === "filesystem") {
+      // Keep last paths for the next add; visibility stays correct.
+      syncMcpPathsVisibility();
+    }
     pushEvent(`mcp ${name} added`, "ok", null, { force: true });
+    const out = $("mcp-out");
+    if (out) { out.style.display = ""; out.textContent = `Added “${name}”.`; }
     refreshMcpView();
   } catch (e) {
     toastError(e);
+    const out = $("mcp-out");
+    if (out) { out.style.display = ""; out.textContent = `Add failed: ${e?.message || e}`; }
   }
 };
 $("btn-cred-set").onclick = async () => {
