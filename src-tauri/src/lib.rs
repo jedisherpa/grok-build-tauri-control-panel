@@ -9,6 +9,7 @@ mod history;
 mod memory_recall;
 mod state;
 mod wizard_joe;
+mod word_shapes;
 
 use tauri::{Emitter, Manager};
 use tracing::{info, warn};
@@ -79,6 +80,8 @@ pub fn run() {
             wizard_joe::joe_status,
             wizard_joe::joe_analyze,
             wizard_joe::joe_cdiss_example,
+            wizard_joe::joe_word_shape_replay,
+            word_shapes::word_shape_dictionary,
             memory_recall::memory_recall,
             builds::get_build_concurrency,
             builds::set_build_concurrency,

@@ -5,6 +5,9 @@ use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
+mod word_shapes;
+pub use word_shapes::word_shapes;
+
 pub const ALGORITHM: &str = "bomb-code/cdiss-source-structure/v1";
 const SCHEMA: &str = "bomb-code/cdiss-state/v1";
 const INPUT_LIMIT: usize = 32 * 1024 * 1024;

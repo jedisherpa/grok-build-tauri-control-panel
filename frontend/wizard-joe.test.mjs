@@ -55,7 +55,7 @@ function mount(result, options = {}) {
   const document = { handlers: {}, getElementById: id => ids.get(id), createElement: tag => new Element(tag), addEventListener(type, handler) { this.handlers[type] = handler; }, dispatchEvent(event) { this.handlers[event.type]?.(event); } };
   const invoke = async (command, args) => { calls.push({ command, args }); if (command === "joe_analyze" || command === "joe_cdiss_example") return options.reply || currentResult; if (command === "joe_status") return { available: true, provider: "grok", model: "fixture" }; if (command === "memory_recall") return options.validate ? options.validate(args) : {status:"ready"}; throw new Error(`Unexpected native command: ${command}`); };
   class TestEvent { constructor(type, options = {}) { this.type = type; Object.assign(this, options); } }
-  const context = vm.createContext({ document, invoke, state: scope, CustomEvent: TestEvent, Event: TestEvent });
+  const context = vm.createContext({ document, invoke, state: scope, CustomEvent: TestEvent, Event: TestEvent, BombWordShapes: options.wordShapes });
   vm.runInContext(fs.readFileSync(new URL("./wizard-joe.js", import.meta.url), "utf8"), context);
   return { ids, created, calls, scope, document, context, setResult(value) { currentResult = value; } };
 }
@@ -64,6 +64,16 @@ function withContinuity(result) {
   result.cdiss = { status: "ready", state: { schema: "bomb-code/cdiss-state/v1", algorithmVersion: "bomb-code/cdiss-source-structure/v1", observation: { readingCount: 1, atomCount: 3, eventCount: 1, alternativeCount: 0, mappedMass: 2 / 3, unmappedMass: 1 / 3 }, continuity: { status: "fresh", reasons: [], sourceDistance: null, structureDistance: null, partitionChanged: null }, basis: {}, stateHash: "fixture-state", configDigest: "fixture-config" } };
   return result;
 }
+
+test("word shape renderer cannot replace continuity, provider or clarification content",async()=>{
+  const result=withContinuity(response());result.wordShapes={schema:"bomb-code/word-shapes/v1",status:"ready"};
+  const ui=mount(result,{wordShapes:{render(parent){parent.replaceChildren();}}});
+  ui.ids.get("joe-passage").value=result.sentence;
+  await ui.ids.get("joe-form").handlers.submit({preventDefault(){}});
+  const descendants=node=>[node,...(node.children||[]).flatMap(descendants)];
+  const texts=descendants(ui.ids.get("joe-result")).map(n=>n.textContent||"").join("\n");
+  assert.match(texts,/Model-proposed reading/);assert.match(texts,/Context continuity/);assert.match(texts,/Which tests/);
+});
 
 test("continuity distance display rejects nonfinite and out-of-range observations", () => {
   const result = withContinuity(response());

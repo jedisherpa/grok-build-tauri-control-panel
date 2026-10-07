@@ -190,6 +190,10 @@
     if (result.interpretation?.failed_stage) paragraph(output, `Interpretation stopped at stage: ${result.interpretation.failed_stage}`, "joe-error");
     paragraph(output, "This passage review does not determine which requirements or questions are missing from the whole project.");
     renderContinuity(output, result.cdiss);
+    if (globalThis.BombWordShapes) {
+      const shapes = node("section", null, "joe-word-shapes");
+      output.appendChild(shapes); globalThis.BombWordShapes.render(shapes, result.wordShapes);
+    }
     view.clarifications.forEach(question => {
       const section = node("section", null, "joe-question");
       paragraph(section, question.question, "joe-question-text");

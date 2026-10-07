@@ -87,6 +87,79 @@ fn cdiss_attachment(
         }
     }
 }
+
+fn word_shape_attachment(result: &Value) -> Value {
+    match grok_cdiss::word_shapes(result) {
+        Ok(attachment) => attachment,
+        Err(reason) => {
+            json!({"schema":"bomb-code/word-shapes/v1","status":"unavailable","reason":reason})
+        }
+    }
+}
+
+fn attach_word_shapes(result: &mut Value) {
+    result["wordShapes"] = word_shape_attachment(result);
+    if serde_json::to_vec_pretty(result).is_ok_and(|bytes| bytes.len() > MAX_LINE) {
+        result["wordShapes"] = json!({"schema":"bomb-code/word-shapes/v1","status":"unavailable",
+            "reason":"The complete source receipt exceeds the combined shape display budget. Original interpretation evidence is retained; use a shorter passage."});
+    }
+}
+fn validate_replay_reference(result: &Value, current: &Value) -> Result<(), String> {
+    let reference = &current["reference"];
+    let shared = &result["interpretation"]["binding"]["request"]["shared_reference"];
+    if reference["manifestSha256"] != MANIFEST_SHA
+        || result["reference"]["manifestSha256"] != reference["manifestSha256"]
+        || result["referenceRequested"]["manifestSha256"] != reference["manifestSha256"]
+    {
+        return Err("Saved reading uses a different frozen reference manifest".into());
+    }
+    for (saved, present) in [
+        ("source_graph_hash", "graphHash"),
+        ("model_snapshot_hash", "modelSnapshotHash"),
+        ("model_id", "modelId"),
+    ] {
+        if reference[present].as_str().is_none_or(|s| s.is_empty())
+            || shared[saved] != reference[present]
+        {
+            return Err("Saved reading uses a different source graph or model snapshot".into());
+        }
+    }
+    if !reference["senseSnapImplementationHashes"].is_object()
+        || shared["sense_snap"]["implementation_hashes"]
+            != reference["senseSnapImplementationHashes"]
+    {
+        return Err("Saved reading uses different SenseSnap implementation pins".into());
+    }
+    Ok(())
+}
+fn replay_memory_id(result: &Value) -> Result<Option<&str>, String> {
+    match result.get("memoryEvidence") {
+        Some(Value::Null) | None => {
+            if !result["interpretation"]["binding"]["request"]["context"]["recalled_evidence"]
+                .is_null()
+            {
+                return Err("Saved recalled evidence has no prepared memory receipt".into());
+            }
+            Ok(None)
+        }
+        Some(value) => value["receiptId"]
+            .as_str()
+            .filter(|s| !s.is_empty())
+            .map(Some)
+            .ok_or_else(|| "Saved memory receipt identifier is invalid".into()),
+    }
+}
+fn validate_replay_memory(result: &Value, context: &Value) -> Result<(), String> {
+    if result["memoryEvidence"]["context"] != *context
+        || result["interpretation"]["binding"]["request"]["context"]["recalled_evidence"]
+            != *context
+    {
+        return Err(
+            "Saved recalled evidence differs from its currently validated memory sources".into(),
+        );
+    }
+    Ok(())
+}
 impl Drop for AnalysisGuard {
     fn drop(&mut self) {
         BUSY.store(false, Ordering::Release);
@@ -327,6 +400,11 @@ fn clarifications(interpretation: &Value) -> Vec<Value> {
 fn save_receipt(path: &Path, value: &Value) -> Result<(), String> {
     use std::io::Write;
     let bytes = serde_json::to_vec_pretty(value).map_err(|_| "Receipt serialization failed")?;
+    if bytes.len() > MAX_LINE {
+        return Err(
+            "The complete review exceeds its private receipt budget; use a shorter passage".into(),
+        );
+    }
     let mut options = std::fs::OpenOptions::new();
     options.write(true).create_new(true);
     #[cfg(unix)]
@@ -435,6 +513,7 @@ pub async fn joe_analyze(
         None => (None, None),
     };
     result["cdiss"] = cdiss_attachment(&result, previous.as_ref(), reason);
+    attach_word_shapes(&mut result);
     save_receipt(&path, &result)?;
     Ok(result)
 }
@@ -448,19 +527,125 @@ pub fn joe_cdiss_example() -> Result<Value, String> {
     ))
     .map_err(|_| "Packaged comparison example is malformed")?;
     first["cdiss"] = cdiss_attachment(&first, None, None);
+    attach_word_shapes(&mut first);
     let mut second: Value = serde_json::from_str(include_str!(
         "../../crates/grok_cdiss/tests/fixtures/joe-negative.json"
     ))
     .map_err(|_| "Packaged comparison example is malformed")?;
     second["cdiss"] = cdiss_attachment(&second, Some(&first), None);
+    attach_word_shapes(&mut second);
     Ok(
         json!({"schema":"bomb-code/cdiss-example/v1","verificationClass":"authored-source-backed-example; not live interpretation or user intent","first":first,"second":second,"authority":{"toolsDispatched":false,"approvalsGranted":false,"memoryCommitted":false}}),
+    )
+}
+
+/// Re-read a selected private review, without invoking its interpretation provider.
+#[tauri::command]
+pub async fn joe_word_shape_replay(
+    state: State<'_, AppState>,
+    request_id: String,
+    thread_id: Option<String>,
+) -> Result<Value, String> {
+    let id = thread_id
+        .as_deref()
+        .ok_or("Select the original Bomb Code thread before inspecting its saved review")?;
+    let uuid = Uuid::parse_str(id).map_err(|_| "Invalid thread identifier")?;
+    if !state.registry.is_live(uuid) && state.persistence.get_session(uuid).is_err() {
+        return Err("The original Bomb Code thread is unavailable".into());
+    }
+    let directory = state.paths.panel_dir.join("wizard-joe/receipts");
+    let result = previous_review(&directory, &request_id, &thread_id)?;
+    // Verify the current frozen graph/model against the packaged source pins.
+    let current_reference = crate::word_shapes::run(json!({"action":"coverage"})).await?;
+    validate_replay_reference(&result, &current_reference)?;
+    let memory_receipt = replay_memory_id(&result)?;
+    if let Some(receipt) = memory_receipt {
+        let context =
+            crate::memory_recall::validated_context(&state, receipt, result["sentence"].as_str())
+                .await?;
+        validate_replay_memory(&result, &context)?;
+    }
+    let attachment = word_shape_attachment(&result);
+    if attachment["status"] != "ready" {
+        return Err(attachment["reason"]
+            .as_str()
+            .unwrap_or("Saved word shapes are unavailable")
+            .to_owned());
+    }
+    if let Some(receipt) = memory_receipt {
+        let context =
+            crate::memory_recall::validated_context(&state, receipt, result["sentence"].as_str())
+                .await?;
+        validate_replay_memory(&result, &context)?;
+    }
+    Ok(
+        json!({"schema":"bomb-code/word-shape-replay/v1","requestId":request_id,
+        "threadId":thread_id,"sentence":result["sentence"],"language":result["language"],
+        "at":result["at"],"wordShapes":attachment,"memoryReceiptId":memory_receipt,
+        "notice":"Saved interpretation proposal; no new provider call. Current source pins and selected memory were checked.",
+        "authority":{"toolsDispatched":false,"approvalsGranted":false,"memoryCommitted":false}}),
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn saved_shapes_require_the_current_source_model_and_implementation_pins() {
+        let result: Value = serde_json::from_str(include_str!(
+            "../../crates/grok_cdiss/tests/fixtures/joe-bank.json"
+        ))
+        .unwrap();
+        let shared = &result["interpretation"]["binding"]["request"]["shared_reference"];
+        let current = json!({"reference":{"manifestSha256":MANIFEST_SHA,"graphHash":shared["source_graph_hash"],
+            "modelSnapshotHash":shared["model_snapshot_hash"],"modelId":shared["model_id"],
+            "senseSnapImplementationHashes":shared["sense_snap"]["implementation_hashes"]}});
+        assert!(validate_replay_reference(&result, &current).is_ok());
+        for field in [
+            "manifestSha256",
+            "graphHash",
+            "modelSnapshotHash",
+            "modelId",
+        ] {
+            let mut changed = current.clone();
+            changed["reference"][field] = json!("different");
+            assert!(validate_replay_reference(&result, &changed).is_err());
+            changed["reference"][field] = Value::Null;
+            assert!(validate_replay_reference(&result, &changed).is_err());
+        }
+        let mut changed = current.clone();
+        changed["reference"]["senseSnapImplementationHashes"] = json!({});
+        assert!(validate_replay_reference(&result, &changed).is_err());
+        let mut changed = result.clone();
+        changed["referenceRequested"]["manifestSha256"] = json!("a".repeat(64));
+        assert!(validate_replay_reference(&changed, &current).is_err());
+    }
+    #[test]
+    fn replay_memory_must_match_the_receipt_and_native_bound_context() {
+        let mut result: Value = serde_json::from_str(include_str!(
+            "../../crates/grok_cdiss/tests/fixtures/joe-bank.json"
+        ))
+        .unwrap();
+        assert_eq!(replay_memory_id(&result).unwrap(), None);
+        let context =
+            json!({"schema":"bomb-code/recalled-evidence/v1","evidence":[{"text":"source"}]});
+        result["memoryEvidence"] = json!({"receiptId":"saved-id","context":context});
+        result["interpretation"]["binding"]["request"]["context"]["recalled_evidence"] =
+            context.clone();
+        assert_eq!(replay_memory_id(&result).unwrap(), Some("saved-id"));
+        assert!(validate_replay_memory(&result, &context).is_ok());
+        let mut changed = result.clone();
+        changed["memoryEvidence"]["context"]["evidence"][0]["text"] = json!("changed");
+        assert!(validate_replay_memory(&changed, &context).is_err());
+        let mut changed = result.clone();
+        changed["interpretation"]["binding"]["request"]["context"]["recalled_evidence"]
+            ["evidence"][0]["text"] = json!("changed");
+        assert!(validate_replay_memory(&changed, &context).is_err());
+        result["memoryEvidence"] = Value::Null;
+        assert!(replay_memory_id(&result).is_err());
+        result["memoryEvidence"] = json!({"receiptId":false});
+        assert!(replay_memory_id(&result).is_err());
+    }
     #[test]
     fn installed_example_runs_real_math_without_execution_authority() {
         let example = joe_cdiss_example().unwrap();
@@ -479,6 +664,7 @@ mod tests {
                 > 0.0
         );
         for result in [first, second] {
+            assert_eq!(result["wordShapes"]["status"], "ready");
             for key in ["toolsDispatched", "approvalsGranted", "memoryCommitted"] {
                 assert_eq!(result["authority"][key], false);
             }
@@ -567,6 +753,12 @@ mod tests {
             true
         );
         std::fs::remove_file(path).unwrap();
+    }
+    #[test]
+    fn oversized_receipts_fail_before_creating_a_partial_file() {
+        let path = std::env::temp_dir().join(format!("joe-oversized-{}.json", Uuid::new_v4()));
+        assert!(save_receipt(&path, &json!({"payload":"x".repeat(MAX_LINE)})).is_err());
+        assert!(!path.exists());
     }
     #[tokio::test]
     async fn actual_reference_preserves_provider_failure() {

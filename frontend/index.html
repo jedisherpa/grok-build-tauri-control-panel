@@ -12,6 +12,7 @@
     <link rel="stylesheet" href="spatial-faces.css" />
     <link rel="stylesheet" href="spatial-panels.css" />
     <link rel="stylesheet" href="joe-companion.css" />
+    <link rel="stylesheet" href="word-shapes.css" />
   </head>
   <body>
     <div id="spatial-background" aria-hidden="true"></div>
@@ -195,6 +196,25 @@ tests/feature" spellcheck="false" required></textarea><span class="builds-help">
                 <button id="joe-analyze" class="btn primary" type="submit">Analyze passage</button>
               </form>
               <button id="joe-cdiss-example" class="btn ghost" type="button">Try a local source-backed comparison</button>
+              <details class="joe-details" id="word-dictionary">
+                <summary>Word shapes · inspect the encoded dictionary</summary>
+                <p class="joe-notice">Trace a word through its definition, cross-language sources and SenseSnap meeting. Dictionary lookup stays local. Sentence-use shapes appear in passage readings below.</p>
+                <form id="word-dictionary-form">
+                  <label for="word-dictionary-query">Word, definition text, sense, concept or E8 root ID</label>
+                  <input id="word-dictionary-query" maxlength="256" value="bank" spellcheck="false" />
+                  <label for="word-dictionary-language">Dictionary language</label>
+                  <select id="word-dictionary-language"><option value="all">All encoded languages</option><option value="eng">English</option><option value="jpn">Japanese</option><option value="ind">Indonesian</option><option value="zsm">Malay</option><option value="cmn">Mandarin</option></select>
+                  <button class="btn ghost" id="word-dictionary-search" type="submit">Search dictionary</button>
+                </form>
+                <p id="word-dictionary-status" class="joe-status" role="status"></p>
+                <div id="word-dictionary-result"></div>
+                <div class="joe-input-row"><button id="word-dictionary-prev" class="btn ghost" type="button" disabled>Previous senses</button><button id="word-dictionary-next" class="btn ghost" type="button" disabled>Next senses</button></div>
+                <details class="joe-details"><summary>Inspect a saved Joe reading locally</summary>
+                  <label for="word-replay-id">Saved review ID from its receipt</label><input id="word-replay-id" maxlength="36" spellcheck="false" placeholder="Review UUID" />
+                  <button id="word-replay-show" class="btn ghost" type="button">Show saved word shapes</button>
+                  <p id="word-replay-status" class="joe-status" role="status"></p><div id="word-replay-result"></div>
+                </details>
+              </details>
               <p id="joe-result-status" class="joe-status" role="status"></p>
               <div id="joe-result"></div>
             </div>
@@ -616,6 +636,8 @@ tests/feature" spellcheck="false" required></textarea><span class="builds-help">
     <script src="thread-drafts.js"></script>
     <script src="app.js"></script>
     <script src="history.js"></script>
+    <script src="word-shapes.js"></script>
+    <script src="word-shape-controls.js"></script>
     <script src="wizard-joe.js"></script>
     <script src="memory-recall.js"></script>
     <script src="collaboration.js"></script>

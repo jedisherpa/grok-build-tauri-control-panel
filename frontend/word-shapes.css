@@ -1,0 +1,23 @@
+.word-shapes { margin-top: 12px; padding: 12px; border: 1px solid var(--border-hi, #42586f); border-radius: 5px; background: var(--bg, #101d30); color: var(--text, #dbe8ef); }
+.word-shapes h4 { font: 18px Georgia, serif; margin: 0 0 10px; }
+.word-shapes h5 { margin: 12px 0 5px; font-size: 13px; }
+.word-shapes p { margin: 6px 0; font-size: 12px; line-height: 1.5; overflow-wrap: anywhere; }
+.word-shape-details { margin: 8px 0; padding: 8px; border: 1px solid var(--border, #324458); border-radius: 4px; }
+.word-shape-details > summary { cursor: pointer; font-size: 12px; overflow-wrap: anywhere; }
+.word-shape-notice, .word-shape-caption { color: var(--text-muted, #acbccb); }
+.word-shape-missing { color: var(--warn, #dfbb78); }
+.word-shape-sentence { white-space: pre-wrap; }
+.word-shape-coordinate, .word-shape-source { font-family: var(--mono, monospace); font-size: 11px; overflow-wrap: anywhere; white-space: pre-wrap; max-width: 100%; }
+.word-shape-more { margin: 6px 0; padding: 6px 10px; font-size: 12px; cursor: pointer; }
+.word-shape-more[hidden] { display: none; }
+.word-shape-chain { display: block; width: 100%; min-width: 480px; max-width: 700px; height: auto; }
+.word-shape-details:has(> .word-shape-chain) { overflow-x: auto; }
+.word-shape-chain text, .word-shape-profile text { fill: var(--text, #dbe8ef); font: 11px var(--ui, sans-serif); }
+.word-shape-chain .word-shape-svg-status { font-size: 8px; }
+.word-shape-marker { fill: #213d45; stroke: #92caba; stroke-width: 1.5; }
+.word-shape-marker-missing { fill: transparent; stroke: #dfbb78; stroke-dasharray: 3 2; }
+.word-shape-edge, .word-shape-axis { fill: none; stroke: #78939e; stroke-width: 1; }
+.word-shape-usage-arrow { fill: none; stroke: #dfbb78; stroke-width: 2; }
+.word-shape-profile { display: block; width: 160px; height: 160px; }
+.word-shape-native-profile { fill: #92caba33; stroke: #92caba; stroke-width: 1.5; }
+.word-shape-native { border-left: 2px solid #92caba; padding-left: 8px; margin: 8px 0; }
