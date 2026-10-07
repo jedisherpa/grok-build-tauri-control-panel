@@ -115,7 +115,11 @@
         $("history-status").textContent = "Scanning local histories… source files remain unchanged. Large libraries can take several minutes.";
         result = await invoke("history_scan");
       } else {
-        const path = await window.__TAURI__.dialog.open({ multiple: false, filters: [{ name: "Conversation exports", extensions: ["json", "zip"] }] });
+        const dialog = window.__TAURI__?.dialog;
+        if (!dialog?.open) {
+          throw new Error("Open via the desktop app (import picker unavailable).");
+        }
+        const path = await dialog.open({ multiple: false, filters: [{ name: "Conversation exports", extensions: ["json", "zip"] }] });
         if (!path) return;
         $("history-status").textContent = "Importing conversation export…";
         result = await invoke("history_import", { path });

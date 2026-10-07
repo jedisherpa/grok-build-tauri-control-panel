@@ -51,7 +51,8 @@
           <div class="section-label">
             <span>Projects</span>
             <span class="section-actions">
-              <button id="btn-new-project" class="icon-btn" title="New project — choose a folder">📁+</button>
+              <button id="btn-new-project" class="icon-btn" title="New project — choose a folder" aria-label="Add a project">📁+</button>
+              <button id="btn-add-project-cta" class="btn primary projects-empty-cta" type="button">Add a project to start</button>
               <button id="btn-new-session" class="icon-btn" title="New thread in the active project">+</button>
             </span>
           </div>
@@ -142,7 +143,7 @@
                 <label>What should be built?<textarea id="builds-objective" rows="4" maxlength="32768" placeholder="Describe the change and the checks that will demonstrate it works." required></textarea></label>
                 <div class="builds-form-columns"><label>Allowed write paths<textarea id="builds-scope" rows="3" placeholder="src/feature
 tests/feature" spellcheck="false" required></textarea><span class="builds-help">One relative file or folder per line. Enter . to permit the entire project.</span></label><label>Maximum repair rounds<input id="builds-repairs" type="number" min="0" max="10" value="2" required /><span class="builds-help">After the first attempt. Repeated findings stop the build early.</span></label></div>
-                <label>Prerequisite builds<select id="builds-dependencies" multiple size="4" aria-describedby="builds-dependencies-help"></select><span id="builds-dependencies-help" class="builds-help">Optional. Select with Command-click to add or remove prerequisites. This build starts after you accept every selected result. Dependencies govern start order; each build has its own worktree. Earlier worktrees and results are supplied as context; their code is not combined automatically.</span></label>
+                <label>Prerequisite builds<select id="builds-dependencies" multiple size="4" aria-describedby="builds-dependencies-help"></select><span id="builds-dependencies-help" class="builds-help">Optional. Select with <span data-mod-click>Ctrl-click</span> to add or remove prerequisites. This build starts after you accept every selected result. Dependencies govern start order; each build has its own worktree. Earlier worktrees and results are supplied as context; their code is not combined automatically.</span></label>
                 <details class="builds-routes"><summary>Role engines and models</summary><div id="builds-routes" class="builds-route-grid"></div><p class="builds-help">A blank model uses the engine's configured default. Reviewers use Plan mode; implementation uses Ask with native tool approvals.</p></details>
                 <div class="builds-submit"><button id="builds-create" class="btn primary" type="submit">Submit reviewed build</button><span class="builds-help">Starts when its prerequisites, slot and write paths are available. Implementation waits for your plan approval.</span></div>
               </form>
@@ -293,6 +294,7 @@ tests/feature" spellcheck="false" required></textarea><span class="builds-help">
 
         <section id="view-mcp" class="view">
           <div class="pane-pad">
+            <h1 id="mcp-page-heading" class="page-heading">MCP</h1>
             <div class="toolbar">
               <button id="btn-mcp-refresh" class="btn">↻ Refresh</button>
               <button id="btn-mcp-doctor-all" class="btn" title="Run health checks on every server">Check all</button>
@@ -323,6 +325,7 @@ tests/feature" spellcheck="false" required></textarea><span class="builds-help">
 
         <section id="view-worktrees" class="view">
           <div class="pane-pad">
+            <h1 id="worktrees-page-heading" class="page-heading">Worktrees</h1>
             <div class="toolbar">
               <button id="btn-wt-refresh" class="btn">↻ Refresh</button>
               <span class="muted">Worktrees across your projects — 🌱 rows belong to threads.</span>
