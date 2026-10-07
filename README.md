@@ -62,6 +62,30 @@ cargo tauri dev
 cargo tauri build --bundles app
 ```
 
+
+### Develop on Linux
+
+System libraries (Debian/Ubuntu):
+
+```bash
+sudo apt install libwebkit2gtk-4.1-dev libsoup-3.0-dev libayatana-appindicator3-dev \
+  librsvg2-dev libgtk-3-dev libssl-dev pkg-config build-essential
+cargo install tauri-cli --version "^2"
+```
+
+Then from the repo root:
+
+```bash
+# Serve the static frontend (Tauri devUrl is http://localhost:1420)
+(cd frontend && python3 -m http.server 1420 --bind 127.0.0.1) &
+CARGO_BUILD_JOBS=4 cargo build -p grok-build-control-panel
+./target/debug/grok-build-control-panel
+# or: cargo tauri dev
+```
+
+Install the [Grok Build CLI](https://x.ai/cli) (`curl -fsSL https://x.ai/cli/install.sh | bash`) and set `XAI_API_KEY`, or use **Log in with Grok** in Services. This panel does not ship the `grok` binary.
+
+
 The app discovers `~/.grok/bin/grok` even when launched from Finder (PATH is bootstrapped).
 
 ## Config locations

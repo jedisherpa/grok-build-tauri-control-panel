@@ -1989,12 +1989,20 @@ function renderServices(list) {
     name.textContent = s.displayName;
     const meta = document.createElement("div");
     meta.className = "svc-meta";
-    meta.textContent = !s.runnable
-      ? "can't launch"
-      : s.loggedIn
-        ? [s.account, s.plan].filter(Boolean).join(" · ") || "signed in"
-        : "not signed in";
-    meta.title = [s.message, s.launch && `runs: ${s.launch}`].filter(Boolean).join("\n");
+    // play1 #23 / play1-llm #01 — show more than the bare env var name.
+    if (!s.runnable) {
+      meta.textContent = "can't launch";
+    } else if (envKey && s.loggedIn) {
+      meta.textContent = `${s.plan || "API key"} · in use`;
+      meta.title = (s.message || "Using an API key from the environment")
+        + "\nIf sessions fail to authenticate, enable or replace the key at console.x.ai → API keys.";
+    } else if (s.loggedIn) {
+      meta.textContent = [s.account, s.plan].filter(Boolean).join(" · ") || "signed in";
+      meta.title = [s.message, s.launch && `runs: ${s.launch}`].filter(Boolean).join("\n");
+    } else {
+      meta.textContent = "not signed in";
+      meta.title = s.message || "Sign in to use this backend";
+    }
     text.append(name, meta);
 
     row.append(dot, text);
@@ -2644,7 +2652,9 @@ function recentProjects() {
 }
 
 function setProjectCwd(path, { remember = true } = {}) {
-  const p = String(path || "").trim().replace(/\/+$/, "");
+  // Native pickers / typed paths sometimes land on the .git dir (play1 D-026).
+  let p = String(path || "").trim().replace(/\/+$/, "");
+  p = p.replace(/\/\.git$/i, "");
   if (remember) state.cwdDirty = false; // explicit choice supersedes typing
   $("cwd").value = p;
   $("project-chip-name").textContent = p || "choose project";
@@ -2666,6 +2676,14 @@ function setProjectCwd(path, { remember = true } = {}) {
   }
 }
 
+
+function updateProjectsEmptyCta() {
+  const cta = $("btn-add-project-cta");
+  if (!cta) return;
+  const has = (state.projects || []).length > 0 || (state.sessions || []).length > 0;
+  cta.style.display = has ? "none" : "";
+}
+
 async function loadProjects() {
   try {
     const projects = await invoke("list_projects");
@@ -2673,6 +2691,7 @@ async function loadProjects() {
   } catch (_) {
     state.projects = [];
   }
+  updateProjectsEmptyCta();
 }
 
 function renderProjectRecents() {
@@ -2740,7 +2759,9 @@ function wireProjectChip() {
   });
   $("btn-browse-folder").onclick = async () => {
     try {
-      const picked = await window.__TAURI__.dialog.open({
+      const dialog = window.__TAURI__?.dialog;
+      if (!dialog?.open) throw new Error("Open via the desktop app (folder picker unavailable).");
+      const picked = await dialog.open({
         directory: true,
         multiple: false,
         title: "Choose project folder",
@@ -2830,7 +2851,18 @@ function wireModeButtons() {
   };
   $("plan-mode")?.addEventListener("click", () => pick("plan"));
   $("auto-mode")?.addEventListener("click", () => pick("auto"));
-  $("always-approve")?.addEventListener("click", () => pick("yolo"));
+  $("always-approve")?.addEventListener("click", async () => {
+    if (currentApprovalMode() === "yolo") {
+      pick("ask");
+      return;
+    }
+    const go = await askConfirm(
+      "Yolo auto-approves every tool — including destructive commands (rm, sudo, force-push). Continue?",
+      { title: "Enable yolo?", kind: "warning" },
+    );
+    if (!go) return;
+    pick("yolo");
+  });
   // Worktree isolation applies at thread START only (no live toggle).
   $("worktree-mode")?.addEventListener("click", () => {
     setMode("worktree-mode", !modeOn("worktree-mode"));
@@ -3144,26 +3176,31 @@ async function sendPrompt() {
 
 // Wire buttons
 $("btn-new-session").onclick = startAcp;
-$("btn-new-project") &&
-  ($("btn-new-project").onclick = async () => {
-    try {
-      const picked = await window.__TAURI__.dialog.open({
-        directory: true,
-        multiple: false,
-        title: "Choose a project folder",
-        defaultPath: $("cwd").value || undefined,
-      });
-      if (picked) {
-        setProjectCwd(picked); // registers the project + makes it active
-        pushEvent(`project added · ${String(picked).split("/").filter(Boolean).pop()}`, "ok", null, {
-          force: true,
-        });
-        await startAcp(); // open a thread in the new project and switch to it
-      }
-    } catch (e) {
-      toastError(e);
+async function addProjectFlow() {
+  try {
+    const dialog = window.__TAURI__?.dialog;
+    if (!dialog?.open) {
+      throw new Error("Open via the desktop app (folder picker unavailable).");
     }
-  });
+    const picked = await dialog.open({
+      directory: true,
+      multiple: false,
+      title: "Choose a project folder",
+      defaultPath: $("cwd").value || undefined,
+    });
+    if (picked) {
+      setProjectCwd(picked); // registers the project + makes it active
+      pushEvent(`project added · ${String(picked).split("/").filter(Boolean).pop()}`, "ok", null, {
+        force: true,
+      });
+      await startAcp(); // open a thread in the new project and switch to it
+    }
+  } catch (e) {
+    toastError(e);
+  }
+}
+$("btn-new-project") && ($("btn-new-project").onclick = () => addProjectFlow());
+$("btn-add-project-cta") && ($("btn-add-project-cta").onclick = () => addProjectFlow());
 // Service rows are re-rendered on every status change, so delegate.
 $("services") &&
   ($("services").onclick = async (e) => {
@@ -4786,7 +4823,19 @@ setInterval(() => {
   }
 }, 1000);
 
+
+/** Linux/Windows: Ctrl-click; macOS: Command-click (play1 #04). */
+function fillModClickLabels() {
+  const isMac = /Mac|iPhone|iPad/.test(navigator.platform || "")
+    || (navigator.userAgentData && navigator.userAgentData.platform === "macOS");
+  const label = isMac ? "Command-click" : "Ctrl-click";
+  document.querySelectorAll("[data-mod-click]").forEach((el) => {
+    el.textContent = label;
+  });
+}
+
 async function boot() {
+  fillModClickLabels();
   // Every boot step is independent — one failure must not take down the rest
   // (a failed listen() used to die as an unhandled rejection and nothing
   // loaded; a failed refreshStatus skipped session loading entirely).
