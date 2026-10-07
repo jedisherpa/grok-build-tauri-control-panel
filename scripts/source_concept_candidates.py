@@ -37,6 +37,21 @@ class CandidateError(ValueError):
     pass
 
 
+def encode_result(value, indent=None):
+    """Bound the serialized result while encoding, before a full JSON allocation."""
+    result = bytearray()
+    encoder = json.JSONEncoder(ensure_ascii=False, allow_nan=False, indent=indent)
+    for piece in encoder.iterencode(value):
+        remaining = MAX_OUTPUT_BYTES - len(result)
+        if len(piece) > remaining:
+            raise CandidateError('Complete source-concept provenance exceeds 8 MiB; no records were dropped')
+        encoded = piece.encode('utf-8')
+        if len(encoded) > remaining:
+            raise CandidateError('Complete source-concept provenance exceeds 8 MiB; no records were dropped')
+        result.extend(encoded)
+    return bytes(result)
+
+
 def sha_file(path):
     digest = hashlib.sha256()
     with Path(path).open('rb') as handle:
@@ -167,16 +182,54 @@ class SourceAliases:
         return records
 
 
-def match_records(aliases, records, limit=10):
+SOURCES = ('', 'notes', 'history', 'chatgpt', 'codex', 'claude_code', 'claude', 'grok')
+
+
+def request_options(payload, maximum_limit=12):
+    if not isinstance(payload, dict) or set(payload)-{'conceptIds', 'source', 'scope', 'limit'}:
+        raise CandidateError('Unsupported source-concept request fields')
+    ids = payload.get('conceptIds')
+    if not isinstance(ids, list) or not 1 <= len(ids) <= MAX_CONCEPTS:
+        raise CandidateError('Select one to eight distinct encoded concepts')
+    if any(not isinstance(cid, str) or not cid or len(cid) > 200 or '\x00' in cid for cid in ids):
+        raise CandidateError('Concept identifiers must be bounded source IDs')
+    if len(set(ids)) != len(ids):
+        raise CandidateError('Select distinct encoded concepts')
+    source, scope = payload.get('source', ''), payload.get('scope', '')
+    if source not in SOURCES or not isinstance(source, str):
+        raise CandidateError('Unsupported source-concept source filter')
+    if not isinstance(scope, str) or len(scope) > 512 or '\x00' in scope:
+        raise CandidateError('Source-concept scope must be bounded text')
+    limit = payload.get('limit', 10)
+    if type(limit) is not int or not 1 <= limit <= maximum_limit:
+        raise CandidateError('Source-concept return limit is outside its budget')
+    return ids, source, scope, limit
+
+
+def record_matches(record, source='', scope=''):
+    # An explicit note scope never includes unrelated history rows.
+    if scope and (record.get('kind') != 'note' or record.get('scope') != scope):
+        return False
+    if source == 'notes':
+        return record.get('kind') == 'note'
+    if source == 'history':
+        return record.get('kind') == 'history'
+    return not source or record.get('source') == source
+
+
+def match_records(aliases, records, limit=10, source='', scope=''):
     if type(limit) is not int or not 1 <= limit <= MAX_RETURNED:
         raise CandidateError('Candidate limit must be one to twenty')
-    best, scanned, candidates, occurrence_count = [], 0, 0, 0
+    best, scanned, candidates, occurrence_count, unfiltered = [], 0, 0, 0, 0
     for record in records:
         scanned += 1
         if scanned > MAX_CHUNKS:
             raise CandidateError('Complete scan budget exceeded; no partial scan is returned')
         occurrences = aliases.occurrences(record['text'])
         if not occurrences:
+            continue
+        unfiltered += 1
+        if not record_matches(record, source, scope):
             continue
         candidates += 1
         occurrence_count += len(occurrences)
@@ -187,7 +240,8 @@ def match_records(aliases, records, limit=10):
         best.append(candidate)
         best.sort(key=lambda item: (-len(item['distinctConceptSupport']), item['chunk']['chunkId']))
         del best[limit:]
-    return {'scannedChunks': scanned, 'candidateCount': candidates, 'matchedOccurrenceCount': occurrence_count,
+    return {'scannedChunks': scanned, 'candidateCount': candidates, 'unfilteredCandidateCount': unfiltered,
+            'matchedOccurrenceCount': occurrence_count, 'filters': {'source': source, 'scope': scope},
             'returnedCount': len(best), 'notReturnedCount': candidates-len(best), 'completeScan': True,
             'selectionBasis': 'distinct queried source concepts descending; stable chunkId tie; '
                               'no boost for alias or occurrence count', 'hits': best}
@@ -210,9 +264,9 @@ def immutable(path):
     return connection
 
 
-def source_snapshot():
+def source_snapshot(panel=PANEL):
     snapshot = {}
-    for path in (PANEL/'history/library.sqlite', PANEL/'memory-recall/recall.sqlite'):
+    for path in (panel/'history/library.sqlite', panel/'memory-recall/recall.sqlite'):
         if path.is_symlink() or not path.is_file():
             raise CandidateError('Fixed source path unavailable or redirected')
         if path.name == 'recall.sqlite' and path.stat().st_size > recall.MAX_DATABASE_BYTES:
@@ -242,7 +296,8 @@ def index_records(db):
     """Enforce existing recall page/text budgets before returning a complete scan."""
     recall.check_database_budget(db)
     serialized_bytes = 0
-    for row in db.execute('SELECT data FROM chunks ORDER BY chunk_id'):
+    for row in db.execute("SELECT CASE WHEN typeof(data)='text' AND length(CAST(data AS BLOB))<=65536 "
+                          "THEN data ELSE NULL END FROM chunks ORDER BY chunk_id"):
         if not isinstance(row[0], str):
             raise CandidateError('Recall metadata record is not serialized text')
         size = len(row[0].encode('utf-8'))
@@ -254,14 +309,18 @@ def index_records(db):
         yield json.loads(row[0])
 
 
-def query_installed(concept_ids, limit=10):
+def query_installed(concept_ids, limit=10, *, panel=PANEL, notes=None, source='', scope='', app_result=False):
     started = time.monotonic()
-    before = source_snapshot()
+    notes = recall.notes_snapshot({'notes': [] if notes is None else notes})
+    before = source_snapshot(panel)
     dictionary = word_dictionary.Dictionary.load()
     reference_before = dict(dictionary.reference)
     aliases = SourceAliases(dictionary, concept_ids)
-    with contextlib.closing(immutable(PANEL/'memory-recall/recall.sqlite')) as db:
+    with contextlib.closing(immutable(panel/'memory-recall/recall.sqlite')) as db:
         recall.check_database_budget(db)
+        metadata_size = db.execute('SELECT length(CAST(value AS BLOB)) FROM metadata WHERE key="index"').fetchone()
+        if not metadata_size or not metadata_size[0] or metadata_size[0] > 64*1024:
+            raise CandidateError('Recall generation metadata exceeds its bounded input')
         meta = recall.get_meta(db)
         models = list(db.execute('SELECT model_digest,dimension,count(*) AS count FROM vectors '
                                 'GROUP BY model_digest,dimension'))
@@ -273,16 +332,16 @@ def query_installed(concept_ids, limit=10):
                        or type(models[0]['dimension']) is not int or not 1 <= models[0]['dimension'] <= 4096):
             raise CandidateError('Stored vector model identity/dimension is malformed')
         model = StoredModel(models[0]['model_digest'] if models else None)
-        status = recall.status_unlocked(PANEL, [], model)
+        status = recall.status_unlocked(panel, notes, model)
         recall.ensure_ready(status)
         if not status['embeddingBasisCompatible']:
             raise CandidateError('Existing index embedding basis is incompatible')
-        result = match_records(aliases, index_records(db), limit)
+        result = match_records(aliases, index_records(db), limit, source, scope)
         if result['scannedChunks'] != meta['chunkCount']:
             raise CandidateError('Index chunk census disagrees with full scan')
     for hit in result['hits']:
         chunk = hit['chunk']
-        checked = recall.evidence(PANEL, [], model,
+        checked = recall.evidence(panel, notes, model,
             {'generation': status['generation'], 'chunkIds': [chunk['chunkId']]})['evidence'][0]
         if any(checked.get(key) != value for key, value in chunk.items()):
             raise CandidateError('Returned candidate changed during citation validation')
@@ -300,18 +359,33 @@ def query_installed(concept_ids, limit=10):
                   authority={'toolsDispatched': False, 'approvalsGranted': False, 'memoryCommitted': False},
                   qualification='Caller-selected source concepts; all lexical usages and alternatives UNSELECTED. '
                     'No interpreted frame, SenseSnap center, contextual sense selection or relevance confidence is inferred.')
-    if len(json.dumps(result, ensure_ascii=False, allow_nan=False).encode('utf-8')) > MAX_OUTPUT_BYTES:
-        raise CandidateError('Complete candidate provenance exceeds 8 MiB; no alternatives were dropped')
-    after = source_snapshot()
+    encode_result(result)
+    after = source_snapshot(panel)
     reference_after = reference_snapshot(reference_before)
     if before != after:
         raise CandidateError('Original archive/index changed; source candidate result withheld')
     result.update(sourceIntegrity=True, referenceIntegrity=True,
                   preservation={'before': before, 'after': after, 'referenceAfter': reference_after},
                   elapsedSeconds=time.monotonic()-started, providerCalls=0, embeddingCalls=0, nativeWrites=0)
-    if len(json.dumps(result, ensure_ascii=False, allow_nan=False).encode('utf-8')) > MAX_OUTPUT_BYTES:
-        raise CandidateError('Complete preserved provenance exceeds 8 MiB; no alternatives were dropped')
+    if app_result:
+        result['hits'] = [dict(hit['chunk'], generation=status['generation'],
+                              keywordRank=None, vectorRank=None, rankScore=0,
+                              sourceConcept={key: value for key, value in hit.items() if key != 'chunk'})
+                          for hit in result['hits']]
+        result.update(status='ready', generation=status['generation'], sourceFresh=status['sourceFresh'],
+                      scoreMeaning='Distinct asserted query concepts supply candidate order; lexical usages remain UNSELECTED.')
+    encode_result(result)
     return result
+
+
+def run_host(panel, payload):
+    """Host supplies its panel and current notes; client never supplies paths."""
+    if not isinstance(payload, dict):
+        raise CandidateError('Source-concept request must be an object')
+    options = {key: value for key, value in payload.items() if key != 'notes'}
+    ids, source, scope, limit = request_options(options)
+    return query_installed(ids, limit, panel=Path(panel), notes=payload.get('notes', []),
+                           source=source, scope=scope, app_result=True)
 
 
 def write_private(output, result):
@@ -319,9 +393,7 @@ def write_private(output, result):
     repo = Path(__file__).resolve().parents[1]
     if output.is_relative_to(repo) or output.is_relative_to(PANEL) or output.exists():
         raise CandidateError('Output must be a new private directory outside Git and native stores')
-    encoded = json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False).encode('utf-8')
-    if len(encoded) > MAX_OUTPUT_BYTES:
-        raise CandidateError('Serialized complete provenance exceeds 8 MiB')
+    encoded = encode_result(result, indent=2)
     os.mkdir(output, 0o700)
     fd = os.open(output/'candidates.json', os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
     with os.fdopen(fd, 'wb') as handle:

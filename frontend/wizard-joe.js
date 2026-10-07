@@ -122,6 +122,18 @@
     passage.focus();
   });
   globalThis.WizardJoeGuide = Object.freeze({
+    async draftMemoryQuestion({ question, threadId, validate, isCurrent }) {
+      const originalGeneration = generation;
+      const valid = () => originalGeneration === generation && currentThread() === (threadId || null) && typeof isCurrent === 'function' && isCurrent() && contextValid(passage.value, currentThread());
+      if (!text(question).trim() || question.length > 4000 || typeof validate !== 'function' || !valid()) return false;
+      try { await validate(); } catch (error) { status.textContent = 'Comparison sources changed. Compare current profiles again before drafting.'; return false; }
+      if (!valid()) return false;
+      const composer = byId('prompt');
+      composer.value = appendDraft(composer.value, question);
+      composer.dispatchEvent(new Event('input', { bubbles: true }));
+      status.textContent = 'Comparison question added to your unsent message. Review it before sending.';
+      composer.focus(); return true;
+    },
     setContextValidator(validate) { contextValid = typeof validate === "function" ? validate : () => true; },
     setPassage(value, message) { clearMemoryContext(); invalidate(); passage.value = value; status.textContent = message || "Passage prepared locally."; },
     clearMemoryContext,

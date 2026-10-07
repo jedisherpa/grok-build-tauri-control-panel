@@ -49,6 +49,16 @@ class ProtocolTests(unittest.TestCase):
         request = {'referenceRoot': str(w.REFERENCE_ROOT), **kwargs}
         return self.dictionary.respond(w.request_options(request))
 
+    def test_picker_asserted_concepts_require_exact_equivalent_source_join(self):
+        self.assertEqual(self.query(query="sense:bank-eng")["hits"][0]["assertedConceptIds"], ["pwn30:c1"])
+        self.assertEqual(self.query(query="sense:bank-cmn")["hits"][0]["assertedConceptIds"], [])
+        original = self.dictionary.alignments["sense:bank-eng"][0]
+        for changed in ({"kind":"language_specific"}, {"asserted":False}, {"sense_id":"other"}):
+            saved = dict(original)
+            original.update(changed)
+            self.assertEqual(self.query(query="sense:bank-eng")["hits"][0]["assertedConceptIds"], [])
+            original.clear(); original.update(saved)
+
     def test_exact_sense_identity_query(self):
         response = self.query(query='sense:no-position')
         self.assertEqual(response['resultCount'], 1)

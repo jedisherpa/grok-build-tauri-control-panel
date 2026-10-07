@@ -238,6 +238,9 @@ class Dictionary:
         definition = sense.get("definition")
         status = "sense-local" if isinstance(definition, str) and definition.strip() else "missing-sense-local-definition"
         concept_ids = self.concept_ids(sense)
+        asserted_concept_ids = sorted({a["concept_id"] for a in self.alignments[sense_id]
+            if a.get("sense_id") == sense_id and a.get("concept_id") in concept_ids
+            and a.get("kind") == "equivalent" and a.get("asserted") is True})
         counterparts = sorted({sid for cid in concept_ids for sid in self.by_concept[cid]
                                if self.senses[sid]["language"] != sense["language"]})
         selected = counterparts[counterpart_offset:counterpart_offset + counterpart_limit]
@@ -259,7 +262,8 @@ class Dictionary:
                 "sourceId": sense.get("source_id"), "sourceRecordId": sense.get("source_record_id"),
                 "source": self.source(sense.get("source_id")), "evidenceRefs": sense.get("evidence_refs", []),
                 "graphLocator": GRAPH_PATH + "#/senses/id=" + sense_id,
-                "conceptIds": concept_ids, "alignments": self.alignments[sense_id], "concepts": concepts,
+                "conceptIds": concept_ids, "assertedConceptIds": asserted_concept_ids,
+                "alignments": self.alignments[sense_id], "concepts": concepts,
                 "counterpartCount": len(counterparts), "counterpartOffset": counterpart_offset,
                 "counterpartLimit": counterpart_limit, "counterparts": [self.counterpart(sid, concept_ids, sense_id) for sid in selected],
                 "counterpartsTruncated": len(selected) < len(counterparts),

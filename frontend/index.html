@@ -13,6 +13,7 @@
     <link rel="stylesheet" href="spatial-panels.css" />
     <link rel="stylesheet" href="joe-companion.css" />
     <link rel="stylesheet" href="word-shapes.css" />
+    <link rel="stylesheet" href="meaning-memory.css" />
   </head>
   <body>
     <div id="spatial-background" aria-hidden="true"></div>
@@ -386,6 +387,28 @@ tests/feature" spellcheck="false" required></textarea><span class="builds-help">
               <div id="recall-results" class="recall-results"></div>
               <button id="recall-prepare" class="btn" disabled>Prepare selected context for Joe</button>
               <p class="muted">Preparation stays local. Inspect the question and selected context in Joe, then choose Analyze to send them to the displayed provider. Search does not save new notes or run coding tools.</p>
+              <section id="meaning-memory" class="meaning-memory" aria-label="Source concepts and interpreted memory">
+                <h3>Find passages by a source meaning</h3>
+                <p class="muted">Look up a word or definition, choose its source concepts, then find their encoded forms across languages. Occurrences remain UNSELECTED until a passage is explicitly analyzed. Source and saved-note scope filters above apply; a selected note scope searches only those notes.</p>
+                <form id="meaning-dictionary-form" class="toolbar">
+                  <input id="meaning-word" type="search" class="grow" maxlength="256" aria-label="Word or dictionary definition" placeholder="A word or definition, such as bank" />
+                  <select id="meaning-language" aria-label="Dictionary language"><option value="eng">English</option><option value="all">All encoded languages</option><option value="jpn">Japanese</option><option value="ind">Indonesian</option><option value="zsm">Malay</option><option value="cmn">Mandarin</option></select>
+                  <button id="meaning-dictionary-search" class="btn" type="submit">Find source meanings</button>
+                </form>
+                <div id="meaning-concepts"></div>
+                <div class="toolbar"><button id="meaning-dictionary-prev" class="btn ghost" disabled>Previous senses</button><button id="meaning-dictionary-next" class="btn ghost" disabled>Next senses</button><button id="meaning-source-search" class="btn" disabled>Find encoded source forms in memory</button></div>
+                <p id="meaning-source-status" role="status">Source lookup stays local. Choose up to eight source concepts.</p>
+                <h3>Compare interpreted passages</h3>
+                <p class="muted">Successful Joe analyses retain source-bound proposals with their original citations. Compare selected senses, context pins, event attachments and fine geometry as separate signals. Unanalyzed history has no sentence or context annotation.</p>
+                <div class="toolbar"><button id="meaning-refresh" class="btn">Check interpreted profiles</button><button id="meaning-import" class="btn ghost">Import saved Joe proposals</button></div>
+                <p id="meaning-profile-status" role="status">No profile check has run yet. Import reads existing saved proposals locally.</p>
+                <label for="meaning-query-profile">Comparison passage or question</label>
+                <select id="meaning-query-profile" aria-label="Comparison query profile"><option value="">Choose a saved proposal or analyze a passage in Joe</option></select>
+                <div id="meaning-profiles" class="meaning-profiles"></div>
+                <div class="toolbar"><button id="meaning-profile-prev" class="btn ghost" disabled>Previous profiles</button><button id="meaning-profile-next" class="btn ghost" disabled>Next profiles</button><button id="meaning-compare" class="btn primary" disabled>Compare with selected profiles</button></div>
+                <p id="meaning-comparison-status" role="status">Select one to three comparison profiles. Calculations stay local.</p>
+                <div id="meaning-comparisons"></div>
+              </section>
             </section>
             <div class="toolbar">
               <select id="mem-scope" title="Scope — which sessions see these notes"></select>
@@ -640,6 +663,7 @@ tests/feature" spellcheck="false" required></textarea><span class="builds-help">
     <script src="word-shape-controls.js"></script>
     <script src="wizard-joe.js"></script>
     <script src="memory-recall.js"></script>
+    <script src="meaning-memory.js"></script>
     <script src="collaboration.js"></script>
     <script src="builds.js"></script>
     <script src="spatial-world.js"></script>

@@ -6,6 +6,8 @@ mod devserver;
 mod explainer;
 mod haven;
 mod history;
+mod meaning_candidates;
+mod meaning_memory;
 mod memory_recall;
 mod state;
 mod wizard_joe;
@@ -83,6 +85,7 @@ pub fn run() {
             wizard_joe::joe_word_shape_replay,
             word_shapes::word_shape_dictionary,
             memory_recall::memory_recall,
+            meaning_memory::meaning_memory,
             builds::get_build_concurrency,
             builds::set_build_concurrency,
             builds::list_builds,

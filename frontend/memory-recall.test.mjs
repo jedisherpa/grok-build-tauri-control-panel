@@ -14,6 +14,12 @@ test('evidence selection uses current IDs and generation, never client excerpts'
   assert.throws(() => pure.MemoryRecallView.selectionPayload(ready, new Set(['foreign']), 'q', ''), /current excerpts/);
   assert.match(pure.MemoryRecallView.coverageText(ready), /partial/);
 });
+test('source alias candidates retain current generation and UNSELECTED alternatives', () => {
+  const value = { status: 'ready', sourceFresh: true, sourceIntegrity: true, referenceIntegrity: true, generation: 'g', recallBasis: { generation: 'g' }, scannedChunks: 2, candidateCount: 1, notReturnedCount: 0, hits: [{ ...hit, sourceConcept: { usageSelection: 'UNSELECTED', occurrences: [{ alternativeSenseIds: ['river','finance'] }], distinctConceptSupport: ['river'] } }] };
+  const result = pure.MemoryRecallView.sourceResult(value); assert.equal(result.hits[0].sourceAlias.occurrences[0].alternativeSenseIds.length, 2);
+  assert.throws(() => pure.MemoryRecallView.sourceResult({ ...value, generation: 'different' }), /integrity/);
+  assert.throws(() => pure.MemoryRecallView.sourceResult({ ...value, sourceFresh: false }), /integrity/);
+});
 function mount(reply) {
   class Element {
     constructor(tag = 'div') { this.tag = tag; this.children = []; this.handlers = {}; this.value = ''; this.textContent = ''; }
@@ -35,6 +41,12 @@ function mount(reply) {
   return { ids,events,calls,prepared,state,tick,all,ctx };
 }
 async function searched(ui) { ui.ids.get('recall-query').value = 'Clarify geometry'; ui.ids.get('recall-search').handlers.click(); await ui.tick(); const checkbox = ui.all(ui.ids.get('recall-results')).find(x => x.type === 'checkbox'); checkbox.checked = true; checkbox.handlers.change(); return checkbox; }
+test('Analyze this passage prepares only its exact cited excerpt and current topic, with no provider call', async () => {
+  const ui = mount(action => action === 'evidence' ? { ...ready, receiptId: 'r', question: hit.text, context: {} } : ready);
+  await searched(ui); ui.ids.get('recall-topic').value = 'geometry';
+  ui.all(ui.ids.get('recall-results')).find(x => x.tag === 'button' && x.textContent === 'Analyze this passage').handlers.click(); await ui.tick();
+  const call = ui.calls[1]; assert.equal(call.args.action, 'evidence'); assert.equal(call.args.payload.query, hit.text); assert.equal(call.args.payload.topic, 'geometry'); assert.deepEqual(Array.from(call.args.payload.chunkIds), [hit.chunkId]); assert.equal(ui.prepared.length, 1); assert(ui.calls.every(c => c.command === 'memory_recall'));
+});
 test('search and preparation never dispatch an LLM or coding prompt; untrusted text stays text', async () => {
   const ui = mount(action => action === 'evidence' ? { ...ready, receiptId: 'r', question: 'Clarify geometry', context: {} } : ready);
   await searched(ui); ui.ids.get('recall-prepare').handlers.click(); await ui.tick();

@@ -9,7 +9,7 @@ use tokio::{io::AsyncWriteExt, sync::Mutex};
 use uuid::Uuid;
 
 const RECALL: &str = include_str!("../../scripts/memory_recall.py");
-static OPERATING: Mutex<()> = Mutex::const_new(());
+pub(crate) static OPERATING: Mutex<()> = Mutex::const_new(());
 
 #[derive(Serialize, Deserialize)]
 struct PreparedMemory {
@@ -87,7 +87,11 @@ fn validate_payload(action: &str, payload: &Value) -> Result<(), String> {
     Ok(())
 }
 
-async fn run(state: &AppState, action: &str, mut payload: Value) -> Result<Value, String> {
+pub(crate) async fn run(
+    state: &AppState,
+    action: &str,
+    mut payload: Value,
+) -> Result<Value, String> {
     validate_payload(action, &payload)?;
     let _guard = OPERATING
         .try_lock()
@@ -140,7 +144,7 @@ async fn run(state: &AppState, action: &str, mut payload: Value) -> Result<Value
     Ok(result)
 }
 
-fn context_from(evidence: &Value, topic: &str) -> Result<Value, String> {
+pub(crate) fn context_from(evidence: &Value, topic: &str) -> Result<Value, String> {
     if evidence["status"] != "ready" {
         return Err("Memory evidence is stale or unavailable; rebuild the recall index".into());
     }

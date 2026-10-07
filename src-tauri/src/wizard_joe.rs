@@ -31,11 +31,20 @@ fn previous_review(
     request_id: &str,
     thread_id: &Option<String>,
 ) -> Result<Value, String> {
-    use std::io::Read;
-    if thread_id.is_none() {
-        return Err("Comparison requires a selected thread".into());
+    let result = read_saved_receipt(dir, request_id)?;
+    if thread_id.is_none() || result["threadId"].as_str() != thread_id.as_deref() {
+        return Err("Previous review does not match this selected thread".into());
     }
+    Ok(result)
+}
+
+/// The host chooses the directory; callers supply only a canonical receipt UUID.
+pub(crate) fn read_saved_receipt(dir: &Path, request_id: &str) -> Result<Value, String> {
+    use std::io::Read;
     let id = Uuid::parse_str(request_id).map_err(|_| "Invalid comparison receipt identifier")?;
+    if id.to_string() != request_id {
+        return Err("Use a canonical receipt identifier".into());
+    }
     let path = dir.join(format!("{id}.json"));
     let metadata =
         std::fs::symlink_metadata(&path).map_err(|_| "Previous review is unavailable")?;
@@ -55,7 +64,6 @@ fn previous_review(
         serde_json::from_slice(&bytes).map_err(|_| "Previous review is malformed")?;
     if result["schema"] != "bomb-code/joe-result/v1"
         || result["requestId"].as_str() != Some(request_id)
-        || result["threadId"].as_str() != thread_id.as_deref()
         || result["authority"]["toolsDispatched"] != false
         || result["authority"]["approvalsGranted"] != false
         || result["authority"]["memoryCommitted"] != false
@@ -104,7 +112,7 @@ fn attach_word_shapes(result: &mut Value) {
             "reason":"The complete source receipt exceeds the combined shape display budget. Original interpretation evidence is retained; use a shorter passage."});
     }
 }
-fn validate_replay_reference(result: &Value, current: &Value) -> Result<(), String> {
+pub(crate) fn validate_replay_reference(result: &Value, current: &Value) -> Result<(), String> {
     let reference = &current["reference"];
     let shared = &result["interpretation"]["binding"]["request"]["shared_reference"];
     if reference["manifestSha256"] != MANIFEST_SHA
@@ -132,7 +140,7 @@ fn validate_replay_reference(result: &Value, current: &Value) -> Result<(), Stri
     }
     Ok(())
 }
-fn replay_memory_id(result: &Value) -> Result<Option<&str>, String> {
+pub(crate) fn replay_memory_id(result: &Value) -> Result<Option<&str>, String> {
     match result.get("memoryEvidence") {
         Some(Value::Null) | None => {
             if !result["interpretation"]["binding"]["request"]["context"]["recalled_evidence"]
@@ -149,7 +157,7 @@ fn replay_memory_id(result: &Value) -> Result<Option<&str>, String> {
             .ok_or_else(|| "Saved memory receipt identifier is invalid".into()),
     }
 }
-fn validate_replay_memory(result: &Value, context: &Value) -> Result<(), String> {
+pub(crate) fn validate_replay_memory(result: &Value, context: &Value) -> Result<(), String> {
     if result["memoryEvidence"]["context"] != *context
         || result["interpretation"]["binding"]["request"]["context"]["recalled_evidence"]
             != *context
@@ -515,6 +523,12 @@ pub async fn joe_analyze(
     result["cdiss"] = cdiss_attachment(&result, previous.as_ref(), reason);
     attach_word_shapes(&mut result);
     save_receipt(&path, &result)?;
+    // Original source-memory authority remains false. This separate immutable
+    // profile reference records a proposed interpretation, not an approved fact.
+    result["meaningProfile"] = match crate::meaning_memory::accumulate(&state, &result).await {
+        Ok(profile) => profile,
+        Err(reason) => json!({"status":"unavailable","profileSaved":false,"reason":reason}),
+    };
     Ok(result)
 }
 

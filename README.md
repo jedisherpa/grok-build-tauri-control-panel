@@ -19,7 +19,7 @@
 - **Thread-per-worktree isolation** — each new thread in a git project gets its own worktree + `thread/<id>` branch (pure git, works with every backend), grouped by project in the sidebar. **Land** merges a thread back into the project branch; conflicts route through **Sync**, which pulls main into the worktree so the thread's own agent can resolve them. Threads get smart names from their first prompt.
 - **MCP management** — catalog (filesystem, GitHub, Linear, X, Playwright, custom), doctor, credentials store, pre-spawn health checks, session attachment. Servers needing credentials (e.g. `GITHUB_TOKEN`, `LINEAR_API_KEY`, `X_API_BEARER`) are skipped with a visible reason until the secret is set.
 - **Extensions** — skills, plugins CRUD (config + CLI)
-- **Memory** — structured store + MEMORY.md flush/dream
+- **Memory** — structured store + MEMORY.md flush/dream, cited local keyword/vector recall, and source-linked meaning profiles
 - **Scheduler** — interval, cron, one-shot routines (persisted; survive restart; each job needs an explicit working directory)
 - **Persistence** — SQLite session/transcript recovery
 - **Diff engine** — before/after capture and summaries
@@ -63,6 +63,29 @@ cargo tauri build --bundles app
 ```
 
 The app discovers `~/.grok/bin/grok` even when launched from Finder (PATH is bootstrapped).
+
+## Meaning memory
+
+Memory can search source-linked meanings alongside its existing keyword/vector
+recall. Choose a dictionary definition, inspect the unselected source-linked
+passages, and prepare a passage in Joe when you want it interpreted. Preparation,
+lookup, saved-profile import and comparison stay local. The existing explicit
+**Analyze** action sends the displayed passage/context to the configured provider.
+
+Successful Joe analyses accumulate private immutable profile references to their
+original receipts. Exact cited passage profiles remain distinct from questions
+analyzed with historical context. Saved analyses can be imported locally. Compare
+profiles to inspect selected senses, asserted concepts, scoped context, event
+roles/negation/conditions, references and native root/fine positions separately.
+Clarification drafts remain unsent. Coverage shows how much interpreted evidence
+has accumulated; this release does not assign a combined relevance/confidence
+score.
+
+The feature requires the existing local Wizard Joe reference/runtime and a current
+recall index for cited memories. Missing or changed evidence is displayed as
+unavailable. Raw histories, indexes, profiles and provider credentials are not
+shipped in the repository. See [integration plan](docs/plan/meaning_memory.md) and
+[full-chain research](docs/cdiss/FULL_CHAIN_RETRIEVAL_RESULTS.md).
 
 ## Config locations
 

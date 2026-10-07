@@ -424,3 +424,31 @@ All20 accepted native profiles retain exact full records, readings and activatio
 The final actual source-alias scan enumerates ten forms, scans29,755 chunks and finds seven lexical candidate chunks/nine occurrences; five returned citations validate in9.50s. All usages are unselected. No provider/embedding calls, index/history writes or installation. Archive-wide full profiles and new ranking relevance are still unevaluated.
 
 PM exact source preservation exposed default serde_json parsing changing source coordinates by one IEEE unit. Retain run01; enable existing float_roundtrip feature and add exact parse/serialize/reparse bit regression, without tolerance. Final run02 passes all source/packet/binary before/after hashes and exact values. Both audit lanes resolved source proof, unresolved selected alternatives, allocation/fanout, repeated identity, index limits, occurrence count and question CPU bounds with no unresolved Critical/High/actionable Medium. Final workspace check/strict all-target Clippy pass;195 Rust tests pass, two existing ignored, zero failed. Source adapter15, case generator4 and clarification/harness4 checks pass. Public aggregate evidence: docs/cdiss/FULL_CHAIN_RETRIEVAL_RESULTS.md; private packets/results stay outside Git. Installed0.1.12 primary remains unchanged.
+
+## Integrated meaning memory — local release 0.1.13
+
+Paul authorizes integrated additions, local testing as interpreted memory grows,
+and GitHub publication. PM continues from47f92a5 in the isolated
+codex/integrated-meaning-memory worktree. Three lanes implement the existing
+Memory source-concept picker, immutable Joe profile catalog and citation-bound
+comparison, and UI preparation/composer flows. Original receipt references avoid
+duplicating the corpus; exact passage subjects remain distinct from questions
+with context. Successful manual Joe analyses accumulate profiles; saved proposals
+can be imported locally. Search/import/compare prepare no provider call.
+
+Source forms remain unselected lexical candidates, with current native citations
+and source/scope filtering. The catalog validates current frozen sources, original
+receipt bytes and all15 citation fields. Comparisons retain every reading pair,
+event frames, scoped SenseSnap/context, links/references, root collisions and fine
+positions as separate signals. Pre/post comparison and copy-time fingerprints
+withhold stale evidence. Clarification drafts use unambiguous event correspondence
+and the existing unsent composer guard. Limits reject complete oversized results
+without truncating evidence. A private import cursor prevents failed early
+receipts from starving later batches.
+
+Implementation phase gates: workspace check and strict all-target Clippy pass;
+132 frontend tests,18 source candidate tests,26 dictionary tests and31 recall
+tests pass. Architecture and performance/simplicity review and final native
+regressions, installed smoke and preservation are recorded in the integration
+report after the final release gate. Source-only checks do not establish future
+retrieval relevance or human question usefulness.

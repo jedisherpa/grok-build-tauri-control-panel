@@ -1,0 +1,15 @@
+.meaning-memory { margin: 20px 0; border-top: 1px solid var(--border, #324458); padding-top: 16px; }
+.meaning-memory h3 { margin: 8px 0; font-size: 16px; }
+.meaning-memory p { line-height: 1.5; overflow-wrap: anywhere; }
+.meaning-memory .meaning-choice { display: flex; align-items: flex-start; gap: 8px; margin: 8px 0; font-size: 13px; }
+.meaning-choice input { flex: none; margin-top: 4px; }
+.meaning-profiles { display: grid; gap: 8px; margin: 12px 0; }
+.meaning-profile, .meaning-comparison { border: 1px solid var(--border, #324458); padding: 12px; border-radius: 5px; }
+.meaning-profile p, .meaning-comparison p { margin: 6px 0; font-size: 12px; }
+.meaning-profile .meaning-passage { white-space: pre-wrap; font-size: 13px; }
+.meaning-signals { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 8px; padding: 0; list-style: none; }
+.meaning-signals li { padding: 8px; background: var(--bg, #101d30); border: 1px solid var(--border, #324458); font-size: 12px; }
+.meaning-evidence { white-space: pre-wrap; overflow-wrap: anywhere; font: 11px var(--mono, monospace); }
+.meaning-questions { margin: 12px 0; }
+.meaning-question { border-left: 2px solid var(--warn, #dfbb78); padding: 8px 12px; margin: 8px 0; }
+.meaning-memory select { max-width: 100%; }

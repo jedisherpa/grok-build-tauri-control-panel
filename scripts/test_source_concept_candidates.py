@@ -85,6 +85,29 @@ class SourceConceptTests(unittest.TestCase):
         self.assertEqual([r['chunk']['chunkId'] for r in result['hits']], ['c', 'a', 'b'])
         self.assertEqual(result['candidateCount'], 3)
 
+    def test_notes_scope_filters_after_complete_source_form_matching(self):
+        records = [dict(record('bank', 'a'), kind='history', source='codex', scope=''),
+                   dict(record('bank', 'b'), kind='note', source='notes', scope='project-a'),
+                   dict(record('bank bank', 'c'), kind='note', source='notes', scope='project-b')]
+        aliases = bridge.SourceAliases(self.dictionary, ['river'])
+        scoped = bridge.match_records(aliases, records, 1, scope='project-a')
+        self.assertEqual((scoped['scannedChunks'], scoped['unfilteredCandidateCount'], scoped['candidateCount']), (3, 3, 1))
+        self.assertEqual(scoped['hits'][0]['chunk']['chunkId'], 'b')
+        history = bridge.match_records(aliases, records, source='history')
+        self.assertEqual([h['chunk']['chunkId'] for h in history['hits']], ['a'])
+        provider = bridge.match_records(aliases, records, source='codex')
+        self.assertEqual([h['chunk']['chunkId'] for h in provider['hits']], ['a'])
+        self.assertEqual(bridge.match_records(aliases, records, source='history', scope='project-a')['hits'], [])
+
+    def test_host_options_reject_paths_notes_unknown_and_invalid_limits(self):
+        for value in ({'conceptIds': ['river'], 'panel': '/tmp'}, {'conceptIds': ['river'], 'notes': []},
+                      {'conceptIds': ['river'], 'limit': 13}, {'conceptIds': [{}]},
+                      {'conceptIds': ['river', 'river']}, {'conceptIds': ['river'], 'source': 'unknown'}):
+            with self.assertRaises(bridge.CandidateError):
+                bridge.request_options(value)
+        self.assertEqual(bridge.request_options({'conceptIds': ['river'], 'source': 'notes', 'scope': 'project-a', 'limit': 12}),
+                         (['river'], 'notes', 'project-a', 12))
+
     def test_return_limit_reports_full_census_without_truncating_hit_alternatives(self):
         result = bridge.match_records(bridge.SourceAliases(self.dictionary, ['river']), [record('bank', 'a'), record('shore', 'b')], 1)
         self.assertEqual((result['candidateCount'], result['returnedCount'], result['notReturnedCount']), (2, 1, 1))
@@ -114,6 +137,13 @@ class SourceConceptTests(unittest.TestCase):
         self.assertEqual(model.identity(), 'stored')
         with self.assertRaises(bridge.CandidateError):
             model.embed(['private source'])
+
+    def test_output_encoding_counts_utf8_and_never_truncates_records(self):
+        value = {'definitions': ['岸辺'] * 20}
+        self.assertEqual(json.loads(bridge.encode_result(value)), value)
+        with mock.patch.object(bridge, 'MAX_OUTPUT_BYTES', 32):
+            with self.assertRaisesRegex(bridge.CandidateError, 'no records were dropped'):
+                bridge.encode_result(value)
 
     def test_existing_database_and_serialized_index_budgets(self):
         with sqlite3.connect(':memory:') as db:

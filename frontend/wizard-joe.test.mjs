@@ -64,6 +64,16 @@ function withContinuity(result) {
   result.cdiss = { status: "ready", state: { schema: "bomb-code/cdiss-state/v1", algorithmVersion: "bomb-code/cdiss-source-structure/v1", observation: { readingCount: 1, atomCount: 3, eventCount: 1, alternativeCount: 0, mappedMass: 2 / 3, unmappedMass: 1 / 3 }, continuity: { status: "fresh", reasons: [], sourceDistance: null, structureDistance: null, partitionChanged: null }, basis: {}, stateHash: "fixture-state", configDigest: "fixture-config" } };
   return result;
 }
+test('memory comparison question drafts use Joe context guards and an explicit local validation', async () => {
+  const ui = mount(response()); ui.ids.get('prompt').value = 'Existing unsent message'; let checked = 0;
+  const copied = await ui.context.WizardJoeGuide.draftMemoryQuestion({ question: 'Who approves?', threadId: 'thread-1', isCurrent: () => true, validate: async () => { checked++; } });
+  assert.equal(copied, true); assert.equal(checked, 1); assert.equal(ui.ids.get('prompt').value, 'Existing unsent message\n\nWho approves?'); assert.equal(ui.calls.length, 0);
+});
+test('edited Joe passage withholds a pending memory comparison draft', async () => {
+  const ui = mount(response()); let resolve; const pending = new Promise(r => { resolve = r; });
+  const copy = ui.context.WizardJoeGuide.draftMemoryQuestion({ question: 'Who approves?', threadId: 'thread-1', isCurrent: () => true, validate: () => pending });
+  ui.ids.get('joe-passage').value = 'Edited'; ui.ids.get('joe-passage').handlers.input(); resolve(); assert.equal(await copy, false); assert.equal(ui.ids.get('prompt').value, '');
+});
 
 test("word shape renderer cannot replace continuity, provider or clarification content",async()=>{
   const result=withContinuity(response());result.wordShapes={schema:"bomb-code/word-shapes/v1",status:"ready"};
