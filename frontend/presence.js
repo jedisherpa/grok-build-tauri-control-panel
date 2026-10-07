@@ -232,7 +232,7 @@
       return emptyPresence();
     }
     p.completionUnconfirmed = true;
-    p.note = "Session idle · response completion unconfirmed";
+    p.note = "Session idle · no clear finish signal yet";
     p.lastSignalAt = now;
     return p;
   }
@@ -356,6 +356,19 @@
     return "indeterminate";
   }
 
+
+  /** Honest meter subtitle: never claim a Builds-style %; prefer idle/done copy. */
+  function completionLabelFor(p, show) {
+    if (!show) return "";
+    if (p.phase === "done" || p.sessionClosed) return "Turn finished · ready for next message";
+    if (p.phase === "error") return "Turn failed · see What's happening";
+    if (p.phase === "wait") return "Waiting for your approval";
+    if (p.completionUnconfirmed) return "Idle · no clear finish signal yet";
+    if (p.phase === "idle") return "Ready";
+    // Live activity meter is not a workflow percent (Builds has its own checkpoints).
+    return "Live activity · not a percent complete";
+  }
+
   /**
    * Single formatter all surfaces use.
    */
@@ -386,7 +399,7 @@
     if (stall === "awaiting_user") title = "Needs you";
     else if (p.phase === "error") title = "Failed";
     else if (p.sessionClosed) title = "Turn ended · session closed";
-    else if (p.completionUnconfirmed) title = "Completion unconfirmed";
+    else if (p.completionUnconfirmed) title = "Idle · turn may still be open";
     else if (stall === "tool_hang") title = "Quiet · tool";
     else if (stall === "no_first_signal") title = "Quiet";
     else if (stall === "stream_gap") title = "Quiet";
@@ -448,7 +461,7 @@
       stalled: !!stall && stall !== "awaiting_user",
       meterMode: meterMode(p, stall),
       meterProgress: null,
-      completionLabel: show ? "Task completion unknown · activity only" : "",
+      completionLabel: completionLabelFor(p, show),
       stagesSeen: { ...p.stagesSeen },
       transition: p.transition,
       tierDock: 2,
@@ -486,6 +499,7 @@
     resolveMood,
     stageClass,
     formatPresence,
+    completionLabelFor,
     consumeTransition,
     BOMB_FLAVOR,
   };

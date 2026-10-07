@@ -354,7 +354,11 @@ function updateBombChrome() {
 
     const meter = document.querySelector(".turn-dock-meter");
     const bar = $("turn-meter-bar");
-    if (meter) meter.setAttribute("data-mode", view.meterMode);
+    if (meter) {
+      meter.setAttribute("data-mode", view.meterMode);
+      const aria = view.completionLabel || "Ready · no active turn";
+      meter.setAttribute("aria-label", aria);
+    }
     const completion = $("turn-completion");
     const workflow = window.BombBuilds?.sessionSummary(state.selectedSession);
     if (completion) completion.textContent = workflow
@@ -1661,7 +1665,7 @@ function renderAgents() {
   <span class="muted">${escapeHtml(s.model || "")}</span>
   <span class="muted">${escapeHtml(shortId(s.id))}</span></div>
   <div class="path">${escapeHtml(s.cwd || "")}</div>
-  <div class="path">${workflow ? `${escapeHtml(workflow.role)} · build ${escapeHtml(shortId(workflow.id))} · ${escapeHtml(workflow.text)}${workflow.fresh ? "" : " · last known snapshot"}` : "Task completion unknown · no recorded build link"}</div>
+  <div class="path">${workflow ? `${escapeHtml(workflow.role)} · build ${escapeHtml(shortId(workflow.id))} · ${escapeHtml(workflow.text)}${workflow.fresh ? "" : " · last known snapshot"}` : "Standalone session · not linked to a Builds workflow"}</div>
   ${
     s.mcpServers?.length || s.mcp_servers?.length
       ? `<div class="path">mcp: ${escapeHtml((s.mcpServers || s.mcp_servers || []).join(", "))}</div>`
