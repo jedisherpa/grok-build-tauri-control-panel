@@ -248,9 +248,16 @@ body {
 /* Land / Sync controls in the composer meta row */
 .thread-git-row {
   display: inline-flex; align-items: center; gap: 6px; margin-left: auto;
+  flex-wrap: wrap; max-width: min(520px, 100%);
 }
 .thread-branch { font-size: 10px; white-space: nowrap; }
-.thread-git-row .btn { font-size: 10px; padding: 2px 8px; }
+.thread-git-row .btn { font-size: 11px; padding: 3px 10px; }
+.thread-git-row .btn.primary {
+  font-weight: 600;
+}
+.wt-actions { display: inline-flex; flex-wrap: wrap; gap: 4px; align-items: center; }
+.wt-actions .wt-land { font-weight: 600; }
+#wt-land-help { margin: 0 0 10px; max-width: 52rem; }
 
 .empty-hint { color: var(--dim); font-size: 12px; padding: 8px 6px; }
 
