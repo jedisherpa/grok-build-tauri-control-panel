@@ -4,7 +4,9 @@
 
 const $ = (id) => document.getElementById(id);
 
-const LOGO = "assets/logo.png";
+const SOLID_POSTER = "assets/platonic-solids-poster.png";
+const SOLID_GLB = "assets/platonic-solids.glb";
+const SOLID_3D_SIZES = new Set(["md", "lg", "xl"]);
 const P = window.BombPresence;
 if (!P || typeof P.emptyPresence !== "function") {
   console.error("BombPresence missing — presence.js failed to load before app.js");
@@ -121,12 +123,41 @@ function clearBoomTimer(sid) {
   }
 }
 
+function prefersReducedMotion() {
+  return !!(window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches);
+}
+
+function solidMediaHtml(size = "sm") {
+  // Poster always present — WebKitGTK with compositing disabled may not paint WebGL.
+  const poster = `<img class="bomb-face" src="${SOLID_POSTER}" alt="" />`;
+  if (!SOLID_3D_SIZES.has(size)) return poster;
+  // One WebGL context per hero/status icon — avoid for xs/sm list spam.
+  const rotate = prefersReducedMotion()
+    ? ""
+    : ' auto-rotate rotation-per-second="18deg"';
+  return (
+    poster +
+    `<model-viewer class="bomb-solid" src="${SOLID_GLB}" poster="${SOLID_POSTER}" ` +
+    `alt=""${rotate} interaction-prompt="none" ` +
+    `shadow-intensity="0.2" exposure="1.05" disable-zoom disable-pan disable-tap ` +
+    `touch-action="none" tabindex="-1"></model-viewer>`
+  );
+}
+
+function respectSolidMotionPreference() {
+  const reduce = prefersReducedMotion();
+  document.querySelectorAll("model-viewer.bomb-solid").forEach((el) => {
+    if (reduce) el.removeAttribute("auto-rotate");
+    else if (!el.hasAttribute("auto-rotate")) el.setAttribute("auto-rotate", "");
+  });
+}
+
 function bombHtml(mood = "idle", size = "sm", extraClass = "") {
   const wick =
     ["thinking", "stream", "tooling", "wait", "ready", "running"].includes(mood)
       ? " wick-on"
       : "";
-  return `<span class="px-bomb ${size} mood-${mood} tier-satellite${wick} ${extraClass}" aria-hidden="true"><img src="${LOGO}" alt="" /></span>`;
+  return `<span class="px-bomb ${size} mood-${mood} tier-satellite${wick} ${extraClass}" aria-hidden="true">${solidMediaHtml(size)}</span>`;
 }
 
 function moodFromStatus(status) {
@@ -5176,6 +5207,10 @@ setInterval(() => {
 }, 1000);
 
 async function boot() {
+  respectSolidMotionPreference();
+  try {
+    window.matchMedia("(prefers-reduced-motion: reduce)").addEventListener("change", respectSolidMotionPreference);
+  } catch (_) { /* older WebKit */ }
   // Every boot step is independent — one failure must not take down the rest
   // (a failed listen() used to die as an unhandled rejection and nothing
   // loaded; a failed refreshStatus skipped session loading entirely).
