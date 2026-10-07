@@ -128,17 +128,20 @@ function prefersReducedMotion() {
 }
 
 function solidMediaHtml(size = "sm") {
-  if (SOLID_3D_SIZES.has(size)) {
-    // One WebGL context per hero/status icon — avoid for xs/sm list spam.
-    const rotate = prefersReducedMotion() ? "" : " auto-rotate rotation-per-second="18deg"";
-    return (
-      `<model-viewer class="bomb-solid" src="${SOLID_GLB}" poster="${SOLID_POSTER}" ` +
-      `alt=""${rotate} interaction-prompt="none" ` +
-      `shadow-intensity="0.2" exposure="1.05" disable-zoom disable-pan disable-tap ` +
-      `touch-action="none" tabindex="-1"></model-viewer>`
-    );
-  }
-  return `<img class="bomb-face" src="${SOLID_POSTER}" alt="" />`;
+  // Poster always present — WebKitGTK with compositing disabled may not paint WebGL.
+  const poster = `<img class="bomb-face" src="${SOLID_POSTER}" alt="" />`;
+  if (!SOLID_3D_SIZES.has(size)) return poster;
+  // One WebGL context per hero/status icon — avoid for xs/sm list spam.
+  const rotate = prefersReducedMotion()
+    ? ""
+    : ' auto-rotate rotation-per-second="18deg"';
+  return (
+    poster +
+    `<model-viewer class="bomb-solid" src="${SOLID_GLB}" poster="${SOLID_POSTER}" ` +
+    `alt=""${rotate} interaction-prompt="none" ` +
+    `shadow-intensity="0.2" exposure="1.05" disable-zoom disable-pan disable-tap ` +
+    `touch-action="none" tabindex="-1"></model-viewer>`
+  );
 }
 
 function respectSolidMotionPreference() {

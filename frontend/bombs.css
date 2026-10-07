@@ -52,6 +52,9 @@
   --poster-color: transparent;
   overflow: hidden;
   border: 0;
+  position: absolute;
+  inset: 0;
+  z-index: 1;
 }
 /* Bigger scale across the app */
 .px-bomb.xs { --bomb-size: 16px; }
