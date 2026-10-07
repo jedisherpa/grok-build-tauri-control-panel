@@ -98,7 +98,7 @@
           if (hit.sourceAlias.occurrences.length > 24) aliases.appendChild(node('p', 'First 24 occurrences displayed; all occurrence spans remain in the source result.'));
         }); card.appendChild(aliases);
       }
-      const passage = node('button', 'Analyze this passage', 'btn ghost'); passage.type = 'button';
+      const passage = node('button', 'Prepare this passage in Joe', 'btn ghost'); passage.type = 'button';
       passage.addEventListener('click', () => {
         if (busy || indexing) return;
         try {

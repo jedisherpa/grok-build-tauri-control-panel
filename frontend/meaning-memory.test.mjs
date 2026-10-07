@@ -70,7 +70,7 @@ test('actual source cards prepare exact cited passage through existing Memory an
   ui.ids.get('meaning-dictionary-form').handlers.submit({ preventDefault() {} }); await ui.tick();
   const box = ui.all(ui.ids.get('meaning-concepts')).find(n => n.type === 'checkbox'); box.checked = true; box.handlers.change(); ui.ids.get('meaning-source-search').handlers.click(); await ui.tick();
   const cards = ui.all(ui.ids.get('recall-results')); assert(cards.some(n => n.textContent.includes('UNSELECTED')));
-  cards.find(n => n.tag === 'button' && n.textContent === 'Analyze this passage').handlers.click(); await ui.tick();
+  cards.find(n => n.tag === 'button' && n.textContent === 'Prepare this passage in Joe').handlers.click(); await ui.tick();
   assert.equal(ui.prepared.length, 1); const call = ui.calls.at(-1); assert.equal(call.command, 'memory_recall'); assert.equal(call.args.action, 'evidence'); assert.equal(call.args.payload.query, text); assert.equal(call.args.payload.chunkIds[0], source.hits[0].chunkId);
   assert(ui.calls.every(c => ['word_shape_dictionary','meaning_memory','memory_recall'].includes(c.command)));
 });

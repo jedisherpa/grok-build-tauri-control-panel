@@ -428,7 +428,7 @@ PM exact source preservation exposed default serde_json parsing changing source 
 ## Integrated meaning memory — local release 0.1.13
 
 Paul authorizes integrated additions, local testing as interpreted memory grows,
-and GitHub publication. PM continues from47f92a5 in the isolated
+and GitHub publication. PM continues from 47f92a5 in the isolated
 codex/integrated-meaning-memory worktree. Three lanes implement the existing
 Memory source-concept picker, immutable Joe profile catalog and citation-bound
 comparison, and UI preparation/composer flows. Original receipt references avoid
@@ -438,7 +438,7 @@ can be imported locally. Search/import/compare prepare no provider call.
 
 Source forms remain unselected lexical candidates, with current native citations
 and source/scope filtering. The catalog validates current frozen sources, original
-receipt bytes and all15 citation fields. Comparisons retain every reading pair,
+receipt bytes and all 15 citation fields. Comparisons retain every reading pair,
 event frames, scoped SenseSnap/context, links/references, root collisions and fine
 positions as separate signals. Pre/post comparison and copy-time fingerprints
 withhold stale evidence. Clarification drafts use unambiguous event correspondence
@@ -447,8 +447,22 @@ without truncating evidence. A private import cursor prevents failed early
 receipts from starving later batches.
 
 Implementation phase gates: workspace check and strict all-target Clippy pass;
-132 frontend tests,18 source candidate tests,26 dictionary tests and31 recall
+132 frontend tests, 18 source candidate tests, 26 dictionary tests and 31 recall
 tests pass. Architecture and performance/simplicity review and final native
 regressions, installed smoke and preservation are recorded in the integration
 report after the final release gate. Source-only checks do not establish future
 retrieval relevance or human question usefulness.
+
+Final installed smoke imports five authentic saved proposals and preserves two
+unavailable receipts, compares all six reading pairs for the saved approval
+examples, validates and copies a polarity question into the unsent composer,
+then clears only that verification draft. Source alias lookup returns seven
+cited candidates across 29,755 excerpts; one exact candidate is prepared in Joe
+without Analyze/Send. Clarify the preparation button label to “Prepare this
+passage in Joe” so its local handoff is explicit. Full final workspace 208 tests
+pass, with four environment fixtures explicitly executed separately and two
+existing development-server fixtures remaining ignored; 132 frontend, 18 source,
+26 dictionary and 31 recall tests pass. Both review lanes report zero unresolved
+Critical/High/actionable Medium. All 13 protected source/index/config/original
+receipt/reference hashes remain unchanged. Correct the local bundle signature
+and verify the ad-hoc signed 0.1.13 update; preserve the 0.1.12 rollback bundle.

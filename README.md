@@ -84,7 +84,8 @@ score.
 The feature requires the existing local Wizard Joe reference/runtime and a current
 recall index for cited memories. Missing or changed evidence is displayed as
 unavailable. Raw histories, indexes, profiles and provider credentials are not
-shipped in the repository. See [integration plan](docs/plan/meaning_memory.md) and
+shipped in the repository. See [integration guide](docs/cdiss/MEANING_MEMORY_INTEGRATION.md),
+[integration plan](docs/plan/meaning_memory.md) and
 [full-chain research](docs/cdiss/FULL_CHAIN_RETRIEVAL_RESULTS.md).
 
 ## Config locations
