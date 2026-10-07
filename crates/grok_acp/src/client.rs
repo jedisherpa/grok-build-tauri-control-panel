@@ -267,15 +267,38 @@ enum PendingPermissionKind {
     SessionPermission,
     /// Grok `x.ai/exit_plan_mode` ext — ExitPlanModeExtResponse { decision, comments }.
     ExitPlanMode,
+    /// Grok `x.ai/ask_user_question` ext — AskUserQuestionExtResponse { outcome, … }.
+    AskUserQuestion,
 }
 
-/// A permission / plan-exit request we have not yet answered — awaiting the user.
+/// One question from `_x.ai/ask_user_question` (D-057).
+#[derive(Debug, Clone)]
+struct AskUserQuestionDef {
+    text: String,
+    /// (option_id, label) pairs offered for this question.
+    options: Vec<(String, String)>,
+    multi_select: bool,
+}
+
+/// In-flight ask_user_question state (may span multiple approval cards).
+#[derive(Debug, Clone)]
+struct AskUserPending {
+    questions: Vec<AskUserQuestionDef>,
+    /// Index of the question the current card is answering.
+    current_q: usize,
+    /// Answers keyed by question *text* (protocol requirement).
+    answers: serde_json::Map<String, Value>,
+}
+
+/// A permission / plan-exit / ask-user request we have not yet answered.
 #[derive(Debug)]
 struct PendingPermission {
     /// Original wire id; permission responses are JSON-RPC responses to it.
     rpc_id: Value,
     options: Vec<PermissionOptionInfo>,
     kind: PendingPermissionKind,
+    /// Present only for AskUserQuestion.
+    ask: Option<AskUserPending>,
 }
 
 pub struct AcpClient {
@@ -1514,6 +1537,13 @@ impl AcpClient {
             }
         }
 
+        // Ask-user may need more cards before we close the RPC.
+        if pending.kind == PendingPermissionKind::AskUserQuestion {
+            return self
+                .respond_ask_user_question(request_id, option_id, pending)
+                .await;
+        }
+
         let outcome = match pending.kind {
             PendingPermissionKind::ExitPlanMode => {
                 // Grok ExitPlanModeExtResponse: { decision, comments }.
@@ -1537,6 +1567,7 @@ impl AcpClient {
                 Some(oid) => json!({ "outcome": { "outcome": "selected", "optionId": oid } }),
                 None => json!({ "outcome": { "outcome": "cancelled" } }),
             },
+            PendingPermissionKind::AskUserQuestion => unreachable!("handled above"),
         };
 
         if let Some(transport) = self.transport.read().await.clone() {
@@ -1600,12 +1631,18 @@ impl AcpClient {
         for (request_id, pending) in drained {
             if let Some(t) = &transport {
                 // Best-effort: the process may already be gone.
-                let _ = t
-                    .send_response(
-                        pending.rpc_id,
-                        json!({ "outcome": { "outcome": "cancelled" } }),
-                    )
-                    .await;
+                let body = match pending.kind {
+                    PendingPermissionKind::ExitPlanMode => {
+                        json!({ "decision": "abandon", "comments": Value::Null })
+                    }
+                    PendingPermissionKind::AskUserQuestion => {
+                        json!({ "outcome": "skip_interview" })
+                    }
+                    PendingPermissionKind::SessionPermission => {
+                        json!({ "outcome": { "outcome": "cancelled" } })
+                    }
+                };
+                let _ = t.send_response(pending.rpc_id, body).await;
             }
             if let Some(bus) = &self.event_bus {
                 bus.emit(ControlEvent::ApprovalResolved {
@@ -1882,6 +1919,7 @@ impl AcpClient {
                             rpc_id: req.id,
                             options: options.clone(),
                             kind: PendingPermissionKind::SessionPermission,
+                            ask: None,
                         },
                     );
                     if let Some(bus) = &self.event_bus {
@@ -1983,6 +2021,11 @@ impl AcpClient {
             | "_x.ai/exit_plan_mode" | "_x.ai/exitPlanMode" => {
                 self.handle_exit_plan_mode_ext(req).await?;
             }
+            // D-057: Grok structured interview. Bare `{}` / -32601 breaks the tool.
+            "x.ai/ask_user_question" | "x.ai/askUserQuestion"
+            | "_x.ai/ask_user_question" | "_x.ai/askUserQuestion" => {
+                self.handle_ask_user_question_ext(req).await?;
+            }
             // Nested ext_method envelope (some builds wrap the method name).
             "agent.ext_method" | "agent/ext_method" => {
                 let nested = req
@@ -1997,6 +2040,8 @@ impl AcpClient {
                     .unwrap_or("");
                 if is_exit_plan_ext_method(nested) {
                     self.handle_exit_plan_mode_ext(req).await?;
+                } else if is_ask_user_question_ext_method(nested) {
+                    self.handle_ask_user_question_ext(req).await?;
                 } else {
                     warn!(method = %req.method, nested, "unhandled agent.ext_method");
                     transport
@@ -2060,6 +2105,7 @@ impl AcpClient {
                 rpc_id: req.id,
                 options: options.clone(),
                 kind: PendingPermissionKind::ExitPlanMode,
+                ask: None,
             },
         );
 
@@ -2079,6 +2125,195 @@ impl AcpClient {
                 .await;
         }
         // No response yet — wire stays open until respond_approval.
+        Ok(())
+    }
+
+    /// Park Grok's `x.ai/ask_user_question` as sequential approval cards (D-057).
+    ///
+    /// Response must be AskUserQuestionExtResponse tagged on `outcome`
+    /// (`accepted` | `skip_interview`). A bare `{}` fails with "missing field `outcome`".
+    async fn handle_ask_user_question_ext(&self, req: IncomingAgentRequest) -> Result<()> {
+        let request_id = id_key(&req.id);
+        let questions = parse_ask_user_questions(&req.params);
+        if questions.is_empty() {
+            // Nothing to ask — skip so the agent does not hang.
+            if let Some(transport) = self.transport.read().await.clone() {
+                transport
+                    .send_response(req.id, json!({ "outcome": "skip_interview" }))
+                    .await?;
+            }
+            return Ok(());
+        }
+
+        let card = ask_user_card_options(&questions[0]);
+        let summary = questions[0].text.clone();
+        let ask = AskUserPending {
+            questions: questions.clone(),
+            current_q: 0,
+            answers: serde_json::Map::new(),
+        };
+
+        self.pending_permissions.lock().await.insert(
+            request_id.clone(),
+            PendingPermission {
+                rpc_id: req.id,
+                options: card.clone(),
+                kind: PendingPermissionKind::AskUserQuestion,
+                ask: Some(ask),
+            },
+        );
+
+        if let Some(bus) = &self.event_bus {
+            bus.emit(ControlEvent::ApprovalRequired {
+                session_id: self.control_session_id,
+                request_id,
+                tool: "ask_user_question".into(),
+                summary,
+                options: card,
+                auto_approved: false,
+                selected_option: None,
+                plan_approval: false,
+                at: Utc::now(),
+            });
+            bus.emit_status(self.control_session_id, SessionStatus::WaitingApproval)
+                .await;
+        }
+        Ok(())
+    }
+
+    /// Advance / finish an ask_user_question approval card.
+    async fn respond_ask_user_question(
+        &self,
+        request_id: &str,
+        option_id: Option<&str>,
+        mut pending: PendingPermission,
+    ) -> Result<()> {
+        let skip = match option_id {
+            None => true,
+            Some(oid) => {
+                let lower = oid.to_lowercase();
+                lower == "skip_interview"
+                    || lower == "skip"
+                    || lower.contains("skip_interview")
+            }
+        };
+
+        if skip {
+            let outcome = json!({ "outcome": "skip_interview" });
+            if let Some(transport) = self.transport.read().await.clone() {
+                if let Err(e) = transport
+                    .send_response(pending.rpc_id.clone(), outcome)
+                    .await
+                {
+                    self.pending_permissions
+                        .lock()
+                        .await
+                        .insert(request_id.to_string(), pending);
+                    return Err(e);
+                }
+            }
+            if let Some(bus) = &self.event_bus {
+                bus.emit(ControlEvent::ApprovalResolved {
+                    session_id: self.control_session_id,
+                    request_id: request_id.to_string(),
+                    option_id: option_id.map(str::to_string),
+                    cancelled: true,
+                    at: Utc::now(),
+                });
+                if self.pending_permissions.lock().await.is_empty() {
+                    bus.emit_status(self.control_session_id, SessionStatus::Running)
+                        .await;
+                }
+            }
+            return Ok(());
+        }
+
+        let oid = option_id.unwrap();
+        let mut ask = pending.ask.take().ok_or_else(|| {
+            AcpError::Protocol("ask_user_question pending missing ask state".into())
+        })?;
+        let q = ask.questions.get(ask.current_q).ok_or_else(|| {
+            AcpError::Protocol(format!(
+                "ask_user_question current_q {} out of range",
+                ask.current_q
+            ))
+        })?;
+        let label = q
+            .options
+            .iter()
+            .find(|(id, _)| id == oid)
+            .map(|(_, lab)| lab.clone())
+            .unwrap_or_else(|| oid.to_string());
+        ask.answers
+            .insert(q.text.clone(), Value::String(label));
+
+        // Resolve this card in the UI.
+        if let Some(bus) = &self.event_bus {
+            bus.emit(ControlEvent::ApprovalResolved {
+                session_id: self.control_session_id,
+                request_id: request_id.to_string(),
+                option_id: Some(oid.to_string()),
+                cancelled: false,
+                at: Utc::now(),
+            });
+        }
+
+        ask.current_q += 1;
+        if ask.current_q < ask.questions.len() {
+            // More questions — re-park and emit the next card (same request_id).
+            let next = &ask.questions[ask.current_q];
+            let card = ask_user_card_options(next);
+            let summary = next.text.clone();
+            pending.options = card.clone();
+            pending.ask = Some(ask);
+            self.pending_permissions
+                .lock()
+                .await
+                .insert(request_id.to_string(), pending);
+            if let Some(bus) = &self.event_bus {
+                bus.emit(ControlEvent::ApprovalRequired {
+                    session_id: self.control_session_id,
+                    request_id: request_id.to_string(),
+                    tool: "ask_user_question".into(),
+                    summary,
+                    options: card,
+                    auto_approved: false,
+                    selected_option: None,
+                    plan_approval: false,
+                    at: Utc::now(),
+                });
+                bus.emit_status(self.control_session_id, SessionStatus::WaitingApproval)
+                    .await;
+            }
+            return Ok(());
+        }
+
+        let outcome = json!({
+            "outcome": "accepted",
+            "answers": Value::Object(ask.answers.clone()),
+            "annotations": Value::Object(serde_json::Map::new()),
+        });
+        if let Some(transport) = self.transport.read().await.clone() {
+            if let Err(e) = transport
+                .send_response(pending.rpc_id.clone(), outcome)
+                .await
+            {
+                pending.ask = Some(ask);
+                self.pending_permissions
+                    .lock()
+                    .await
+                    .insert(request_id.to_string(), pending);
+                return Err(e);
+            }
+        } else {
+            debug!(%request_id, ?option_id, "respond_ask_user_question (mock/local)");
+        }
+        if let Some(bus) = &self.event_bus {
+            if self.pending_permissions.lock().await.is_empty() {
+                bus.emit_status(self.control_session_id, SessionStatus::Running)
+                    .await;
+            }
+        }
         Ok(())
     }
 
@@ -2846,6 +3081,95 @@ fn is_exit_plan_ext_method(method: &str) -> bool {
     m.contains("exitplan") || trimmed.eq_ignore_ascii_case("x.ai/exit_plan_mode")
 }
 
+fn is_ask_user_question_ext_method(method: &str) -> bool {
+    let trimmed = method.trim_start_matches('_');
+    let m = trimmed.to_lowercase().replace(['-', '_'], "");
+    m.contains("askuserquestion") || trimmed.eq_ignore_ascii_case("x.ai/ask_user_question")
+}
+
+/// Parse `_x.ai/ask_user_question` params into question defs.
+fn parse_ask_user_questions(params: &Option<Value>) -> Vec<AskUserQuestionDef> {
+    let Some(p) = params else {
+        return Vec::new();
+    };
+    let arr = p
+        .get("questions")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let mut out = Vec::new();
+    for (qi, q) in arr.iter().enumerate() {
+        let text = q
+            .get("question")
+            .or_else(|| q.get("text"))
+            .or_else(|| q.get("prompt"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string();
+        if text.is_empty() {
+            continue;
+        }
+        let multi = q
+            .get("multiSelect")
+            .or_else(|| q.get("multi_select"))
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
+        let mut options = Vec::new();
+        if let Some(opts) = q.get("options").and_then(|v| v.as_array()) {
+            for (oi, opt) in opts.iter().enumerate() {
+                let label = opt
+                    .get("label")
+                    .or_else(|| opt.get("name"))
+                    .or_else(|| opt.get("text"))
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .trim()
+                    .to_string();
+                if label.is_empty() {
+                    continue;
+                }
+                let id = opt
+                    .get("id")
+                    .or_else(|| opt.get("optionId"))
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string())
+                    .unwrap_or_else(|| format!("q{qi}_o{oi}"));
+                options.push((id, label));
+            }
+        }
+        if options.is_empty() {
+            // Free-form with no options — offer a single "Continue" so the card is answerable.
+            options.push(("continue".into(), "Continue".into()));
+        }
+        out.push(AskUserQuestionDef {
+            text,
+            options,
+            multi_select: multi,
+        });
+    }
+    out
+}
+
+fn ask_user_card_options(q: &AskUserQuestionDef) -> Vec<PermissionOptionInfo> {
+    let mut opts: Vec<PermissionOptionInfo> = q
+        .options
+        .iter()
+        .map(|(id, label)| PermissionOptionInfo {
+            id: id.clone(),
+            kind: "allow_once".into(),
+            label: label.clone(),
+        })
+        .collect();
+    opts.push(PermissionOptionInfo {
+        id: "skip_interview".into(),
+        kind: "reject_once".into(),
+        label: "Skip questions".into(),
+    });
+    let _ = q.multi_select; // UI is single-pick today; multiSelect maps to one label.
+    opts
+}
+
 /// Pull a plan document out of a plan-presenting tool call's input
 /// (Claude Code's `ExitPlanMode` / `exit_plan_mode` carries `{ plan: "…" }`).
 fn extract_tool_plan(tool_name: &str, raw_input: Option<&Value>) -> Option<String> {
@@ -3355,6 +3679,68 @@ mod tests {
         assert!(is_exit_plan_ext_method("_x.ai/exit_plan_mode"));
         assert!(is_exit_plan_ext_method("x.ai/exitPlanMode"));
         assert!(!is_exit_plan_ext_method("x.ai/ask_user_question"));
+        assert!(is_ask_user_question_ext_method("x.ai/ask_user_question"));
+        assert!(is_ask_user_question_ext_method("_x.ai/ask_user_question"));
+        assert!(is_ask_user_question_ext_method("x.ai/askUserQuestion"));
+        assert!(!is_ask_user_question_ext_method("x.ai/exit_plan_mode"));
+    }
+
+    #[test]
+    fn parse_ask_user_questions_keys_by_question_text() {
+        let qs = parse_ask_user_questions(&Some(json!({
+            "questions": [{
+                "question": "Which colour should the banner be?",
+                "options": [
+                    { "label": "Red", "description": "Red banner" },
+                    { "label": "Blue" }
+                ],
+                "multiSelect": false
+            }],
+            "mode": "default"
+        })));
+        assert_eq!(qs.len(), 1);
+        assert_eq!(qs[0].text, "Which colour should the banner be?");
+        assert_eq!(qs[0].options.len(), 2);
+        assert_eq!(qs[0].options[0].1, "Red");
+        let card = ask_user_card_options(&qs[0]);
+        assert!(card.iter().any(|o| o.id == "skip_interview"));
+        assert_eq!(card.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn respond_ask_user_question_emits_accepted_outcome() {
+        let c = AcpClient::mock_for_tests("sess-ask", None);
+        let qtext = "Pick one".to_string();
+        c.pending_permissions.lock().await.insert(
+            "99".into(),
+            PendingPermission {
+                rpc_id: json!(99),
+                options: vec![
+                    PermissionOptionInfo {
+                        id: "q0_o0".into(),
+                        kind: "allow_once".into(),
+                        label: "Alpha".into(),
+                    },
+                    PermissionOptionInfo {
+                        id: "skip_interview".into(),
+                        kind: "reject_once".into(),
+                        label: "Skip questions".into(),
+                    },
+                ],
+                kind: PendingPermissionKind::AskUserQuestion,
+                ask: Some(AskUserPending {
+                    questions: vec![AskUserQuestionDef {
+                        text: qtext.clone(),
+                        options: vec![("q0_o0".into(), "Alpha".into())],
+                        multi_select: false,
+                    }],
+                    current_q: 0,
+                    answers: serde_json::Map::new(),
+                }),
+            },
+        );
+        c.respond_approval("99", Some("q0_o0")).await.unwrap();
+        assert!(c.pending_permissions.lock().await.is_empty());
     }
 
     #[tokio::test]
@@ -3377,6 +3763,7 @@ mod tests {
                     kind: "allow_once".into(),
                     label: "Allow once".into(),
                 }],
+                ask: None,
             },
         );
         c.respond_approval("42", Some("allow")).await.unwrap();
@@ -3397,6 +3784,7 @@ mod tests {
                     kind: "allow_once".into(),
                     label: "Allow once".into(),
                 }],
+                ask: None,
             },
         );
         assert!(c.respond_approval("7", Some("bogus")).await.is_err());
