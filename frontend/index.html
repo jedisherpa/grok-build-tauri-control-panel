@@ -380,10 +380,10 @@ tests/feature" spellcheck="false" required></textarea><span class="builds-help">
             <div id="mem-list" class="mem-list">
               <div class="empty-hint">No notes yet</div>
             </div>
-            <div class="toolbar">
-              <input id="mem-content" type="text" placeholder="note (e.g. 'we use pnpm, never npm')" class="grow" />
-              <input id="mem-tags" type="text" placeholder="tags, comma-separated" />
-              <button id="btn-mem-add" class="btn primary">Add</button>
+            <div class="toolbar mem-compose" role="form" aria-label="Add a memory note">
+              <input id="mem-content" type="text" placeholder="note (e.g. 'we use pnpm, never npm')" class="grow" autocomplete="off" />
+              <input id="mem-tags" type="text" placeholder="tags, comma-separated" autocomplete="off" />
+              <button id="btn-mem-add" class="btn primary" type="button">Add</button>
             </div>
           </div>
         </section>

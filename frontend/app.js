@@ -4455,15 +4455,22 @@ async function refreshMemoryView() {
   if (projectScope) scopes.add(projectScope);
   for (const e of entries) scopes.add(e.scope);
   const prev = scopeSel.value || projectScope || "global";
-  scopeSel.innerHTML = [...scopes]
-    .map((s) => {
-      const label =
-        s === projectScope
-          ? `${activeProject.split("/").filter(Boolean).pop()} (this project)`
-          : s;
-      return `<option value="${escapeHtml(s)}"${s === prev ? " selected" : ""}>${escapeHtml(label)}</option>`;
-    })
-    .join("");
+  const scopeSig = [...scopes].sort().join("|") + `|proj:${projectScope || ""}`;
+  if (scopeSel.dataset.sig !== scopeSig) {
+    // Avoid rewriting <select> while the user types in the note field (cursor jumps).
+    scopeSel.innerHTML = [...scopes]
+      .map((s) => {
+        const label =
+          s === projectScope
+            ? `${activeProject.split("/").filter(Boolean).pop()} (this project)`
+            : s;
+        return `<option value="${escapeHtml(s)}"${s === prev ? " selected" : ""}>${escapeHtml(label)}</option>`;
+      })
+      .join("");
+    scopeSel.dataset.sig = scopeSig;
+  } else if ([...scopes].includes(prev)) {
+    scopeSel.value = prev;
+  }
 
   const shown = entries
     .filter((e) => e.scope === scopeSel.value)
@@ -4496,22 +4503,46 @@ async function refreshMemoryView() {
 }
 
 $("mem-scope") && ($("mem-scope").onchange = refreshMemoryView);
-$("btn-mem-add").onclick = async () => {
+
+async function addMemoryNote() {
+  const input = $("mem-content");
+  if (!input) return;
+  const content = input.value.trim();
+  if (!content) {
+    input.focus();
+    return;
+  }
+  const selStart = input.selectionStart;
   try {
-    const content = $("mem-content").value.trim();
-    if (!content) return;
     await invoke("memory_add", {
       scope: $("mem-scope").value || "global",
       content,
       tags: parseCsv($("mem-tags")?.value || ""),
     });
-    $("mem-content").value = "";
+    input.value = "";
     if ($("mem-tags")) $("mem-tags").value = "";
-    refreshMemoryView();
+    await refreshMemoryView();
+    input.focus();
   } catch (e) {
     toastError(e);
+    // Restore caret roughly where the user was if add failed mid-edit.
+    try {
+      input.focus();
+      input.setSelectionRange(selStart, selStart);
+    } catch (_) {}
   }
-};
+}
+
+if ($("btn-mem-add")) $("btn-mem-add").onclick = () => addMemoryNote();
+// feature-deep: Enter did nothing in the note field
+if ($("mem-content")) {
+  $("mem-content").addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      addMemoryNote();
+    }
+  });
+}
 $("btn-mem-digest") &&
   ($("btn-mem-digest").onclick = async () => {
     const btn = $("btn-mem-digest");

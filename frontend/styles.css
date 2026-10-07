@@ -761,6 +761,39 @@ body {
 /* Memory view */
 .mem-hint { font-size: 10px; margin: 2px 0 8px; }
 .mem-list { display: flex; flex-direction: column; gap: 6px; overflow: auto; min-height: 0; flex: 1; margin-bottom: 8px; }
+/* feature-deep: Joe covered Add — keep compose bar above the companion */
+#view-memory.view.active .pane-pad,
+#view-memory .pane-pad {
+  padding-bottom: 168px;
+}
+.mem-compose {
+  position: sticky;
+  bottom: 0;
+  z-index: 25;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 10px 0 8px;
+  margin-top: 8px;
+  background: linear-gradient(180deg, transparent, var(--bg-elev, #0f1724) 28%);
+  isolation: isolate;
+}
+.mem-compose #mem-content,
+.mem-compose #mem-tags {
+  min-width: 0;
+}
+.mem-compose #btn-mem-add {
+  flex: 0 0 auto;
+  min-width: 4.5rem;
+}
+html[data-view="memory"] .joe-companion {
+  /* Park Joe left so Add stays clickable on Memory */
+  right: auto !important;
+  left: 18px !important;
+  bottom: 14px;
+  z-index: 4;
+}
 .mem-card { border: 1px solid var(--border); border-radius: 3px; padding: 7px 9px; }
 .mem-content { font-size: 12px; line-height: 1.45; white-space: pre-wrap; }
 .mem-meta { display: flex; align-items: center; gap: 6px; margin-top: 5px; font-size: 9px; }
