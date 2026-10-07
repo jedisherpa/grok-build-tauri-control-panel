@@ -159,3 +159,25 @@ test('native snake-case definition language remains visible', () => {
   ui.api.render(ui.root, packet); ui.open(ui.findDetails('atom first'));
   assert.match(ui.contents(), /definition_language: eng/);
 });
+
+test('scalar boolean source and paging flags display literal true and false', () => {
+  const ui = mount();
+  ui.api.renderDictionary(ui.root, { schema: 'bomb-code/dictionary-shapes/v1', status: 'ready', coverage: { alignmentIsIndependentGold: false, geometrySelectsSense: false }, hits: [], hasMore: true, truncated: false });
+  assert.match(ui.contents(), /alignmentIsIndependentGold: false/);
+  assert.match(ui.contents(), /geometrySelectsSense: false/);
+  assert.match(ui.contents(), /hasMore: true/);
+  assert.match(ui.contents(), /truncated: false/);
+  assert(!ui.contents().includes('alignmentIsIndependentGold: unavailable'));
+});
+
+test('four-stage SVG scales inside narrow Joe drawers without a fixed minimum width', () => {
+  const css = fs.readFileSync(new URL('./word-shapes.css', import.meta.url), 'utf8');
+  const chainRule = css.match(/\.word-shape-chain\s*\{([^}]+)\}/)?.[1];
+  assert(chainRule);
+  assert.match(chainRule, /width:\s*100%/);
+  assert.match(chainRule, /min-width:\s*0(?:;|\s)/);
+  assert.match(chainRule, /max-width:\s*700px/);
+  const ui = mount(); ui.api.render(ui.root, ready()); ui.open(ui.findDetails('atom first'));
+  const glyph = ui.all(ui.root).find(node => node.attrs['aria-label']?.includes('Dictionary'));
+  assert.equal(glyph.attrs.viewBox, '0 0 600 112');
+});

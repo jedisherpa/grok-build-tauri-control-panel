@@ -4,7 +4,7 @@
   const NS = 'http://www.w3.org/2000/svg';
   const LIMITS = Object.freeze({ readings: 64, occurrences: 512, alternatives: 512, page: 12, tokens: 12000, text: 4000, sources: 512 });
   const array = value => Array.isArray(value) ? value : [];
-  const text = (value, max = LIMITS.text) => typeof value === 'string' ? value.slice(0, max) : typeof value === 'number' && Number.isFinite(value) ? String(value) : '';
+  const text = (value, max = LIMITS.text) => typeof value === 'string' ? value.slice(0, max) : typeof value === 'boolean' || (typeof value === 'number' && Number.isFinite(value)) ? String(value) : '';
   const object = value => value && typeof value === 'object' && !Array.isArray(value) ? value : {};
   const valueText = value => {
     if (value == null) return 'unavailable';
