@@ -38,6 +38,8 @@ const state = {
   auth: null,
   loggingIn: false,
   startingSession: false,
+  approvalModePending: null,
+  approvalModeUnknown: new Set(),
   devServer: null,
   transcriptBySession: new Map(),
   transcriptRevisionBySession: new Map(),
@@ -1047,22 +1049,6 @@ function renderExplainFeed() {
   if (follow) root.scrollTop = root.scrollHeight;
 }
 
-/** Rule an "always allow" button would install: narrow enough to be safe,
- *  broad enough to stop the repeat asks (e.g. `Bash(cargo test *)`). */
-function allowPatternFor(tool, summary) {
-  const name = String(tool || "tool").trim();
-  if (!name) return null;
-  // Commands: key on the program + first subcommand, not the whole line.
-  const cmdMatch = String(summary || "").match(/:\s*([^\n]+)/);
-  const isCommandish = /bash|shell|terminal|exec|run/i.test(name);
-  if (isCommandish && cmdMatch) {
-    const words = cmdMatch[1].trim().split(/\s+/).filter(Boolean);
-    const head = words.slice(0, words[0] === "git" || words[0] === "cargo" || words[0] === "npm" ? 2 : 1);
-    if (head.length) return `${name}(${head.join(" ")} *)`;
-  }
-  return `${name}(*)`;
-}
-
 /** Mark an approval card resolved and refresh it if visible. */
 function resolveApprovalEntry(sessionId, requestId, resolution) {
   if (!sessionId || !requestId) return;
@@ -1170,18 +1156,6 @@ function renderTranscript() {
   data-option-id="${escapeHtml(String(o.id))}"${m.resolved ? " disabled" : ""}>${escapeHtml(o.label || o.kind || o.id)}</button>`
             )
             .join("");
-          // "Always allow this" — our own session rule, so it works even for
-          // agents that don't offer an allow_always option. The pattern is
-          // shown on the button so it's never a surprise.
-          const alwaysPattern = m.allowPattern;
-          const alwaysBtn =
-            !m.resolved && alwaysPattern
-              ? `<button class="approval-btn kind-always"
-  data-sid="${escapeHtml(String(m.sid || sid))}"
-  data-request-id="${escapeHtml(String(m.requestId || ""))}"
-  data-pattern="${escapeHtml(alwaysPattern)}"
-  title="Auto-approve anything matching this for the rest of the session">✓ Always allow ${escapeHtml(alwaysPattern)}</button>`
-              : "";
           const deny = m.resolved
             ? ""
             : `<button class="approval-btn kind-cancel"
@@ -1212,7 +1186,7 @@ function renderTranscript() {
           const foot = m.resolved
             ? `${explain}<div class="approval-resolved">resolved · ${escapeHtml(String(m.resolved))}</div>`
             : isLive
-              ? `${explain}<div class="approval-actions">${buttons}${deny}${alwaysBtn}</div>${codeWith}`
+              ? `${explain}<div class="approval-actions">${buttons}${deny}</div>${codeWith}`
               : `${explain}<div class="approval-resolved">from a previous session — see the rows below for how it resolved</div>`;
           return `<div class="t-block approval${m.resolved || !isLive ? "" : " pending"}">
   <div class="t-role"><span class="t-ts">${escapeHtml(shortTime(e.at || ""))}</span>${bombHtml("wait", "xs")}<span>${label}</span></div>
@@ -1625,6 +1599,7 @@ async function deleteThread(id) {
   }
   try {
     await invoke("remove_session", { id, removeWorktree });
+    state.approvalModeUnknown.delete(id);
     state.transcriptBySession.delete(id);
     state.explainBySession.delete(id);
     if (state.selectedSession === id) {
@@ -2136,8 +2111,6 @@ function handleControlEvent(ev) {
         requestId: ev.request_id || ev.requestId || "",
         options: ev.options || [],
         planApproval,
-        // Plans are one-offs — never offer "always allow" for them.
-        allowPattern: planApproval ? null : allowPatternFor(ev.tool, ev.summary),
         sid,
       },
     });
@@ -3112,24 +3085,85 @@ const APPROVAL_LABEL = {
   ask: "ask — confirm everything",
   plan: "plan — propose first, change nothing",
   auto: "auto — reads/edits/safe commands run; risky ones ask",
-  yolo: "yolo — approve everything",
+  yolo: "yolo — auto-approve permitted tools",
 };
+
+function setApprovalModePending(sid) {
+  state.approvalModePending = sid;
+  for (const id of ["plan-mode", "auto-mode", "always-approve"]) if ($(id)) $(id).disabled = !!sid;
+  updateSendButton();
+}
+
+// Live mode is host state: a failed request must not leave a permissive or
+// restrictive pill pretending it was accepted. Capture the target thread.
+async function changeApprovalMode(next) {
+  if (state.approvalModePending) return;
+  const sid = state.selectedSession;
+  if (next === "yolo") {
+    setApprovalModePending(sid || "new-session");
+    let approved;
+    try {
+      approved = await askConfirm(
+        "Yolo auto-approves tools permitted by the host policy. In an unrestricted session this can include destructive commands (rm, sudo, force-push). Continue?",
+        { title: "Enable yolo?", kind: "warning" },
+      );
+    } finally {
+      setApprovalModePending(null);
+    }
+    if (!approved || state.selectedSession !== sid) return;
+  }
+  const sess = state.sessions.find((s) => s.id === sid);
+  if (!sess || sess.live === false) {
+    setApprovalMode(next);
+    return;
+  }
+  setApprovalModePending(sid);
+  let failure;
+  try {
+    await invoke("set_approval_mode", { id: sid, mode: next });
+  } catch (e) {
+    failure = e;
+  }
+  try {
+    const snapshot = await invoke("get_session", { id: sid });
+    const mode = snapshot?.metadata?.approvalMode || snapshot?.metadata?.approval_mode;
+    if (!APPROVAL_CYCLE.includes(mode)) throw new Error("Host approval state is unavailable");
+    const current = state.sessions.find((s) => s.id === sid);
+    if (current) current.approvalMode = mode;
+    state.approvalModeUnknown.delete(sid);
+    if (state.selectedSession === sid) setApprovalMode(mode);
+    if (!failure) pushEvent(`approvals → ${APPROVAL_LABEL[mode]} · ${shortId(sid)}`, "ok", null, { force: true });
+  } catch (e) {
+    state.approvalModeUnknown.add(sid);
+    failure ||= e;
+    pushEvent("Approval state could not be confirmed. Refresh before sending another message.", "err", "error", { force: true });
+  } finally {
+    setApprovalModePending(null);
+  }
+  if (failure) pushEvent(`mode change failed: ${failure?.message || failure}`, "err", "error", { force: true });
+}
+
+async function confirmApprovalMode(sid) {
+  if (!sid || state.approvalModePending || !state.approvalModeUnknown.has(sid)) return;
+  setApprovalModePending(sid);
+  try {
+    const snapshot = await invoke("get_session", { id: sid });
+    const mode = snapshot?.metadata?.approvalMode || snapshot?.metadata?.approval_mode;
+    if (!APPROVAL_CYCLE.includes(mode)) throw new Error("Host approval state is unavailable");
+    const current = state.sessions.find((s) => s.id === sid);
+    if (current) current.approvalMode = mode;
+    if (state.selectedSession === sid) setApprovalMode(mode);
+    state.approvalModeUnknown.delete(sid);
+  } finally {
+    setApprovalModePending(null);
+  }
+}
 
 /** Shift+Tab cycles the stance (ask → plan → auto → yolo → …), like the CLIs. */
 async function cycleApprovalMode() {
   const cur = currentApprovalMode();
   const next = APPROVAL_CYCLE[(APPROVAL_CYCLE.indexOf(cur) + 1) % APPROVAL_CYCLE.length];
-  setApprovalMode(next);
-  pushEvent(`approvals → ${APPROVAL_LABEL[next]}`, next === "yolo" ? "err" : "ok", null, {
-    force: true,
-  });
-  const sess = state.sessions.find((s) => s.id === state.selectedSession);
-  if (!sess || sess.live === false) return;
-  try {
-    await invoke("set_approval_mode", { id: state.selectedSession, mode: next });
-  } catch (e) {
-    pushEvent(`mode change failed: ${e?.message || e}`, "err", "error", { force: true });
-  }
+  await changeApprovalMode(next);
 }
 
 function wireModeButtons() {
@@ -3137,32 +3171,11 @@ function wireModeButtons() {
   // (→ "ask", where every request is confirmed).
   const pick = async (mode) => {
     const next = currentApprovalMode() === mode ? "ask" : mode;
-    setApprovalMode(next);
-    const sess = state.sessions.find((s) => s.id === state.selectedSession);
-    if (!sess || sess.live === false) return;
-    try {
-      await invoke("set_approval_mode", { id: state.selectedSession, mode: next });
-      pushEvent(`approvals → ${next} · ${shortId(state.selectedSession)}`, "ok", null, {
-        force: true,
-      });
-    } catch (e) {
-      pushEvent(`mode change failed: ${e?.message || e}`, "err", "error", { force: true });
-    }
+    await changeApprovalMode(next);
   };
   $("plan-mode")?.addEventListener("click", () => pick("plan"));
   $("auto-mode")?.addEventListener("click", () => pick("auto"));
-  $("always-approve")?.addEventListener("click", async () => {
-    if (currentApprovalMode() === "yolo") {
-      pick("ask");
-      return;
-    }
-    const go = await askConfirm(
-      "Yolo auto-approves every tool — including destructive commands (rm, sudo, force-push). Continue?",
-      { title: "Enable yolo?", kind: "warning" },
-    );
-    if (!go) return;
-    pick("yolo");
-  });
+  $("always-approve")?.addEventListener("click", () => pick("yolo"));
   // Worktree isolation applies at thread START only (no live toggle).
   $("worktree-mode")?.addEventListener("click", () => {
     setMode("worktree-mode", !modeOn("worktree-mode"));
@@ -3461,6 +3474,10 @@ async function startAcp() {
 }
 
 async function sendPrompt() {
+  if (state.selectedSession && (state.approvalModePending === state.selectedSession || state.approvalModeUnknown.has(state.selectedSession))) {
+    toastError(new Error("Approval state is unconfirmed. Wait for the mode change or Refresh before sending."));
+    return;
+  }
   try {
     const prompt = $("prompt").value;
     if (!prompt.trim()) throw new Error("Empty prompt");
@@ -3945,9 +3962,12 @@ function updateSendButton() {
     ? (typeof window !== "undefined" && window.BombDiagnostics).composerGate(state.selectedSession, sess?.status)
     : { canSend: true, reason: "" };
   const starting = !!state.startingSession || sessionIsStarting();
+  const modePending = state.approvalModePending === state.selectedSession && !!state.selectedSession;
+  const modeUnknown = state.approvalModeUnknown.has(state.selectedSession);
   const startReason = "Session is still starting — your message stays here until it's ready.";
-  const blocked = !busy && (!gate.canSend || starting);
-  const blockReason = starting ? startReason : gate.reason;
+  const blocked = !busy && (!gate.canSend || starting || modePending || modeUnknown);
+  const blockReason = modePending ? "Confirming the session's approval mode…" : modeUnknown
+    ? "Approval state is unconfirmed. Refresh before sending." : starting ? startReason : gate.reason;
   btn.textContent = busy ? "Stop" : "Send";
   btn.disabled = blocked;
   btn.title = blocked ? blockReason : "";
@@ -3980,6 +4000,7 @@ async function cancelCurrentTurn() {
   }
 }
 $("btn-refresh").onclick = () => {
+  confirmApprovalMode(state.selectedSession).catch(toastError);
   refreshStatus().catch(toastError);
   refreshSessions();
 };
@@ -5270,29 +5291,6 @@ $("transcript")?.addEventListener("click", async (e) => {
     if (backend && model) {
       goBtn.disabled = true;
       codeWithModel(goBtn.dataset.sid, goBtn.dataset.requestId, backend, model);
-    }
-    return;
-  }
-  // "Always allow X": install the session rule, then approve this request.
-  const alwaysBtn = e.target.closest?.(".kind-always");
-  if (alwaysBtn && !alwaysBtn.disabled) {
-    e.stopPropagation();
-    const actions = alwaysBtn.closest(".approval-actions");
-    actions?.querySelectorAll("button").forEach((b) => (b.disabled = true));
-    const { sid: aSid, requestId, pattern } = alwaysBtn.dataset;
-    try {
-      await invoke("add_session_allow_rule", { id: aSid, pattern });
-      // Approve the request that prompted it (allow-once option).
-      const card = alwaysBtn.closest(".t-block");
-      const allowOnce =
-        card?.querySelector(".approval-btn.kind-allow_once") ||
-        card?.querySelector(".approval-btn[data-option-id]:not([data-option-id=''])");
-      const optionId = allowOnce?.dataset.optionId || null;
-      await invoke("respond_approval", { id: aSid, requestId, optionId });
-      pushEvent(`✓ always allowing ${pattern}`, "ok", "boom", { force: true, milestone: true });
-    } catch (err) {
-      toastError(err);
-      actions?.querySelectorAll("button").forEach((b) => (b.disabled = false));
     }
     return;
   }

@@ -572,6 +572,13 @@ pub async fn start_session(
     cwd: String,
     mut opts: SpawnOptions,
 ) -> Result<SessionIdResponse, String> {
+    opts.validate().map_err(err)?;
+    if opts.read_only || opts.resolved_mode() == grok_control_core::ApprovalMode::Plan {
+        if !opts.mcp_server_names.is_empty() {
+            return Err("Selected external MCP tools cannot enforce Plan/read-only mutation limits. Start an explicitly reviewed Ask session for those integrations.".into());
+        }
+        opts.include_auto_mcp = false;
+    }
     // Resolve MCP attachments via McpManager (names + auto + high-risk approval).
     let mut mcp_skipped = Vec::new();
     if !opts.mcp_server_names.is_empty() || opts.include_auto_mcp {
@@ -594,8 +601,14 @@ pub async fn start_session(
     let mut isolation_note: Option<String> = None;
     let requested_cwd = cwd.clone();
     let mut spawn_cwd = cwd.clone();
+    let mut isolation_admission = None;
     if opts.isolate_worktree && opts.mode == grok_control_core::AgentMode::Acp {
         if grok_worktree::is_git_repo(std::path::Path::new(&cwd)).await {
+            // Admission precedes topology mutation. Retain the canonical
+            // project owner through child admission so an active Build cannot
+            // cause an unreported orphan checkout between create and spawn.
+            isolation_admission = Some(grok_worktree::WorkspaceCoordinator::shared()
+                .session(std::path::Path::new(&cwd), None).await.map_err(err)?);
             let short = &id.to_string()[..8];
             match state
                 .worktrees
@@ -619,11 +632,7 @@ pub async fn start_session(
                         wt.path.display()
                     ));
                 }
-                Err(e) => {
-                    isolation_note = Some(format!(
-                        "⚠ worktree isolation unavailable ({e}) — thread shares the project folder"
-                    ));
-                }
+                Err(e) => return Err(format!("Requested worktree isolation failed: {e}. No agent was started in the shared project folder.")),
             }
         } else {
             isolation_note =
@@ -644,6 +653,7 @@ pub async fn start_session(
         .spawn_agent_preallocated(id, &spawn_cwd, opts, connect_opts)
         .await
         .map_err(err)?;
+    drop(isolation_admission);
     if let Some(note) = isolation_note {
         let _ = state
             .persistence
@@ -906,6 +916,9 @@ pub(crate) async fn resume_saved_session(
     // Preserve the project link so Land/Sync keep working after a restart.
     // Never re-isolate on resume: the stored cwd already IS the worktree.
     opts.isolate_worktree = false;
+    opts.read_only = serde_json::from_str::<serde_json::Value>(&rec.metadata_json).ok()
+        .and_then(|v| v.pointer("/metadata/readOnly").or_else(|| v.pointer("/metadata/read_only")).and_then(|v| v.as_bool()))
+        .unwrap_or(false);
     opts.project_root = extract_meta_string(&rec.metadata_json, "projectRoot")
         .or_else(|| extract_meta_string(&rec.metadata_json, "project_root"));
     // Honor the caller's current stance. An explicit approval_mode wins;
@@ -1141,25 +1154,29 @@ pub async fn remove_session(
     let id = Uuid::parse_str(&id).map_err(err)?;
     // Capture worktree context before the records disappear.
     let wt_ctx = if remove_worktree.unwrap_or(false) {
-        thread_worktree_context(&state, id).await.ok()
+        Some(thread_worktree_context(&state, id).await?)
     } else {
         None
     };
     // Live handle may be gone after reboot — still wipe SQLite memory.
-    let _ = state.registry.remove_session(id).await;
-    state.persistence.delete_session(id).map_err(err)?;
+    if state.builds.is_managed(id).await { return Err("This session belongs to a reviewed build; use its build cleanup controls.".into()); }
+    if state.registry.is_live(id) { state.registry.remove_session(id).await.map_err(err)?; }
     if let Some((worktree, root, _branch, _)) = wt_ctx {
+        let worktree = std::fs::canonicalize(&worktree).map_err(err)?;
+        let root = std::fs::canonicalize(&root).map_err(err)?;
+        let managed_root = std::fs::canonicalize(state.worktrees.worktrees_root()).map_err(err)?;
         // Only remove managed worktrees (never the project root itself).
-        if worktree != root && worktree.starts_with(state.worktrees.worktrees_root()) {
-            if let Err(e) = state
+        if worktree != root && worktree.starts_with(&managed_root) {
+            state
                 .worktrees
                 .remove(&root, &worktree.display().to_string(), true)
                 .await
-            {
-                tracing::warn!(error = %e, "worktree removal failed after thread delete");
-            }
+                .map_err(err)?;
+        } else {
+            return Err("Requested worktree is outside the managed root; thread evidence was retained.".into());
         }
     }
+    state.persistence.delete_session(id).map_err(err)?;
     Ok(())
 }
 
@@ -1461,12 +1478,6 @@ pub async fn land_thread(
     let (worktree, root, branch, label) = thread_worktree_context(&state, id).await?;
     let title = if label.is_empty() { branch.clone() } else { label.clone() };
 
-    let _ = state
-        .worktrees
-        .commit_all(&worktree, &format!("thread {title}: work in progress"))
-        .await
-        .map_err(err)?;
-
     // Untracked files in the project must not block Land (feature-deep left
     // games/ in the project while the agent still needed Land from a worktree).
     if !state
@@ -1484,7 +1495,7 @@ pub async fn land_thread(
 
     match state
         .worktrees
-        .merge(&root, &branch, &format!("land thread: {title}"))
+        .merge_clean(&root, &branch, &format!("land thread: {title}"), &[&root, &worktree])
         .await
         .map_err(err)?
     {
@@ -1533,21 +1544,16 @@ pub async fn sync_thread(
 ) -> Result<ThreadMergeResult, String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
     let (worktree, root, branch, label) = thread_worktree_context(&state, id).await?;
-    let title = if label.is_empty() { branch.clone() } else { label.clone() };
+    let _title = if label.is_empty() { branch.clone() } else { label.clone() };
     let target_branch = state.worktrees.current_branch(&root).await.map_err(err)?;
-
-    let _ = state
-        .worktrees
-        .commit_all(&worktree, &format!("thread {title}: work in progress"))
-        .await
-        .map_err(err)?;
 
     match state
         .worktrees
-        .merge(
+        .merge_clean(
             &worktree,
             &target_branch,
             &format!("sync from {target_branch}"),
+            &[&root, &worktree],
         )
         .await
         .map_err(err)?

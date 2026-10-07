@@ -1,6 +1,6 @@
 //! Reviewed builds use the existing native ACP registry. Every transition is
 //! durable before another role starts; retained worktrees remain human-owned.
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use chrono::Utc;
 use grok_config::Backend;
 use grok_control_core::{ApprovalMode, SessionRegistry, SpawnOptions};
@@ -13,7 +13,7 @@ use grok_workflows::progress::WorkflowProgress;
 use grok_workflows::{
     normalize_write_path, Role, Workflow, WorkflowSpec, WorkflowStatus, MAX_OUTPUT_BYTES,
 };
-use grok_worktree::{CreateWorktreeRequest, WorktreeManager};
+use grok_worktree::{CreateWorktreeRequest, WorktreeManager, VerifiedCheckoutIdentity, WorkspaceCoordinator, WorkspaceLease};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
@@ -47,6 +47,8 @@ struct BuildRecord {
     cleanup_pending: bool,
     #[serde(default)]
     cleanup_session: Option<Uuid>,
+    #[serde(default)]
+    admission_error: Option<String>,
 }
 #[derive(Clone, Serialize)]
 pub struct BuildDto {
@@ -61,6 +63,7 @@ pub struct BuildDto {
     queue_state: QueueState,
     concurrency_limit: usize,
     cleanup_pending: bool,
+    workspace_blocked_reason: Option<String>,
 }
 impl From<Workflow> for BuildDto {
     fn from(workflow: Workflow) -> Self {
@@ -79,6 +82,7 @@ impl From<Workflow> for BuildDto {
             queue_state: QueueState::Queued,
             concurrency_limit: 2,
             cleanup_pending: false,
+            workspace_blocked_reason: None,
         }
     }
 }
@@ -116,6 +120,7 @@ pub struct BuildPreviewDto {
     pub notes: Vec<String>,
 }
 pub struct BuildService {
+    workspace_leases: Mutex<HashMap<String, WorkspaceLease>>,
     records: Mutex<BTreeMap<String, BuildRecord>>,
     concurrency: Mutex<usize>,
     running: Mutex<HashSet<String>>,
@@ -163,7 +168,17 @@ impl BuildService {
             .iter()
             .filter_map(|(id, r)| r.cleanup_session.map(|session| (id.clone(), session)))
             .collect();
+        let mut workspace_leases = HashMap::new();
+        // Reestablish unresolved durable scopes before admitting ordinary work.
+        for (id, record) in &records {
+            if record.cleanup_pending {
+                let lease = WorkspaceCoordinator::shared().build(record.repository.clone().into(), record.workflow.spec.project_root.clone().into(), record.workflow.spec.write_set.clone())?;
+                if let Some(checkout) = &record.workflow.worktree { lease.bind_checkout(Path::new(checkout))?; }
+                workspace_leases.insert(id.clone(), lease);
+            }
+        }
         let service = Arc::new(Self {
+            workspace_leases: Mutex::new(workspace_leases),
             concurrency: Mutex::new(concurrency),
             records: Mutex::new(records),
             running: Mutex::new(HashSet::new()),
@@ -211,7 +226,11 @@ impl BuildService {
                     });
                 let active_role = active_session.and_then(|_| record.workflow.role_to_run());
                 let active_round = active_role.map(|_| record.workflow.round);
+                let workspace_blocked_reason = if !record.reserved && !record.workflow.status.is_terminal() {
+                    record.admission_error.clone().or(WorkspaceCoordinator::shared().build_blocked_reason(Path::new(&record.repository))?)
+                } else { None };
                 let mut dto: BuildDto = record.workflow.into();
+                dto.workspace_blocked_reason = workspace_blocked_reason;
                 dto.queue_state = queue_state(&dto.workflow.id, &tasks, limit)?;
                 dto.dependencies = record.dependencies;
                 dto.concurrency_limit = limit;
@@ -258,16 +277,65 @@ impl BuildService {
         Ok(())
     }
     async fn reserve_ready(&self) -> Result<Vec<String>> {
+        // Git discovery is bounded and happens before admission locks. Commit
+        // below verifies the checkout field still matches this snapshot.
+        let checkouts: Vec<_> = self.records.lock().await.iter()
+            .filter(|(_, record)| record.workflow.status == WorkflowStatus::Planning && !record.reserved)
+            .filter_map(|(id, record)| record.workflow.worktree.as_ref().map(|path| (id.clone(), path.clone())))
+            .collect();
+        let mut identities = HashMap::new();
+        for (id, path) in checkouts {
+            identities.insert(id, (path.clone(), VerifiedCheckoutIdentity::discover(Path::new(&path)).await));
+        }
         // Cap, process ownership and durable reservations share this admission gate.
         let cap = self.concurrency.lock().await;
         let running = self.running.lock().await;
         let selected = {
             let mut guard = self.records.lock().await;
-            let selected = ready_tasks(&protected_coordination_tasks(&guard, &running), *cap)?;
-            if selected.is_empty() {
+            let mut leases = self.workspace_leases.lock().await;
+            leases.retain(|id, _| guard.get(id).is_some_and(|r| !r.workflow.status.is_terminal() || r.cleanup_pending || running.contains(id)));
+            let mut candidates = protected_coordination_tasks(&guard, &running);
+            let mut candidate = guard.clone();
+            let mut diagnostics_changed = false;
+            let mut selected = Vec::new();
+            let mut acquired = Vec::new();
+            // Recompute bounded selection after each native admission. Errors
+            // affect only that candidate; retain the full dependency graph and
+            // the real persisted Planning state while showing its diagnostic.
+            while let Some(id) = ready_tasks(&candidates, *cap)?.into_iter().next() {
+                let r = guard.get(&id).context("queue task disappeared")?;
+                let admission = (|| -> Result<WorkspaceLease> {
+                    let lease = WorkspaceCoordinator::shared().build(r.repository.clone().into(), r.workflow.spec.project_root.clone().into(), r.workflow.spec.write_set.clone())?;
+                    if let Some(checkout) = &r.workflow.worktree {
+                        let (snapshot_path, identity) = identities.get(&id).context("checkout appeared during admission; retry")?;
+                        if snapshot_path != checkout { bail!("checkout changed during admission; retry"); }
+                        let identity = identity.as_ref().map_err(|error| anyhow!("checkout identity unavailable: {error}"))?;
+                        lease.bind_verified_checkout(identity)?;
+                    }
+                    Ok(lease)
+                })();
+                let record = candidate.get_mut(&id).context("queue candidate disappeared")?;
+                match admission {
+                    Ok(lease) => {
+                        diagnostics_changed |= record.admission_error.take().is_some();
+                        candidates.iter_mut().find(|task| task.id == id).context("queue candidate disappeared")?.reserved = true;
+                        acquired.push((id.clone(), lease)); selected.push(id);
+                    }
+                    Err(error) => {
+                        let diagnostic = format!("Last workspace admission attempt was blocked: {error:#}. Review this build's checkout and retry after resolving its owner or path.");
+                        if record.admission_error.as_ref() != Some(&diagnostic) {
+                            record.admission_error = Some(diagnostic);
+                            diagnostics_changed = true;
+                        }
+                        // Skip only in this local selection view, never in the
+                        // durable workflow or dependency records.
+                        candidates.iter_mut().find(|task| task.id == id).context("queue candidate disappeared")?.status = WorkflowStatus::AwaitingPlanApproval;
+                    }
+                }
+            }
+            if selected.is_empty() && !diagnostics_changed {
                 return Ok(Vec::new());
             }
-            let mut candidate = guard.clone();
             for id in &selected {
                 candidate
                     .get_mut(id)
@@ -276,6 +344,7 @@ impl BuildService {
             }
             self.db
                 .set_kv(STORAGE, &serde_json::to_string(&candidate)?)?;
+            leases.extend(acquired);
             *guard = candidate;
             selected
         };
@@ -397,6 +466,7 @@ impl BuildService {
                 submitted_commit: Some(head_commit.clone()),
                 cleanup_pending: false,
                 cleanup_session: None,
+                admission_error: None,
             },
         );
         validate_graph(&coordination_tasks(&candidate))?;
@@ -551,6 +621,7 @@ impl BuildService {
                     submitted_commit: Some(submitted_commit),
                     cleanup_pending: false,
                     cleanup_session: None,
+                admission_error: None,
                 },
             );
             validate_graph(&coordination_tasks(&candidate))?;
@@ -711,17 +782,21 @@ impl BuildService {
                         .await
                         .context("accepted prerequisite changed")?;
                 }
+                let owner = self.workspace_leases.lock().await.get(id).cloned().context("missing host workspace reservation")?;
                 let tree = self
                     .trees
-                    .create(
+                    .create_owned(
                         root,
                         CreateWorktreeRequest {
                             name: format!("build-{}", &id[..8]),
                             base_ref: Some(base.clone()),
                             prefer_grok_cli: false,
                         },
+                        Some(&owner),
                     )
                     .await?;
+                let identity = VerifiedCheckoutIdentity::discover(&tree.path).await?;
+                owner.bind_verified_checkout(&identity)?;
                 let fingerprint = checkout_fingerprint(&tree.path).await?;
                 let expected_revision = workflow.revision;
                 workflow = self
@@ -797,6 +872,7 @@ impl BuildService {
                 ApprovalMode::Plan
             }),
             plan_mode: role != Role::Implementer,
+            read_only: role != Role::Implementer,
             isolate_worktree: false,
             include_auto_mcp: false,
             ..Default::default()
@@ -808,7 +884,7 @@ impl BuildService {
                 bail!("build stopped before native session spawn");
             }
             self.registry
-                .spawn_agent_preallocated(session, root, opts, Default::default())
+                .spawn_build_role(session, root, opts, &self.workspace_leases.lock().await.get(&workflow.id).cloned().context("missing host workspace reservation")?)
                 .await?;
         }
         self.registry.set_label(
@@ -1562,6 +1638,7 @@ mod tests {
             submitted_commit: None,
             cleanup_pending: false,
             cleanup_session: None,
+                admission_error: None,
         };
         validate_review_snapshot(&record).await.unwrap();
         std::fs::write(fixture.0.join("src/in.txt"), "changed after plan\n").unwrap();
@@ -1689,6 +1766,7 @@ mod tests {
             submitted_commit: None,
             cleanup_pending: false,
             cleanup_session: None,
+                admission_error: None,
         };
         let restored: BuildRecord =
             serde_json::from_str(&serde_json::to_string(&record).unwrap()).unwrap();
@@ -1715,6 +1793,8 @@ mod tests {
 
     fn coordination_record(w: &Workflow, id: &str, scope: &str, order: u64) -> BuildRecord {
         let mut workflow = w.clone();
+        // Queued tasks have not acquired their distinct production checkouts.
+        workflow.worktree = None;
         workflow.id = id.into();
         workflow.status = WorkflowStatus::Planning;
         workflow.spec.write_set = vec![scope.into()];
@@ -1728,6 +1808,7 @@ mod tests {
             order,
             cleanup_pending: false,
             cleanup_session: None,
+                admission_error: None,
         }
     }
     fn service_without_timer(root: &Path, records: Vec<BuildRecord>) -> Arc<BuildService> {
@@ -1746,6 +1827,7 @@ mod tests {
         db.set_kv(STORAGE, &serde_json::to_string(&records).unwrap())
             .unwrap();
         Arc::new(BuildService {
+            workspace_leases: Mutex::new(HashMap::new()),
             records: Mutex::new(records),
             concurrency: Mutex::new(2),
             running: Mutex::new(HashSet::new()),
@@ -1890,6 +1972,64 @@ mod tests {
         assert!(!stored["overlap0"].reserved);
         assert!(service.set_concurrency(1).await.is_err());
         assert_eq!(service.concurrency().await, 2);
+    }
+
+    #[tokio::test]
+    async fn ordinary_checkout_owner_blocks_build_until_verified_removal() {
+        let (fixture, workflow) = fixture().await;
+        let service = service_without_timer(&fixture.0,vec![coordination_record(&workflow,"shared000","src",1)]);
+        let id = service.registry.spawn_mock(fixture.0.to_str().unwrap()).await.unwrap();
+        assert!(service.reserve_ready().await.unwrap().is_empty());
+        assert!(service.list().await.unwrap()[0].workspace_blocked_reason.is_some());
+        service.registry.cancel_session(id).await.unwrap();
+        assert!(service.reserve_ready().await.unwrap().is_empty());
+        service.registry.remove_session(id).await.unwrap();
+        assert_eq!(service.reserve_ready().await.unwrap(),vec!["shared000"]);
+        assert!(service.list().await.unwrap()[0].workspace_blocked_reason.is_none());
+        assert!(service.registry.spawn_mock(fixture.0.to_str().unwrap()).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn native_owner_does_not_starve_independent_repository_at_cap_one() {
+        let (first_repo, first_workflow) = fixture().await;
+        let (second_repo, second_workflow) = fixture().await;
+        let service = service_without_timer(&first_repo.0, vec![
+            coordination_record(&first_workflow, "blocked0", "src", 1),
+            coordination_record(&second_workflow, "ready000", "src", 2),
+        ]);
+        *service.concurrency.lock().await = 1;
+        let owner = service.registry.spawn_mock(first_repo.0.to_str().unwrap()).await.unwrap();
+        assert_eq!(service.reserve_ready().await.unwrap(), vec!["ready000"]);
+        let records = service.records.lock().await;
+        assert!(!records["blocked0"].reserved);
+        assert_eq!(records["blocked0"].workflow.status, WorkflowStatus::Planning);
+        assert!(records["ready000"].reserved);
+        drop(records);
+        assert!(service.registry.spawn_mock(second_repo.0.to_str().unwrap()).await.is_err());
+        service.registry.remove_session(owner).await.unwrap();
+        assert!(service.reserve_ready().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn missing_checkout_only_blocks_its_candidate_not_independent_admission() {
+        let (first_repo, first_workflow) = fixture().await;
+        let (_second_repo, second_workflow) = fixture().await;
+        let mut broken = coordination_record(&first_workflow, "broken00", "src", 1);
+        broken.workflow.worktree = Some(first_repo.0.join("missing-checkout").to_string_lossy().into_owned());
+        let service = service_without_timer(&first_repo.0, vec![broken,
+            coordination_record(&second_workflow, "ready000", "src", 2)]);
+        *service.concurrency.lock().await = 1;
+        assert_eq!(service.reserve_ready().await.unwrap(), vec!["ready000"]);
+        let records = service.records.lock().await;
+        assert!(!records["broken00"].reserved);
+        assert_eq!(records["broken00"].workflow.status, WorkflowStatus::Planning);
+        assert!(records["broken00"].admission_error.as_ref().unwrap().contains("checkout identity unavailable"));
+        assert!(records["ready000"].reserved);
+        drop(records);
+        let rows = service.list().await.unwrap();
+        assert!(rows.iter().find(|row| row.workflow.id == "broken00").unwrap().workspace_blocked_reason.is_some());
+        let saved: BTreeMap<String, BuildRecord> = serde_json::from_str(&service.db.get_kv(STORAGE).unwrap().unwrap()).unwrap();
+        assert!(saved["broken00"].admission_error.is_some());
     }
 
     #[tokio::test]

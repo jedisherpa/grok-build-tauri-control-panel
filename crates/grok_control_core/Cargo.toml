@@ -14,6 +14,7 @@ grok_acp = { path = "../grok_acp" }
 grok_cli_wrapper = { path = "../grok_cli_wrapper" }
 grok_config = { path = "../grok_config" }
 grok_events = { path = "../grok_events" }
+grok_worktree = { path = "../grok_worktree" }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

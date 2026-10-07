@@ -30,6 +30,9 @@ pub struct SpawnOptions {
     pub approval_mode: Option<ApprovalMode>,
     pub always_approve: bool,
     pub plan_mode: bool,
+    /// Immutable host ceiling for research/review roles. UI mode changes cannot
+    /// elevate a session spawned with this ceiling.
+    pub read_only: bool,
     pub sandbox_profile: Option<String>,
     /// Raw ACP mcpServers payloads (advanced). Prefer `mcp_server_names`.
     pub mcp_servers: Vec<Value>,
@@ -59,9 +62,8 @@ impl Default for SpawnOptions {
             rules: Vec::new(),
             approval_mode: None,
             always_approve: false,
-            // No stance by default — every request is confirmed until the user
-            // picks plan/auto/yolo.
-            plan_mode: false,
+            plan_mode: true,
+            read_only: false,
             sandbox_profile: Some("workspace".into()),
             mcp_servers: Vec::new(),
             mcp_server_names: Vec::new(),
@@ -78,6 +80,17 @@ impl Default for SpawnOptions {
 
 impl SpawnOptions {
     pub fn validate(&self) -> Result<(), String> {
+        if let Some(profile) = self.sandbox_profile.as_deref() {
+            if !["strict", "workspace", "unrestricted", "none", "off", "readonly", "read-only", "read_only"].contains(&profile) {
+                return Err(format!("unknown sandbox profile: {profile}"));
+            }
+        }
+        if (self.read_only || self.resolved_mode() == ApprovalMode::Plan) && !self.mcp_servers.is_empty() {
+            return Err("external MCP tools are unavailable in Plan/read-only because their mutation policy cannot be enforced by this host".into());
+        }
+        if self.read_only && matches!(self.mode, AgentMode::Headless) {
+            return Err("immutable read-only policy capability unavailable for the native headless runner".into());
+        }
         if matches!(self.mode, AgentMode::Headless) && self.prompt.as_ref().map(|p| p.trim().is_empty()).unwrap_or(true)
         {
             return Err("headless mode requires a non-empty prompt".into());
@@ -97,6 +110,7 @@ impl SpawnOptions {
     /// The stance to run with: an explicit `approval_mode` wins; otherwise
     /// derive it from the legacy booleans (old payloads / restored metadata).
     pub fn resolved_mode(&self) -> ApprovalMode {
+        if self.read_only { return ApprovalMode::Plan; }
         if let Some(m) = self.approval_mode {
             return m;
         }

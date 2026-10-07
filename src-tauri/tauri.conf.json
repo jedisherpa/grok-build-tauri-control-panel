@@ -14,6 +14,7 @@
     "windows": [
       {
         "label": "main",
+        "create": false,
         "title": "See Cubed",
         "width": 1380,
         "height": 900,

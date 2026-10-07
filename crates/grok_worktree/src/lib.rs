@@ -13,6 +13,9 @@ use uuid::Uuid;
 
 use grok_cli_wrapper::GrokCli;
 
+mod ownership;
+pub use ownership::{canonical_identity, VerifiedCheckoutIdentity, WorkspaceCoordinator, WorkspaceLease};
+
 #[derive(Debug, Error)]
 pub enum WorktreeError {
     #[error("io error: {0}")]
@@ -90,8 +93,13 @@ impl WorktreeManager {
         repo: &Path,
         req: CreateWorktreeRequest,
     ) -> Result<WorktreeInfo> {
+        self.create_owned(repo, req, None).await
+    }
+
+    pub async fn create_owned(&self, repo: &Path, req: CreateWorktreeRequest, owner: Option<&WorkspaceLease>) -> Result<WorktreeInfo> {
         validate_name(&req.name)?;
         ensure_git_repo(repo).await?;
+        let _admission = WorkspaceCoordinator::shared().mutation(repo, true, owner).await?;
         self.ensure_root().await?;
 
         if req.prefer_grok_cli {
@@ -165,20 +173,14 @@ impl WorktreeManager {
 
     pub async fn remove(&self, repo: &Path, path_or_name: &str, force: bool) -> Result<()> {
         ensure_git_repo(repo).await?;
-
-        // Try grok CLI first
-        if validate_name(path_or_name).is_ok() {
-            if let Err(e) = self.grok_cli.worktree_remove(path_or_name, Some(repo)).await {
-                warn!(error = %e, "grok worktree rm failed; using git");
-            } else {
-                return Ok(());
-            }
-        }
+        let _admission = WorkspaceCoordinator::shared().mutation(repo, false, None).await?;
 
         let list = self.list_git(repo).await?;
+        let requested = Path::new(path_or_name).is_absolute().then(|| std::fs::canonicalize(path_or_name).ok()).flatten();
         let target = list
             .iter()
-            .find(|w| w.name == path_or_name || w.path.to_string_lossy() == path_or_name)
+            .find(|w| w.name == path_or_name || w.path.to_string_lossy() == path_or_name
+                || requested.as_ref().is_some_and(|p| std::fs::canonicalize(&w.path).is_ok_and(|w| w == *p)))
             .ok_or_else(|| WorktreeError::NotFound(path_or_name.to_string()))?;
 
         let mut args = vec!["worktree", "remove"];
@@ -194,6 +196,7 @@ impl WorktreeManager {
 
     pub async fn prune(&self, repo: &Path) -> Result<String> {
         ensure_git_repo(repo).await?;
+        let _admission = WorkspaceCoordinator::shared().mutation(repo, false, None).await?;
         run_git(repo, &["worktree", "prune", "-v"]).await
     }
 
@@ -203,6 +206,7 @@ impl WorktreeManager {
     /// Uses one-shot `-c user.*` so Land/Sync work when the machine has no
     /// global git identity (common on headless prove boxes — D-050).
     pub async fn commit_all(&self, path: &Path, message: &str) -> Result<bool> {
+        let _admission = WorkspaceCoordinator::shared().mutation(path, false, None).await?;
         run_git(path, &["add", "-A"]).await?;
         if self.is_clean(path).await? {
             return Ok(false);
@@ -248,6 +252,27 @@ impl WorktreeManager {
     /// On conflict the merge is left IN PROGRESS (caller decides whether to
     /// abort — land aborts, sync leaves it for the agent to resolve).
     pub async fn merge(&self, path: &Path, reference: &str, message: &str) -> Result<MergeOutcome> {
+        self.merge_clean(path, reference, message, &[path]).await
+    }
+
+    /// Admission and cleanliness are checked together, without staging any
+    /// manual, staged or untracked edits. Caller must review/commit first.
+    pub async fn merge_clean(&self, path: &Path, reference: &str, message: &str, checkouts: &[&Path]) -> Result<MergeOutcome> {
+        let _admission = WorkspaceCoordinator::shared().mutation(path, false, None).await?;
+        let (repository, _) = canonical_identity(path).await?;
+        for checkout in checkouts {
+            if canonical_identity(checkout).await?.0 != repository {
+                return Err(WorktreeError::Git("merge checkouts belong to different repositories".into()));
+            }
+            if !self.is_clean(checkout).await? {
+                return Err(WorktreeError::Git(format!("{} contains staged, unstaged or untracked changes. Review and explicitly commit or preserve those changes first; Land/Sync never stages them automatically", checkout.display())));
+            }
+        }
+        // Merge the reviewed current commit, not a ref that another process
+        // can move between validation and Git's merge. External Git remains
+        // outside the host's process-local admission authority.
+        let reference = run_git(path, &["rev-parse", "--verify", "--end-of-options", &format!("{reference}^{{commit}}")]).await?;
+        let reference = reference.trim();
         match run_git(
             path,
             &[
@@ -541,6 +566,67 @@ locked
             Arc::new(GrokCli::new("/bin/true")),
             root.join("worktrees"),
         )
+    }
+
+    #[tokio::test]
+    async fn canonical_owners_allow_distinct_checkouts_and_block_git_mutations() {
+        let (dir, repo) = temp_repo().await; let mgr = test_manager(dir.path());
+        let a = mgr.create(&repo, CreateWorktreeRequest { name:"owner-a".into(),base_ref:None,prefer_grok_cli:false }).await.unwrap();
+        let first = WorkspaceCoordinator::shared().session(&a.path,None).await.unwrap();
+        let b = mgr.create(&repo, CreateWorktreeRequest { name:"owner-b".into(),base_ref:None,prefer_grok_cli:false }).await.unwrap();
+        let second = WorkspaceCoordinator::shared().session(&b.path,None).await.unwrap();
+        #[cfg(unix)]
+        {
+            let alias = dir.path().join("project-alias");
+            std::os::unix::fs::symlink(&repo, &alias).unwrap();
+            assert_eq!(canonical_identity(&alias).await.unwrap().0, canonical_identity(&a.path).await.unwrap().0);
+            assert!(mgr.prune(&alias).await.is_err());
+        }
+        assert_eq!(canonical_identity(&a.path).await.unwrap().0, canonical_identity(&b.path).await.unwrap().0);
+        assert!(mgr.remove(&repo, a.path.to_str().unwrap(),true).await.is_err());
+        assert!(mgr.prune(&repo.join(".")).await.is_err());
+        assert!(mgr.merge_clean(&repo, a.branch.as_deref().unwrap(), "land", &[&repo,&a.path]).await.is_err());
+        assert!(a.path.exists() && b.path.exists());
+        drop(first); drop(second);
+        mgr.remove(&repo, a.path.to_str().unwrap(),false).await.unwrap();
+        assert!(!a.path.exists());
+    }
+
+    #[tokio::test]
+    async fn build_scope_cannot_be_bypassed_by_isolated_session_or_other_repository_binding() {
+        let (dir, repo) = temp_repo().await; let mgr = test_manager(dir.path());
+        let a = mgr.create(&repo, CreateWorktreeRequest { name:"logical-scope".into(),base_ref:None,prefer_grok_cli:false }).await.unwrap();
+        let common = canonical_identity(&repo).await.unwrap().0;
+        let owner = WorkspaceCoordinator::shared().build(common, repo.clone(),vec!["src".into()]).unwrap();
+        assert!(WorkspaceCoordinator::shared().session(&a.path,None).await.is_err());
+        let (_foreign_dir, foreign) = temp_repo().await;
+        assert!(owner.bind_checkout(&foreign).is_err());
+        let foreign_identity = VerifiedCheckoutIdentity::discover(&foreign).await.unwrap();
+        assert!(owner.bind_verified_checkout(&foreign_identity).is_err());
+        let identity = VerifiedCheckoutIdentity::discover(&a.path).await.unwrap();
+        owner.bind_verified_checkout(&identity).unwrap();
+        let child = WorkspaceCoordinator::shared().session(&a.path,Some(&owner)).await.unwrap();
+        assert!(WorkspaceCoordinator::shared().session(&repo,None).await.is_err());
+        assert!(mgr.remove(&repo,a.path.to_str().unwrap(),true).await.is_err());
+        drop(child); drop(owner);
+        assert!(WorkspaceCoordinator::shared().session(&a.path,None).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn dirty_merge_rejects_without_staging_or_committing_manual_changes() {
+        let (dir, repo) = temp_repo().await; let mgr = test_manager(dir.path());
+        let a = mgr.create(&repo, CreateWorktreeRequest { name:"dirty-source".into(),base_ref:None,prefer_grok_cli:false }).await.unwrap();
+        std::fs::write(a.path.join("a.txt"), "manual staged\n").unwrap();
+        run_git(&a.path,&["add","a.txt"]).await.unwrap();
+        std::fs::write(a.path.join("manual.txt"), "manual untracked\n").unwrap();
+        let before = run_git(&a.path,&["status","--porcelain=v1"]).await.unwrap();
+        let index = run_git(&a.path,&["diff","--cached"]).await.unwrap();
+        let head = run_git(&repo,&["rev-parse","HEAD"]).await.unwrap();
+        assert!(mgr.merge_clean(&repo, a.branch.as_deref().unwrap(), "land", &[&repo,&a.path]).await.is_err());
+        assert_eq!(before,run_git(&a.path,&["status","--porcelain=v1"]).await.unwrap());
+        assert_eq!(index,run_git(&a.path,&["diff","--cached"]).await.unwrap());
+        assert_eq!(head,run_git(&repo,&["rev-parse","HEAD"]).await.unwrap());
+        assert_eq!(std::fs::read_to_string(a.path.join("manual.txt")).unwrap(),"manual untracked\n");
     }
 
     #[tokio::test]

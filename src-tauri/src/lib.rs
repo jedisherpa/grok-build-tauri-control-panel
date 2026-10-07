@@ -9,6 +9,7 @@ mod history;
 mod meaning_candidates;
 mod meaning_memory;
 mod memory_recall;
+mod qa_profile;
 mod semantic_runtime;
 mod state;
 mod wizard_joe;
@@ -30,6 +31,9 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
+            // Resolve/refuse QA native+browser aliases before store mutation or
+            // creation of any webview with the normal production data store.
+            let browser_isolation = qa_profile::discover()?;
             let app_handle = app.handle().clone();
             let state = tauri::async_runtime::block_on(AppState::initialize())?;
             let bus = state.event_bus.clone();
@@ -77,6 +81,15 @@ pub fn run() {
             });
 
             info!(db = %db_path, "Bomb Code backend ready (SQLite thread memory)");
+            let config = app.config().app.windows.first().ok_or("missing main window configuration")?;
+            let mut window = tauri::WebviewWindowBuilder::from_config(app, config)?;
+            if let Some(isolation) = browser_isolation {
+                #[cfg(target_os = "macos")]
+                { window = window.data_store_identifier(isolation.identifier); }
+                #[cfg(not(target_os = "macos"))]
+                { window = window.data_directory(isolation.directory); }
+            }
+            window.build()?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

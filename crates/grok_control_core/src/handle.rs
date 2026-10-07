@@ -33,6 +33,8 @@ pub struct SessionMetadata {
     #[serde(default)]
     pub approval_mode: grok_acp::ApprovalMode,
     pub plan_mode: bool,
+    #[serde(default)]
+    pub read_only: bool,
     pub always_approve: bool,
     pub sandbox_profile: Option<String>,
     /// MCP server names attached at spawn time.

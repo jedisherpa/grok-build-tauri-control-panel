@@ -27,7 +27,7 @@ Note mutations retain an exclusive lock through staged publication, use unique o
 
 Punctuation-only literal history queries return zero; only empty query browses all. The pre-existing failing test passes unchanged after repair. Developer installation now refuses existing destinations, retains the built signature, rejects implicit notarization inputs and neither deletes the installed app nor automatically launches it.
 
-## Fresh verification
+## Previous preparation checkpoint verification
 
 | Check | Observed result | Evidence level |
 |---|---|---|
@@ -44,7 +44,7 @@ Rust failures during implementation (format placeholder and duplicate Clone deri
 
 ## Open release gates
 
-The architecture findings on policy parity/direct ACP operation authorization, repository reservations/isolation fallback, actual scheduler/headless completion/recovery, durable event ingestion, diff correctness and worker/resource caps remain open. Review the audit reports and staged backlog; unit-suite passes do not override reproduced defects.
+The authority remediation below addresses host policy parity/direct ACP authorization and managed repository reservations/isolation fallback. Whole native adapter enforcement, actual scheduler/headless completion/recovery, durable event ingestion, diff correctness and worker/resource caps remain release gates. Review the audit reports and staged backlog; unit-suite passes do not override reproduced defects.
 
 The cached baseline Rust SQLite amalgamation is 3.46.0; Persistence uses WAL/NORMAL. It needs a verified patched runtime and checkpoint/ownership/durability qualification. The system Python SQLite reports 3.43.2, and Python/runtime/reference installation and licenses also need a separate distribution check. No installed app SQLite query or corruption incident is asserted here. Current official SQLite guidance fixes its rare multi-connection WAL-reset race in 3.51.3+, with 3.44.6/3.50.7 backports: https://www.sqlite.org/wal.html#walresetbug.
 
@@ -60,4 +60,45 @@ Private raw logs, fixtures and machine receipts are at the sibling SE outputs/c3
 
 Workspace `cargo check --locked --offline` passed. `cargo fmt --all --check` fails in both a pristine archive of baa8908 and the current source; the baseline/current logs are retained. This phase keeps targeted repairs rather than reformatting unrelated code. Formatting debt remains a recorded source gate.
 
-C3_PROFILE_DIR changes backend paths, not WebKit's persistent browser data identity. Draft/layout/localStorage qualification requires a separately verified WebKit store or isolated macOS account/test bundle identity. The exact signed final artifact must be exercised on an isolated account without substituting another bundle's results. Plain `open` does not by itself select a backend QA profile; follow the explicit process/profile setup and verify it before mutation.
+C3_PROFILE_DIR now also selects a canonical-path-derived WebKit data-store identifier on macOS 14 or later. A main window is created only after profile admission; older macOS fails closed for this QA path and needs a separate account. Native A/B draft/layout/localStorage and restart qualification remain unrun. Use the exact signed distribution artifact, with unchanged bundle identity, rather than substituting another bundle's results. Plain `open` does not by itself select a backend QA profile; follow explicit process/profile setup and verify it before mutation.
+
+## Authority and ownership source checkpoint
+
+The new shared evaluator is deny-first and applies actual operation effects,
+immutable review ceilings, Plan restrictions and epoch-bound pending identities.
+Host filesystem writes use anchored paths; host terminals have a generated macOS
+containment fixture. Native option IDs are preserved, and the frontend no longer
+creates inferred wildcard grants. Transport writes have a bounded deadline and
+close the stream after failed or interrupted partial writes.
+
+One process-wide canonical workspace coordinator covers managed ordinary and
+Build sessions plus worktree mutations. Requested isolation failures are visible.
+Land/Sync require explicit clean commits and preserve dirty work. This coordinator
+does not control another process running Git independently.
+
+Native adapters' internal runners remain unverified. Unsupported native Plan,
+immutable review, workspace/strict and deny policies are refused before launch;
+unsupported live Plan transitions are refused without changing the active mode.
+This is an intermediate fail-closed capability boundary, not acceptance of native
+Plan/reviewed Builds. Those features must be restored through demonstrated
+runtime/broker enforcement and pass their packaged stories before release.
+
+The consolidated locked/offline workspace suite passes 274 tests, with zero
+failures and six native-prerequisite fixtures still ignored. This includes 59
+ACP, 6 permission, 68 panel, 10 core and 12 worktree tests. Workspace check and
+strict all-target Clippy pass. Frontend passes 199 tests, including eight tests
+against the actual mode-change owner; Python passes 136 tests. Independent
+architecture and performance/simplicity review accept this source checkpoint.
+Retained failures include the outer sandbox refusing nested sandbox-exec; the
+generated macOS containment test passes in the bounded unsandboxed rerun.
+
+The queue considers independent candidates after ownership or missing-checkout
+failure, with visible per-record diagnostics; bounded Git identity discovery
+runs before admission locks. Live UI modes require acknowledged host state,
+unknown state blocks Send including keyboard entry, and Yolo confirmation is
+shared by button and keyboard paths. Historical notes/transcripts are reference
+evidence and confer no tool or policy authority.
+
+PACKAGED_CANDIDATE_MATRIX.md records the required
+workflow, recovery, accessibility and performance observations on the final
+signed candidate. No new candidate was installed, signed, submitted or published.

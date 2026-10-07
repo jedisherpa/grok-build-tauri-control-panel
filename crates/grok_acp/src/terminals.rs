@@ -81,13 +81,19 @@ struct ManagedTerminal {
 pub struct TerminalRegistry {
     terminals: Mutex<HashMap<String, ManagedTerminal>>,
     default_cwd: PathBuf,
+    unrestricted: bool,
 }
 
 impl TerminalRegistry {
     pub fn new(default_cwd: PathBuf) -> Self {
+        Self::with_policy(default_cwd, false)
+    }
+
+    pub fn with_policy(default_cwd: PathBuf, unrestricted: bool) -> Self {
         Self {
             terminals: Mutex::new(HashMap::new()),
             default_cwd,
+            unrestricted,
         }
     }
 
@@ -167,7 +173,8 @@ impl TerminalRegistry {
             })
             .unwrap_or_default();
 
-        let mut cmd = build_command(&command, &args, &cwd, &env_pairs);
+        let mut cmd = contained_command(build_command(&command, &args, &cwd, &env_pairs),
+            &workspace, self.unrestricted)?;
         cmd.stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -496,6 +503,64 @@ fn build_command(
     cmd
 }
 
+/// cwd alone is not a sandbox: shells can otherwise write absolute paths or
+/// follow workspace symlinks. No fallback silently launches uncontained code.
+fn contained_command(command: Command, workspace: &Path, unrestricted: bool) -> Result<Command> {
+    if unrestricted { return Ok(command); }
+    #[cfg(target_os = "macos")]
+    {
+        let sandbox = Path::new("/usr/bin/sandbox-exec");
+        if !sandbox.is_file() {
+            return Err(AcpError::Protocol("workspace terminal isolation unavailable: sandbox-exec missing".into()));
+        }
+        let profile = workspace_profile(workspace)?;
+        let original = command.as_std();
+        let mut contained = Command::new(sandbox);
+        contained.arg("-p").arg(profile).arg(original.get_program()).args(original.get_args());
+        if let Some(cwd) = original.get_current_dir() { contained.current_dir(cwd); }
+        for (key, value) in original.get_envs() {
+            if let Some(value) = value { contained.env(key, value); }
+            else { contained.env_remove(key); }
+        }
+        // Compiler scratch files must remain inside the writable workspace.
+        contained.env("TMPDIR", workspace);
+        Ok(contained)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = workspace;
+        Err(AcpError::Protocol("workspace terminal isolation unavailable on this platform; an explicit unrestricted profile is required".into()))
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn workspace_profile(workspace: &Path) -> Result<String> {
+    let quote = |path: &Path| serde_json::to_string(&path.to_string_lossy())
+        .map_err(AcpError::from);
+    let mut readable = vec![workspace.to_path_buf(), PathBuf::from("/System"), PathBuf::from("/usr"),
+        PathBuf::from("/bin"), PathBuf::from("/sbin"), PathBuf::from("/Library"),
+        PathBuf::from("/private/etc"), PathBuf::from("/private/var/db/dyld"),
+        PathBuf::from("/opt/homebrew"), PathBuf::from("/dev/fd")];
+    if let Some(home) = std::env::var_os("HOME") {
+        let home = PathBuf::from(home);
+        for path in [".rustup", ".cargo/bin", ".cargo/registry", ".cargo/git", ".local/bin", ".grok/bin"] {
+            readable.push(home.join(path));
+        }
+    }
+    // Apple dyld-support.sb requires opening / as an openat root. This is a
+    // literal directory grant, never a recursive grant to its descendants.
+    let mut profile = "(version 1)(allow default)(deny file-read*)(deny file-write*)(allow file-read-metadata)(allow file-read* (literal \"/\"))".to_string();
+    for path in readable {
+        let path = path.canonicalize().unwrap_or(path);
+        profile.push_str(&format!("(allow file-read* (subpath {}))", quote(&path)?));
+    }
+    for device in ["/dev/null", "/dev/random", "/dev/urandom"] {
+        profile.push_str(&format!("(allow file-read* (literal {device:?}))"));
+    }
+    profile.push_str(&format!("(allow file-write* (subpath {})(literal \"/dev/null\"))", quote(workspace)?));
+    Ok(profile)
+}
+
 fn needs_shell(command: &str) -> bool {
     command.contains(' ')
         || command.contains('|')
@@ -515,7 +580,8 @@ mod tests {
 
     #[tokio::test]
     async fn create_wait_output_echo() {
-        let reg = TerminalRegistry::new(std::env::temp_dir());
+        // This tests terminal transport/output, not confinement (below).
+        let reg = TerminalRegistry::with_policy(std::env::temp_dir(), true);
         let create = reg
             .handle(
                 "terminal/create",
@@ -557,7 +623,7 @@ mod tests {
 
     #[tokio::test]
     async fn shell_snippet_via_zsh() {
-        let reg = TerminalRegistry::new(std::env::temp_dir());
+        let reg = TerminalRegistry::with_policy(std::env::temp_dir(), true);
         let create = reg
             .handle(
                 "terminal/create",
@@ -591,5 +657,31 @@ mod tests {
         assert!(needs_shell("echo hi"));
         assert!(!needs_shell("ls"));
         assert!(!needs_shell("/bin/echo"));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn workspace_sandbox_allows_local_work_but_blocks_absolute_and_symlink_escape() {
+        let fixture = tempfile::tempdir().unwrap();
+        let workspace = fixture.path().join("workspace");
+        let outside = fixture.path().join("outside");
+        std::fs::create_dir(&workspace).unwrap();
+        std::fs::create_dir(&outside).unwrap();
+        std::fs::write(outside.join("private-read"), "fixture secret").unwrap();
+        std::os::unix::fs::symlink(&outside, workspace.join("linked-outside")).unwrap();
+        let reg = TerminalRegistry::new(workspace.clone());
+        let command = format!("printf inside > local; printf escaped > {}; printf escaped > linked-outside/symlink-write; cat {}; printf done",
+            outside.join("absolute-write").display(), outside.join("private-read").display());
+        let result = reg.handle("terminal/create", &Some(json!({"command":"/bin/sh", "args":["-c",command]}))).await.unwrap();
+        let id = result["terminalId"].as_str().unwrap();
+        let waited = reg.handle("terminal/wait_for_exit", &Some(json!({"terminalId":id}))).await.unwrap();
+        let output = reg.handle("terminal/output", &Some(json!({"terminalId":id}))).await.unwrap();
+        assert_eq!(waited["exitCode"], 0, "sandbox must initialize and run: {output}");
+        assert_eq!(std::fs::read_to_string(workspace.join("local")).unwrap(), "inside");
+        assert!(!outside.join("absolute-write").exists());
+        assert!(!outside.join("symlink-write").exists());
+        assert!(!output["output"].as_str().unwrap().contains("fixture secret"));
+        assert!(output["output"].as_str().unwrap().contains("done"));
+        reg.handle("terminal/release", &Some(json!({"terminalId":id}))).await.unwrap();
     }
 }

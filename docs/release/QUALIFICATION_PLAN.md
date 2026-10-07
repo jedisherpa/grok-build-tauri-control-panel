@@ -26,7 +26,7 @@ Qualify the existing Rust/Tauri product through feature inventory, explicit user
 
 ## Initial prerequisites
 
-Mac: Apple Silicon, macOS 15.6.1, Xcode 26.3, Rust 1.93.1. `notarytool` is present. `security find-identity -v -p codesigning` reports zero valid identities. Apple Developer ID setup and desired distribution architectures are pending user clarification; unrelated qualification continues.
+Mac: Apple Silicon, macOS 15.6.1, Xcode 26.3, Rust 1.93.1. `notarytool` is present. The initial sandboxed identity query returned zero; the subsequent read-only unsandboxed query and disposable signing probe verified the existing Developer ID Application identity for team `X8BVJAF8W5`. The existing `fisheye-research-feed-notary` profile successfully authenticated to Apple's history endpoint. Reuse that setup without credential changes. These probes establish available credentials, not a qualified or notarized C3 artifact. Initial candidate architecture is the locally testable `arm64`; another architecture requires its own declared build and acceptance evidence.
 
 ## Primary references
 

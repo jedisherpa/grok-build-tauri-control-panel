@@ -47,9 +47,18 @@ fn load_startup_config(paths: &GrokPaths, resolved_binary: Option<PathBuf>) -> R
         .context("load panel/project configuration; original files preserved")?;
     let mut base =
         GrokConfig::load_base(paths).context("load base configuration; original file preserved")?;
+    if let Some(root) = &config.worktrees_root {
+        crate::qa_profile::validate_worktree_root(paths, root)?;
+    }
     if let Some(binary) = resolved_binary {
-        base.grok_binary = Some(binary.clone());
-        config.grok_binary = Some(binary);
+        // Discovery may fill a missing program; it must not replace an explicit
+        // operator-selected backend, including a generated QA adapter.
+        if base.grok_binary.is_none() {
+            base.grok_binary = Some(binary.clone());
+        }
+        if config.grok_binary.is_none() {
+            config.grok_binary = Some(binary);
+        }
     }
     base.save(&paths.config_file)
         .context("save resolved panel configuration")?;
@@ -265,6 +274,24 @@ impl AppState {
 #[cfg(test)]
 mod release_tests {
     use super::*;
+
+    #[test]
+    fn discovery_cannot_replace_explicit_base_or_project_backend() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut paths = GrokPaths::discover(None).unwrap();
+        paths.config_file = dir.path().join("config.toml");
+        paths.project_config_file = Some(dir.path().join("project.toml"));
+        let base = GrokConfig { grok_binary: Some("/generated/base-adapter".into()), ..Default::default() };
+        base.save(&paths.config_file).unwrap();
+        let loaded = load_startup_config(&paths, Some("/generated/discovered-real-cli".into())).unwrap();
+        assert_eq!(loaded.grok_binary, base.grok_binary);
+        assert_eq!(GrokConfig::load_base(&paths).unwrap().grok_binary, base.grok_binary);
+        let overlay = GrokConfig { grok_binary: Some("/generated/project-adapter".into()), ..Default::default() };
+        overlay.save(paths.project_config_file.as_ref().unwrap()).unwrap();
+        let loaded = load_startup_config(&paths, Some("/generated/discovered-real-cli".into())).unwrap();
+        assert_eq!(loaded.grok_binary, overlay.grok_binary);
+        assert_eq!(GrokConfig::load_base(&paths).unwrap().grok_binary, base.grok_binary);
+    }
 
     #[test]
     fn corrupt_base_or_overlay_never_overwrites_existing_config() {

@@ -2,9 +2,86 @@
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracing::debug;
 
 use grok_config::{PermissionDefaults, SandboxProfile};
+
+/// Host-observed effect, rather than an agent's display title or claimed kind.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Operation {
+    Read,
+    Control,
+    Write,
+    Process,
+    Unknown,
+}
+
+pub fn canonical_tool(tool: &str) -> &str {
+    match tool.to_ascii_lowercase().replace(['-', '_'], "").as_str() {
+        "read" | "readfile" | "readtextfile" | "fs/readtextfile" | "fs/read" => "Read",
+        "glob" => "Glob",
+        "grep" | "search" | "searchfiles" | "fetchrules" => "Grep",
+        "list" | "listfiles" | "listdirectory" => "Read",
+        "write" | "edit" | "writefile" | "writetextfile" | "fs/writetextfile" | "fs/write" => "Write",
+        "bash" | "shell" | "terminal/create" | "runterminalcommand" | "runcommand" => "Bash",
+        "delete" | "deletefile" => "Delete",
+        "move" | "movefile" | "multiedit" | "applypatch" => "Write",
+        "exitplanmode" | "x.ai/exitplanmode" => "ExitPlanMode",
+        _ => tool,
+    }
+}
+
+pub fn operation(tool: &str) -> Operation {
+    match canonical_tool(tool) {
+        "Read" | "Glob" | "Grep" => Operation::Read,
+        "ExitPlanMode" => Operation::Control,
+        "Write" | "Delete" | "Move" | "MultiEdit" | "ApplyPatch" => Operation::Write,
+        "Bash" => Operation::Process,
+        _ => Operation::Unknown,
+    }
+}
+
+/// One evaluator used by preview, native permission requests and actual host
+/// effects. A user Allow/Always/Yolo choice never widens an immutable ceiling.
+#[derive(Debug, Clone, Copy)]
+pub struct PolicyContext {
+    pub read_only: bool,
+    pub plan_mode: bool,
+    pub cancelled: bool,
+    pub always_approve: bool,
+    pub auto_allow: bool,
+}
+
+pub fn evaluate_policy(
+    tool: &str,
+    detail: &str,
+    effect: Operation,
+    context: PolicyContext,
+    rules: impl IntoIterator<Item = PermissionRule>,
+) -> PermissionDecision {
+    let rules: Vec<_> = rules.into_iter().collect();
+    if context.cancelled
+        || ((context.read_only || context.plan_mode) && !matches!(effect, Operation::Read | Operation::Control))
+        || rules.iter().any(|r| r.decision == PermissionDecision::Deny
+            && matches_any_pattern(std::slice::from_ref(&r.pattern), tool, detail))
+    {
+        return PermissionDecision::Deny;
+    }
+    if effect == Operation::Control { return PermissionDecision::Ask; }
+    // Explicit Ask survives allow and automation too; deny is always first.
+    if rules.iter().any(|r| r.decision == PermissionDecision::Ask
+        && matches_any_pattern(std::slice::from_ref(&r.pattern), tool, detail)) {
+        return PermissionDecision::Ask;
+    }
+    if context.always_approve || context.auto_allow
+        || (context.plan_mode && effect == Operation::Read)
+        || rules.iter().any(|r| r.decision == PermissionDecision::Allow
+            && matches_any_pattern(std::slice::from_ref(&r.pattern), tool, detail))
+    {
+        PermissionDecision::Allow
+    } else {
+        PermissionDecision::Ask
+    }
+}
 
 #[derive(Debug, Error)]
 pub enum PermissionError {
@@ -119,34 +196,12 @@ impl PermissionController {
 
     /// Evaluate a tool invocation against deny-first, then allow, else ask.
     pub fn evaluate(&self, tool: &str, detail: &str) -> PermissionDecision {
-        if self.always_approve {
-            return PermissionDecision::Allow;
-        }
-
-        let candidate = format!("{tool}({detail})");
-        let tool_only = tool.to_string();
-
-        // Session rules override global
-        for rule in self.session.iter().chain(self.global.iter()) {
-            if pattern_matches(&rule.pattern, &candidate) || pattern_matches(&rule.pattern, &tool_only)
-            {
-                debug!(pattern = %rule.pattern, decision = ?rule.decision, "rule match");
-                return rule.decision;
-            }
-        }
-
-        // Sandbox restrictions
-        if !self.sandbox.allows_writes()
-            && matches!(tool, "Write" | "Edit" | "Bash" | "Delete" | "Shell")
-        {
-            return PermissionDecision::Ask;
-        }
-
-        if self.trust_repo && matches!(tool, "Read" | "Glob" | "Grep") {
-            return PermissionDecision::Allow;
-        }
-
-        PermissionDecision::Ask
+        let effect = operation(tool);
+        evaluate_policy(tool, detail, effect, PolicyContext {
+            read_only: !self.sandbox.allows_writes(), plan_mode: self.plan_mode,
+            cancelled: false, always_approve: self.always_approve,
+            auto_allow: self.trust_repo && effect == Operation::Read,
+        }, self.session.iter().chain(self.global.iter()).cloned())
     }
 
     pub fn assert_allowed(&self, tool: &str, detail: &str) -> Result<()> {
@@ -242,10 +297,16 @@ pub fn builtin_presets() -> Vec<PermissionPreset> {
 /// Used by the ACP approval path to hard-block denied tools before the
 /// approval card is even shown.
 pub fn matches_any_pattern(patterns: &[String], tool: &str, detail: &str) -> bool {
+    let tool = canonical_tool(tool);
     let candidate = format!("{tool}({detail})");
     patterns
         .iter()
-        .any(|p| pattern_matches(p, &candidate) || pattern_matches(p, tool))
+        .any(|p| {
+            let normalized = if let Some((name, suffix)) = p.split_once('(') {
+                format!("{}({suffix}", canonical_tool(name))
+            } else { canonical_tool(p).to_string() };
+            pattern_matches(&normalized, &candidate) || pattern_matches(&normalized, tool)
+        })
 }
 
 fn pattern_matches(pattern: &str, candidate: &str) -> bool {
@@ -296,7 +357,8 @@ mod tests {
             .into_iter()
             .find(|p| p.name == "workspace")
             .unwrap();
-        let ctl = PermissionController::with_preset(&preset);
+        let mut ctl = PermissionController::with_preset(&preset);
+        ctl.set_plan_mode(false);
         assert_eq!(
             ctl.evaluate("Bash", "rm -rf /"),
             PermissionDecision::Deny
@@ -322,5 +384,48 @@ mod tests {
         assert!(pattern_matches("Bash(git *)", "Bash(git status)"));
         assert!(pattern_matches("Write(src/**)", "Write(src/main.rs)"));
         assert!(!pattern_matches("Bash(git *)", "Bash(rm -rf /)"));
+    }
+
+    #[test]
+    fn deny_beats_global_and_session_allows_and_yolo_across_aliases() {
+        let defaults = PermissionDefaults { allow:vec!["*".into()],
+            deny:vec!["Write(private/**)".into(), "Bash(rm *)".into()], trust_repo:true };
+        let mut controller = PermissionController::from_defaults(&defaults, SandboxProfile::Workspace);
+        controller.set_session_rules(vec![PermissionRule { pattern:"*".into(), decision:PermissionDecision::Allow }]);
+        for yolo in [false, true] {
+            controller.set_plan_mode(false);
+            controller.set_always_approve(yolo);
+            for tool in ["Write", "Edit", "write_file", "fs/write_text_file", "fs/write"] {
+                assert_eq!(controller.evaluate(tool, "private/key"), PermissionDecision::Deny);
+            }
+            for tool in ["Bash", "Shell", "run_command", "run_terminal_command", "terminal/create"] {
+                assert_eq!(controller.evaluate(tool, "rm target"), PermissionDecision::Deny);
+            }
+        }
+        controller.set_session_rules(vec![PermissionRule { pattern:"Edit(src/**)".into(), decision:PermissionDecision::Deny }]);
+        assert_eq!(controller.evaluate("Write", "src/main.rs"), PermissionDecision::Deny);
+    }
+
+    #[test]
+    fn read_only_and_plan_are_ceilings_not_approval_suggestions() {
+        let defaults = PermissionDefaults { allow:vec!["*".into()], deny:vec![], trust_repo:true };
+        let mut readonly = PermissionController::from_defaults(&defaults, SandboxProfile::ReadOnly);
+        readonly.set_always_approve(true);
+        assert_eq!(readonly.evaluate("Write", "file"), PermissionDecision::Deny);
+        assert_eq!(readonly.evaluate("Bash", "echo hi"), PermissionDecision::Deny);
+        assert_eq!(readonly.evaluate("Read", "file"), PermissionDecision::Allow);
+        assert_eq!(readonly.evaluate("ExitPlanMode", "proposal"), PermissionDecision::Ask);
+        let plan = PermissionController::from_defaults(&defaults, SandboxProfile::Workspace);
+        assert_eq!(plan.evaluate("Edit", "file"), PermissionDecision::Deny);
+        assert_eq!(plan.evaluate("Read", "file"), PermissionDecision::Allow);
+    }
+
+    #[test]
+    fn cancellation_beats_even_read_and_control_requests() {
+        for effect in [Operation::Read, Operation::Write, Operation::Process, Operation::Control] {
+            assert_eq!(evaluate_policy("*", "", effect, PolicyContext {
+                read_only:false, plan_mode:false, cancelled:true, always_approve:true, auto_allow:true,
+            }, []), PermissionDecision::Deny);
+        }
     }
 }

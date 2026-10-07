@@ -1,7 +1,8 @@
 //! Newline-delimited JSON transport over process stdio.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::time::Duration;
 
 use serde_json::Value;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -23,7 +24,9 @@ pub enum NotificationEvent {
 }
 
 pub struct NdjsonTransport {
-    stdin: Mutex<ChildStdin>,
+    stdin: Mutex<Option<ChildStdin>>,
+    poisoned: AtomicBool,
+    write_timeout: Duration,
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<JsonRpcResponse>>>>,
     notification_tx: tokio::sync::mpsc::UnboundedSender<NotificationEvent>,
     agent_request_tx: tokio::sync::mpsc::UnboundedSender<IncomingAgentRequest>,
@@ -37,7 +40,9 @@ impl NdjsonTransport {
         agent_request_tx: tokio::sync::mpsc::UnboundedSender<IncomingAgentRequest>,
     ) -> Arc<Self> {
         let transport = Arc::new(Self {
-            stdin: Mutex::new(stdin),
+            stdin: Mutex::new(Some(stdin)),
+            poisoned: AtomicBool::new(false),
+            write_timeout: Duration::from_secs(5),
             pending: Arc::new(Mutex::new(HashMap::new())),
             notification_tx,
             agent_request_tx,
@@ -176,13 +181,7 @@ impl NdjsonTransport {
 
         let line = serde_json::to_string(&req)? + "\n";
         debug!(method, %id_str, "acp send");
-        let write_res: Result<()> = async {
-            let mut stdin = self.stdin.lock().await;
-            stdin.write_all(line.as_bytes()).await?;
-            stdin.flush().await?;
-            Ok(())
-        }
-        .await;
+        let write_res = self.write_line(&line).await;
         if let Err(e) = write_res {
             // Failed write leaks the pending entry — remove it so a later
             // response for a reused id can't match, and callers fail fast.
@@ -200,10 +199,7 @@ impl NdjsonTransport {
             error: None,
         };
         let line = serde_json::to_string(&resp)? + "\n";
-        let mut stdin = self.stdin.lock().await;
-        stdin.write_all(line.as_bytes()).await?;
-        stdin.flush().await?;
-        Ok(())
+        self.write_line(&line).await
     }
 
     pub async fn send_error_response(
@@ -223,10 +219,59 @@ impl NdjsonTransport {
             }),
         };
         let line = serde_json::to_string(&resp)? + "\n";
-        let mut stdin = self.stdin.lock().await;
-        stdin.write_all(line.as_bytes()).await?;
-        stdin.flush().await?;
-        Ok(())
+        self.write_line(&line).await
+    }
+
+    /// A stalled peer must not hold the authority gate forever. Any failed or
+    /// interrupted line poisons the stream: a partial NDJSON record cannot be
+    /// followed by a fresh permission grant. Drop stdin to close the pipe.
+    async fn write_line(&self, line: &str) -> Result<()> {
+        if self.poisoned.load(Ordering::Acquire) { return Err(AcpError::ChannelClosed); }
+        let mut stdin = match tokio::time::timeout(self.write_timeout, self.stdin.lock()).await {
+            Ok(guard) => guard,
+            Err(_) => {
+                self.poisoned.store(true, Ordering::Release);
+                self.pending.lock().await.clear();
+                return Err(AcpError::Timeout("ACP stdin lock; transport closed".into()));
+            }
+        };
+        if self.poisoned.load(Ordering::Acquire) {
+            stdin.take();
+            return Err(AcpError::ChannelClosed);
+        }
+        struct IncompleteWrite<'a> {
+            pipe: &'a mut Option<ChildStdin>,
+            poisoned: &'a AtomicBool,
+            completed: bool,
+        }
+        impl Drop for IncompleteWrite<'_> {
+            fn drop(&mut self) {
+                if !self.completed {
+                    self.poisoned.store(true, Ordering::Release);
+                    self.pipe.take();
+                }
+            }
+        }
+        let mut write = IncompleteWrite { pipe: &mut stdin, poisoned: &self.poisoned, completed: false };
+        let result: Result<()> = match write.pipe.as_mut() {
+            Some(pipe) => match tokio::time::timeout(self.write_timeout, async {
+                pipe.write_all(line.as_bytes()).await?;
+                pipe.flush().await
+            }).await {
+                Ok(result) => result.map_err(AcpError::Io),
+                Err(_) => Err(AcpError::Timeout("ACP stdin write; transport closed".into())),
+            },
+            None => Err(AcpError::ChannelClosed),
+        };
+        write.completed = result.is_ok();
+        drop(write);
+        if result.is_err() || self.poisoned.load(Ordering::Acquire) {
+            self.poisoned.store(true, Ordering::Release);
+            stdin.take();
+            self.pending.lock().await.clear();
+            return result.and(Err(AcpError::ChannelClosed));
+        }
+        result
     }
 
     pub fn unwrap_response(resp: JsonRpcResponse) -> Result<Value> {
@@ -261,10 +306,7 @@ impl NdjsonTransport {
             params,
         };
         let line = serde_json::to_string(&n)? + "\n";
-        let mut stdin = self.stdin.lock().await;
-        stdin.write_all(line.as_bytes()).await?;
-        stdin.flush().await?;
-        Ok(())
+        self.write_line(&line).await
     }
 }
 
@@ -273,6 +315,42 @@ mod tests {
     use super::*;
     use std::{process::Stdio, time::Duration};
     use tokio::sync::oneshot::error::TryRecvError;
+
+    #[tokio::test]
+    async fn non_draining_peer_times_out_and_cannot_receive_a_later_grant() {
+        let mut child = tokio::process::Command::new("/bin/sleep").arg("30")
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).kill_on_drop(true).spawn().unwrap();
+        let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (requests, _request_rx) = tokio::sync::mpsc::unbounded_channel();
+        let transport = NdjsonTransport::new(child.stdin.take().unwrap(), child.stdout.take().unwrap(), notifications, requests);
+        let error = tokio::time::timeout(Duration::from_secs(7), transport.send_response(
+            Value::String("blocked".into()), Value::String("x".repeat(2 * 1024 * 1024))))
+            .await.unwrap().unwrap_err();
+        assert!(matches!(error, AcpError::Timeout(_)));
+        assert!(transport.stdin.lock().await.is_none());
+        assert!(matches!(transport.send_response(Value::String("grant".into()), serde_json::json!({"allow":true})).await,
+            Err(AcpError::ChannelClosed)));
+        child.kill().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn cancelled_partial_write_closes_and_poisons_the_stream() {
+        let mut child = tokio::process::Command::new("/bin/sleep").arg("30")
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).kill_on_drop(true).spawn().unwrap();
+        let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (requests, _request_rx) = tokio::sync::mpsc::unbounded_channel();
+        let transport = NdjsonTransport::new(child.stdin.take().unwrap(), child.stdout.take().unwrap(), notifications, requests);
+        let writing = transport.clone();
+        let blocked = tokio::spawn(async move { writing.send_response(Value::Null, Value::String("x".repeat(2 * 1024 * 1024))).await });
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while transport.stdin.try_lock().is_ok() { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        blocked.abort(); let _ = blocked.await;
+        assert!(transport.stdin.lock().await.is_none());
+        assert!(transport.poisoned.load(Ordering::Acquire));
+        assert!(matches!(transport.notify("session/cancel", None).await, Err(AcpError::ChannelClosed)));
+        child.kill().await.unwrap();
+    }
 
     #[tokio::test]
     async fn rpc_completion_fence_cannot_overtake_prior_wire_notifications() {

@@ -2,6 +2,8 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::{collections::{HashMap, HashSet}, sync::Mutex};
+use grok_worktree::{WorkspaceCoordinator, WorkspaceLease};
 
 use chrono::Utc;
 use dashmap::DashMap;
@@ -21,9 +23,21 @@ use crate::options::{AgentMode, SpawnOptions};
 pub struct SessionRegistry {
     sessions: Arc<DashMap<Uuid, AgentHandle>>,
     starting: Arc<DashMap<Uuid, ()>>,
+    admitted: Arc<Mutex<HashSet<Uuid>>>,
+    workspace_leases: Mutex<HashMap<Uuid, WorkspaceLease>>,
+    mode_updates: Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>,
+    cleanup_updates: Mutex<HashMap<Uuid, Arc<tokio::sync::Mutex<()>>>>,
     event_bus: Arc<EventBus>,
     config: Arc<tokio::sync::RwLock<GrokConfig>>,
     grok_cli: Arc<GrokCli>,
+}
+
+struct AdmissionSlot { slots: Arc<Mutex<HashSet<Uuid>>>, id: Uuid, committed: bool }
+impl AdmissionSlot {
+    fn commit(&mut self) { self.committed = true; }
+}
+impl Drop for AdmissionSlot {
+    fn drop(&mut self) { if !self.committed { if let Ok(mut slots) = self.slots.lock() { slots.remove(&self.id); } } }
 }
 
 /// Everything the deferred ACP connect needs, detached from `&self` so it can
@@ -91,6 +105,10 @@ impl SessionRegistry {
         let registry = Arc::new(Self {
             sessions: Arc::new(DashMap::new()),
             starting: Arc::new(DashMap::new()),
+            admitted: Arc::new(Mutex::new(HashSet::new())),
+            workspace_leases: Mutex::new(HashMap::new()),
+            mode_updates: Mutex::new(HashMap::new()),
+            cleanup_updates: Mutex::new(HashMap::new()),
             event_bus: event_bus.clone(),
             config,
             grok_cli,
@@ -149,6 +167,12 @@ impl SessionRegistry {
             .await
     }
 
+    /// Host-only reviewed-role inheritance. This capability is never decoded
+    /// from a frontend owner ID, session metadata or provider request.
+    pub async fn spawn_build_role(&self, id: Uuid, cwd: &str, opts: SpawnOptions, owner: &WorkspaceLease) -> Result<()> {
+        self.spawn_agent_owned(id, cwd, opts, None, ConnectOpts::default(), true, Some(owner)).await
+    }
+
     /// Set the display label (smart thread name).
     pub fn set_label(&self, id: Uuid, label: &str) -> Result<()> {
         let mut entry = self
@@ -204,6 +228,11 @@ impl SessionRegistry {
         connect_opts: ConnectOpts,
         background: bool,
     ) -> Result<()> {
+        self.spawn_agent_owned(id, cwd, opts, created_at, connect_opts, background, None).await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn spawn_agent_owned(&self, id: Uuid, cwd: &str, opts: SpawnOptions, created_at: Option<chrono::DateTime<Utc>>, connect_opts: ConnectOpts, background: bool, owner: Option<&WorkspaceLease>) -> Result<()> {
         opts.validate().map_err(CoreError::InvalidOptions)?;
 
         let cwd_path = Path::new(cwd);
@@ -220,9 +249,15 @@ impl SessionRegistry {
 
         let cfg = self.config.read().await;
         let max = cfg.max_concurrent_sessions;
-        if self.sessions.len() >= max {
-            return Err(CoreError::MaxSessions(max));
-        }
+        let mut slot = {
+            let mut slots = self.admitted.lock().map_err(|_| CoreError::Internal("admission poisoned".into()))?;
+            if slots.contains(&id) { return Err(CoreError::InvalidOptions(format!("session {id} already admitted"))); }
+            if slots.len() >= max { return Err(CoreError::MaxSessions(max)); }
+            slots.insert(id);
+            AdmissionSlot { slots: self.admitted.clone(), id, committed: false }
+        };
+        let workspace = WorkspaceCoordinator::shared().session(cwd_path, owner).await
+            .map_err(|e| CoreError::InvalidOptions(e.to_string()))?;
 
         if opts.always_approve {
             warn!("spawning with always_approve=true — elevated trust mode");
@@ -266,6 +301,7 @@ impl SessionRegistry {
             status: SessionStatus::Starting,
             approval_mode,
             plan_mode: approval_mode == ApprovalMode::Plan,
+            read_only: opts.read_only,
             always_approve: approval_mode == ApprovalMode::Yolo,
             sandbox_profile: opts.sandbox_profile.clone(),
             mcp_servers: opts.mcp_server_names.clone(),
@@ -284,6 +320,7 @@ impl SessionRegistry {
                         &format!("mock-{id}"),
                         Some(self.event_bus.clone()),
                     );
+                    client.set_approval_mode(approval_mode).await?;
                     metadata.acp_session_id = Some(format!("mock-{id}"));
                     metadata.status = SessionStatus::Idle;
                     metadata.label = Some("mock".into());
@@ -309,6 +346,7 @@ impl SessionRegistry {
                         plan_mode: metadata.plan_mode,
                         always_approve: metadata.always_approve,
                         approval_mode,
+                        read_only: opts.read_only,
                         sandbox_profile: opts.sandbox_profile.clone(),
                         extra_env: Vec::new(),
                         deny_patterns,
@@ -380,6 +418,8 @@ impl SessionRegistry {
                         connect_opts,
                     };
                     self.starting.insert(id, ());
+                    self.workspace_leases.lock().map_err(|_| CoreError::Internal("workspace admission poisoned".into()))?.insert(id, workspace);
+                    slot.commit();
                     if background {
                         let starting = self.starting.clone();
                         let sessions = self.sessions.clone();
@@ -388,26 +428,27 @@ impl SessionRegistry {
                             let _ = connect_and_fill(sessions, starting, bus, id, pending).await;
                         });
                     } else {
-                        // Blocking (resume): propagate failure and drop the
-                        // placeholder so callers see a clean error.
-                        if let Err(e) = connect_and_fill(
+                        // Blocking resume propagates failure while retaining
+                        // the placeholder/lease until explicit cleanup.
+                        connect_and_fill(
                             self.sessions.clone(),
                             self.starting.clone(),
                             self.event_bus.clone(),
                             id,
                             pending,
                         )
-                        .await
-                        {
-                            self.sessions.remove(&id);
-                            return Err(e);
-                        }
+                        .await?;
                     }
                     info!(%id, cwd, background, "ACP session spawn initiated");
                     return Ok(());
                 }
             }
             AgentMode::Headless => {
+                grok_acp::ensure_native_policy_supported(opts.sandbox_profile.as_deref(), opts.read_only,
+                    approval_mode == ApprovalMode::Plan, !deny_patterns.is_empty(), "Grok headless")?;
+                if !opts.rules.is_empty() {
+                    return Err(CoreError::InvalidOptions("headless policy capability unavailable: rules are metadata and cannot enforce native tool restrictions".into()));
+                }
                 let prompt = opts.prompt.clone().unwrap_or_default();
                 let headless = HeadlessSpawnOptions {
                     model: Some(model),
@@ -435,11 +476,14 @@ impl SessionRegistry {
             AgentMode::Acp => "acp",
             AgentMode::Headless => "headless",
         };
+        let status = handle.metadata.status;
+        self.sessions.insert(id, handle);
+        self.workspace_leases.lock().map_err(|_| CoreError::Internal("workspace admission poisoned".into()))?.insert(id, workspace);
+        slot.commit();
         self.event_bus.emit_session_created(id, cwd, mode_str).await;
-        self.event_bus.emit_status(id, handle.metadata.status).await;
+        self.event_bus.emit_status(id, status).await;
 
         info!(%id, mode = mode_str, cwd, "session spawned");
-        self.sessions.insert(id, handle);
         Ok(())
     }
 
@@ -512,6 +556,18 @@ impl SessionRegistry {
     }
 
     pub async fn cancel_session(&self, id: Uuid) -> Result<()> {
+        if !self.sessions.contains_key(&id) { return Err(CoreError::SessionNotFound(id)); }
+        let lock = self.cleanup_updates.lock().map_err(|_| CoreError::Internal("cleanup gate poisoned".into()))?
+            .entry(id).or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone();
+        let _cleanup = lock.lock().await;
+        if !self.cleanup_updates.lock().map_err(|_| CoreError::Internal("cleanup gate poisoned".into()))?
+            .get(&id).is_some_and(|current| Arc::ptr_eq(current, &lock)) {
+            return Err(CoreError::SessionNotFound(id));
+        }
+        self.cancel_session_inner(id).await
+    }
+
+    async fn cancel_session_inner(&self, id: Uuid) -> Result<()> {
         let (acp, has_child) = {
             let mut entry = self
                 .sessions
@@ -525,10 +581,12 @@ impl SessionRegistry {
             client.cancel().await?;
         }
         if has_child {
-            if let Some(mut entry) = self.sessions.get_mut(&id) {
-                if let Some(child) = entry.child.take() {
-                    let mut c = child.lock().await;
-                    let _ = c.kill().await;
+            let child = self.sessions.get_mut(&id).and_then(|mut entry| entry.child.take());
+            if let Some(child) = child {
+                let result = child.lock().await.kill().await;
+                if let Err(error) = result {
+                    if let Some(mut entry) = self.sessions.get_mut(&id) { entry.child = Some(child); }
+                    return Err(error.into());
                 }
             }
         }
@@ -542,42 +600,45 @@ impl SessionRegistry {
     }
 
     pub async fn set_plan_mode(&self, id: Uuid, enabled: bool) -> Result<()> {
-        let client = {
-            let mut entry = self
-                .sessions
-                .get_mut(&id)
-                .ok_or(CoreError::SessionNotFound(id))?;
-            entry.metadata.plan_mode = enabled;
-            if enabled {
-                entry.metadata.always_approve = false;
-            }
-            entry.touch();
-            entry.acp_client.clone()
-        };
-        if let Some(client) = client {
-            let mode = if enabled { "plan" } else { "default" };
-            client.set_mode(mode).await?;
-        }
-        Ok(())
+        self.set_approval_mode(id, if enabled { ApprovalMode::Plan } else { ApprovalMode::Ask }).await
     }
 
     /// Switch a live session's approval stance (composer pills).
     pub async fn set_approval_mode(&self, id: Uuid, mode: ApprovalMode) -> Result<()> {
-        let client = {
-            let mut entry = self
-                .sessions
-                .get_mut(&id)
-                .ok_or(CoreError::SessionNotFound(id))?;
-            entry.metadata.approval_mode = mode;
-            entry.metadata.plan_mode = mode == ApprovalMode::Plan;
-            entry.metadata.always_approve = mode == ApprovalMode::Yolo;
-            entry.touch();
-            entry.acp_client.clone()
+        let lock = {
+            let mut locks = self.mode_updates.lock().map_err(|_| CoreError::Internal("mode transition gate poisoned".into()))?;
+            if !self.sessions.contains_key(&id) { return Err(CoreError::SessionNotFound(id)); }
+            locks.entry(id).or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone()
         };
-        if let Some(client) = client {
+        let expected_client = self.sessions.get(&id).ok_or(CoreError::SessionNotFound(id))?
+            .acp_client.clone().ok_or(CoreError::NotAcp)?;
+        let _transition = lock.lock().await;
+        let client = {
+            let entry = self
+                .sessions
+                .get(&id)
+                .ok_or(CoreError::SessionNotFound(id))?;
+            if entry.metadata.read_only && mode != ApprovalMode::Plan { return Err(CoreError::InvalidOptions("immutable read-only role cannot elevate permissions".into())); }
+            let client = entry.acp_client.clone().ok_or(CoreError::NotAcp)?;
+            if !Arc::ptr_eq(&client, &expected_client) {
+                return Err(CoreError::InvalidOptions("session generation changed before mode transition".into()));
+            }
+            client
+        };
+        {
             // Client-side gating is authoritative; the agent-side mode is
             // best-effort (most adapters don't advertise an auto mode).
-            client.set_approval_mode(mode).await;
+            client.set_approval_mode(mode).await?;
+            let applied = client.approval_mode().await;
+            let mut entry = self.sessions.get_mut(&id).ok_or(CoreError::SessionNotFound(id))?;
+            if !entry.acp_client.as_ref().is_some_and(|current| Arc::ptr_eq(current, &client)) {
+                return Err(CoreError::InvalidOptions("session generation changed during mode transition".into()));
+            }
+            entry.metadata.approval_mode = applied;
+            entry.metadata.plan_mode = applied == ApprovalMode::Plan;
+            entry.metadata.always_approve = applied == ApprovalMode::Yolo;
+            entry.touch();
+            drop(entry);
             let wanted = match mode {
                 ApprovalMode::Plan => "plan",
                 ApprovalMode::Auto => "auto",
@@ -605,28 +666,7 @@ impl SessionRegistry {
     }
 
     pub async fn set_always_approve(&self, id: Uuid, enabled: bool) -> Result<()> {
-        let client = {
-            let mut entry = self
-                .sessions
-                .get_mut(&id)
-                .ok_or(CoreError::SessionNotFound(id))?;
-            entry.metadata.always_approve = enabled;
-            if enabled {
-                entry.metadata.plan_mode = false;
-            }
-            entry.touch();
-            entry.acp_client.clone()
-        };
-        if let Some(client) = client {
-            // Client-side gating is the real mechanism; agent-side mode is
-            // best-effort (not every agent advertises a bypass mode).
-            client.set_always_approve(enabled);
-            let mode = if enabled { "always_approve" } else { "default" };
-            if let Err(e) = client.set_mode(mode).await {
-                tracing::warn!(error = %e, enabled, "agent-side always-approve mode not applied");
-            }
-        }
-        Ok(())
+        self.set_approval_mode(id, if enabled { ApprovalMode::Yolo } else { ApprovalMode::Ask }).await
     }
 
     pub async fn respond_approval(
@@ -651,17 +691,34 @@ impl SessionRegistry {
     }
 
     pub async fn remove_session(&self, id: Uuid) -> Result<()> {
+        if !self.sessions.contains_key(&id) && !self.starting.contains_key(&id) { return Ok(()); }
+        let lock = self.cleanup_updates.lock().map_err(|_| CoreError::Internal("cleanup gate poisoned".into()))?
+            .entry(id).or_insert_with(|| Arc::new(tokio::sync::Mutex::new(()))).clone();
+        let _cleanup = lock.lock().await;
+        if !self.cleanup_updates.lock().map_err(|_| CoreError::Internal("cleanup gate poisoned".into()))?
+            .get(&id).is_some_and(|current| Arc::ptr_eq(current, &lock)) { return Ok(()); }
         // A cancelled Starting placeholder can still own a detached handshake.
         // Retain it until handshake cleanup is observable, or return a retryable error.
         tokio::time::timeout(std::time::Duration::from_secs(120), async {
             while self.starting.contains_key(&id) { tokio::time::sleep(std::time::Duration::from_millis(25)).await; }
         }).await.map_err(|_| CoreError::Internal("native startup still pending; retry cleanup".into()))?;
-        let _ = self.cancel_session(id).await;
+        let cancelled = if self.sessions.contains_key(&id) { self.cancel_session_inner(id).await } else { Ok(()) };
         // cancel() only sends session/cancel — the grok child (and any MCP
         // servers it spawned) keeps running unless we kill it.
         let client = self.sessions.get(&id).and_then(|handle| handle.acp_client.clone());
-        if let Some(client) = client { client.shutdown().await?; }
+        if let Some(client) = client {
+            // A stopped transport can reject session/cancel; observed process
+            // shutdown is the cleanup boundary. A failed shutdown retains all
+            // handles and leases, independently of the cancel response.
+            client.shutdown().await?;
+        } else {
+            cancelled?;
+        }
         self.sessions.remove(&id);
+        self.workspace_leases.lock().map_err(|_| CoreError::Internal("workspace admission poisoned".into()))?.remove(&id);
+        self.admitted.lock().map_err(|_| CoreError::Internal("admission poisoned".into()))?.remove(&id);
+        self.mode_updates.lock().map_err(|_| CoreError::Internal("mode transition gate poisoned".into()))?.remove(&id);
+        self.cleanup_updates.lock().map_err(|_| CoreError::Internal("cleanup gate poisoned".into()))?.remove(&id);
         Ok(())
     }
 
@@ -672,13 +729,8 @@ impl SessionRegistry {
     pub async fn shutdown_all(&self) {
         let ids: Vec<Uuid> = self.sessions.iter().map(|e| *e.key()).collect();
         for id in ids {
-            if let Err(e) = self.cancel_session(id).await {
-                warn!(%id, error = %e, "error cancelling session during shutdown");
-            }
-            if let Some((_, handle)) = self.sessions.remove(&id) {
-                if let Some(client) = handle.acp_client {
-                    let _ = client.shutdown().await;
-                }
+            if let Err(e) = self.remove_session(id).await {
+                warn!(%id, error = %e, "shutdown unresolved; session admission retained");
             }
         }
     }
@@ -701,10 +753,11 @@ mod tests {
     #[tokio::test]
     async fn mock_session_lifecycle() {
         let reg = test_registry();
-        let id = reg.spawn_mock("/tmp").await.unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let id = reg.spawn_mock(cwd.path().to_str().unwrap()).await.unwrap();
         assert_eq!(reg.session_count(), 1);
         let snap = reg.get_snapshot(id).unwrap();
-        assert_eq!(snap.metadata.cwd, "/tmp");
+        assert_eq!(snap.metadata.cwd, cwd.path().to_str().unwrap());
         assert_eq!(snap.metadata.mode, AgentMode::Acp);
         reg.cancel_session(id).await.unwrap();
         assert_eq!(
@@ -718,7 +771,8 @@ mod tests {
     #[tokio::test]
     async fn removal_waits_for_detached_startup_ownership() {
         let reg = test_registry();
-        let id = reg.spawn_mock("/tmp").await.unwrap();
+        let cwd = tempfile::tempdir().unwrap();
+        let id = reg.spawn_mock(cwd.path().to_str().unwrap()).await.unwrap();
         reg.starting.insert(id, ());
         let removing = reg.clone();
         let task = tokio::spawn(async move { removing.remove_session(id).await });
@@ -731,10 +785,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn concurrent_cleanup_waits_and_cannot_release_owner_early() {
+        let reg = test_registry();
+        let cwd = tempfile::tempdir().unwrap();
+        let id = reg.spawn_mock(cwd.path().to_str().unwrap()).await.unwrap();
+        let gate = Arc::new(tokio::sync::Mutex::new(()));
+        reg.cleanup_updates.lock().unwrap().insert(id, gate.clone());
+        let held = gate.lock().await;
+        let removing = reg.clone();
+        let task = tokio::spawn(async move { removing.remove_session(id).await });
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        assert!(!task.is_finished());
+        assert!(WorkspaceCoordinator::shared().session(cwd.path(), None).await.is_err());
+        drop(held);
+        task.await.unwrap().unwrap();
+        assert!(WorkspaceCoordinator::shared().session(cwd.path(), None).await.is_ok());
+    }
+
+    #[tokio::test]
     async fn list_sessions() {
         let reg = test_registry();
-        let _a = reg.spawn_mock("/tmp").await.unwrap();
-        let _b = reg.spawn_mock("/tmp").await.unwrap();
+        let a = tempfile::tempdir().unwrap(); let b = tempfile::tempdir().unwrap();
+        let _a = reg.spawn_mock(a.path().to_str().unwrap()).await.unwrap();
+        let _b = reg.spawn_mock(b.path().to_str().unwrap()).await.unwrap();
         assert_eq!(reg.list_sessions().len(), 2);
     }
 
@@ -748,5 +821,109 @@ mod tests {
         assert!(opts.validate().is_err());
         opts.prompt = Some("do thing".into());
         assert!(opts.validate().is_ok());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn headless_unsupported_policy_is_rejected_before_marker_worker_launch() {
+        use std::os::unix::fs::PermissionsExt;
+        let cwd = tempfile::tempdir().unwrap();
+        let program = cwd.path().join("native-worker");
+        std::fs::write(&program, "#!/bin/sh\nprintf launched > \"$0.marker\"\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let config = Arc::new(tokio::sync::RwLock::new(GrokConfig::default()));
+        config.write().await.permissions.deny.clear();
+        let reg = SessionRegistry::new(shared_bus(), config.clone(), Arc::new(GrokCli::new(&program)));
+        let base = SpawnOptions { mode:AgentMode::Headless, prompt:Some("generated offline fixture".into()),
+            approval_mode:Some(ApprovalMode::Ask), plan_mode:false,
+            sandbox_profile:Some("unrestricted".into()), ..Default::default() };
+        let policies = [
+            SpawnOptions { approval_mode:Some(ApprovalMode::Plan), ..base.clone() },
+            SpawnOptions { sandbox_profile:Some("workspace".into()), ..base.clone() },
+            SpawnOptions { sandbox_profile:Some("strict".into()), ..base.clone() },
+            SpawnOptions { sandbox_profile:Some("read-only".into()), ..base.clone() },
+            SpawnOptions { read_only:true, ..base.clone() },
+            SpawnOptions { permission_deny:vec!["Write(*)".into()], ..base.clone() },
+            SpawnOptions { rules:vec!["Never mutate files".into()], ..base.clone() },
+        ];
+        for options in policies {
+            assert!(reg.spawn_agent(cwd.path().to_str().unwrap(), options).await.is_err());
+            assert_eq!(reg.session_count(), 0);
+            assert!(reg.admitted.lock().unwrap().is_empty());
+            assert!(!program.with_file_name("native-worker.marker").exists());
+        }
+        config.write().await.permissions.deny.push("Bash(*)".into());
+        assert!(reg.spawn_agent(cwd.path().to_str().unwrap(), base.clone()).await.is_err());
+        assert!(!program.with_file_name("native-worker.marker").exists());
+        config.write().await.permissions.deny.clear();
+        let id = reg.spawn_agent(cwd.path().to_str().unwrap(), base).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while !program.with_file_name("native-worker.marker").exists() { tokio::task::yield_now().await; }
+        }).await.unwrap();
+        reg.remove_session(id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn concurrent_admission_counts_pending_and_retains_cancelled_owner() {
+        let reg = test_registry();
+        reg.config.write().await.max_concurrent_sessions = 1;
+        let a = tempfile::tempdir().unwrap(); let b = tempfile::tempdir().unwrap();
+        let (left, right) = tokio::join!(reg.spawn_mock(a.path().to_str().unwrap()), reg.spawn_mock(b.path().to_str().unwrap()));
+        assert_eq!(usize::from(left.is_ok()) + usize::from(right.is_ok()), 1);
+        let id = left.or(right).unwrap();
+        reg.cancel_session(id).await.unwrap();
+        assert!(reg.spawn_mock(b.path().to_str().unwrap()).await.is_err());
+        reg.remove_session(id).await.unwrap();
+        assert!(reg.spawn_mock(b.path().to_str().unwrap()).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn failed_preflight_releases_slot_and_alias_cannot_start_second_owner() {
+        let reg = test_registry(); reg.config.write().await.max_concurrent_sessions = 1;
+        let a = tempfile::tempdir().unwrap();
+        let bad = SpawnOptions { model: Some("mock".into()), sandbox_profile: Some("misspelled".into()), ..Default::default() };
+        assert!(reg.spawn_agent(a.path().to_str().unwrap(), bad).await.is_err());
+        let id = reg.spawn_mock(a.path().to_str().unwrap()).await.unwrap();
+        reg.config.write().await.max_concurrent_sessions = 2;
+        assert!(reg.spawn_mock(a.path().join(".").to_str().unwrap()).await.is_err());
+        reg.cancel_session(id).await.unwrap();
+        assert!(reg.spawn_mock(a.path().to_str().unwrap()).await.is_err());
+        reg.remove_session(id).await.unwrap();
+        assert!(reg.spawn_mock(a.path().to_str().unwrap()).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn immutable_role_capability_and_mcp_cannot_be_forged_by_options() {
+        let reg = test_registry(); let a = tempfile::tempdir().unwrap();
+        let owner = WorkspaceCoordinator::shared().build(a.path().into(), a.path().into(), vec!["src".into()]).unwrap();
+        let mut opts: SpawnOptions = serde_json::from_value(json!({"model":"mock", "workspaceOwner":"fake", "projectRoot":a.path(),"isolateWorktree":false})).unwrap();
+        assert!(reg.spawn_agent(a.path().to_str().unwrap(), opts.clone()).await.is_err());
+        opts.read_only = true;
+        let id = Uuid::new_v4();
+        reg.spawn_build_role(id, a.path().to_str().unwrap(), opts.clone(), &owner).await.unwrap();
+        assert!(reg.set_always_approve(id, true).await.is_err());
+        assert!(reg.set_plan_mode(id, false).await.is_err());
+        assert!(reg.set_approval_mode(id, ApprovalMode::Ask).await.is_err());
+        reg.remove_session(id).await.unwrap();
+        opts.mcp_servers = vec![json!({"name":"filesystem"})];
+        assert!(reg.spawn_build_role(Uuid::new_v4(), a.path().to_str().unwrap(), opts, &owner).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn legacy_mode_commands_use_the_authoritative_policy_owner() {
+        let reg = test_registry(); let a = tempfile::tempdir().unwrap();
+        let id = reg.spawn_mock(a.path().to_str().unwrap()).await.unwrap();
+        let client = reg.sessions.get(&id).unwrap().acp_client.clone().unwrap();
+        assert_eq!(client.approval_mode().await, ApprovalMode::Plan);
+        reg.set_always_approve(id,true).await.unwrap();
+        assert_eq!(client.approval_mode().await,ApprovalMode::Yolo);
+        reg.set_plan_mode(id,true).await.unwrap();
+        assert_eq!(client.approval_mode().await,ApprovalMode::Plan);
+        let metadata = reg.get_snapshot(id).unwrap().metadata;
+        assert!(metadata.plan_mode && !metadata.always_approve);
+        assert_eq!(metadata.approval_mode,ApprovalMode::Plan);
+        reg.set_always_approve(id,false).await.unwrap();
+        assert_eq!(client.approval_mode().await,ApprovalMode::Ask);
+        assert!(!reg.get_snapshot(id).unwrap().metadata.plan_mode);
     }
 }

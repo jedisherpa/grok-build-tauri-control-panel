@@ -6,9 +6,9 @@ use serde_json::Value;
 /// JSON-RPC id may be string or number on the wire.
 pub fn id_key(id: &Value) -> String {
     match id {
-        Value::String(s) => s.clone(),
-        Value::Number(n) => n.to_string(),
-        other => other.to_string(),
+        Value::String(s) => format!("string:{s}"),
+        Value::Number(n) => format!("number:{n}"),
+        other => format!("other:{other}"),
     }
 }
 
