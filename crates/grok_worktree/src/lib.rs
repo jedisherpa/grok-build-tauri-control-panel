@@ -255,12 +255,88 @@ impl WorktreeManager {
         run_git(worktree_path, &["status", "--short"]).await
     }
 
-    /// Produce a full diff for the worktree.
+    /// Produce a full diff for the worktree, including untracked files.
+    ///
+    /// `git diff` / `git diff --cached` omit untracked paths (feature-deep2:
+    /// portal-spark.html was invisible). Append an untracked section from
+    /// `git status --short` plus a content preview for modest text files.
     pub async fn diff(&self, worktree_path: &Path) -> Result<String> {
-        let staged = run_git(worktree_path, &["diff", "--cached"]).await.unwrap_or_default();
+        let staged = run_git(worktree_path, &["diff", "--cached"])
+            .await
+            .unwrap_or_default();
         let unstaged = run_git(worktree_path, &["diff"]).await.unwrap_or_default();
-        Ok(format!("{staged}\n{unstaged}"))
+        let untracked = untracked_diff_section(worktree_path).await;
+        let mut parts = Vec::new();
+        if !staged.trim().is_empty() {
+            parts.push(staged);
+        }
+        if !unstaged.trim().is_empty() {
+            parts.push(unstaged);
+        }
+        if !untracked.trim().is_empty() {
+            parts.push(untracked);
+        }
+        Ok(parts.join("\n"))
     }
+}
+
+/// List untracked paths (status `??`) with a small content preview when safe.
+async fn untracked_diff_section(worktree_path: &Path) -> String {
+    let status = match run_git(
+        worktree_path,
+        &["status", "--short", "--untracked-files=all"],
+    )
+    .await
+    {
+        Ok(s) => s,
+        Err(_) => return String::new(),
+    };
+    let mut paths: Vec<String> = Vec::new();
+    for line in status.lines() {
+        let line = line.trim_end();
+        if let Some(path) = line.strip_prefix("?? ") {
+            let path = path.trim();
+            if path.is_empty() {
+                continue;
+            }
+            paths.push(path.to_string());
+        }
+    }
+    if paths.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("Untracked files:\n");
+    for path in paths {
+        if path.ends_with('/') {
+            out.push_str(&format!("  ?? {path}  (untracked directory)\n"));
+            continue;
+        }
+        let full = worktree_path.join(&path);
+        out.push_str(&format!("diff --git a/{path} b/{path}\n"));
+        out.push_str("new file mode 100644\n");
+        out.push_str(&format!("--- /dev/null\n+++ b/{path}\n"));
+        match tokio::fs::read(&full).await {
+            Ok(bytes) if bytes.len() <= 64 * 1024 && std::str::from_utf8(&bytes).is_ok() => {
+                let text = String::from_utf8_lossy(&bytes);
+                for line in text.lines() {
+                    out.push_str(&format!("+{line}\n"));
+                }
+                if !text.is_empty() && !text.ends_with('\n') {
+                    out.push('\n');
+                }
+            }
+            Ok(bytes) => {
+                out.push_str(&format!(
+                    "+[untracked binary or large file: {} bytes]\n",
+                    bytes.len()
+                ));
+            }
+            Err(e) => {
+                out.push_str(&format!("+[could not read: {e}]\n"));
+            }
+        }
+    }
+    out
 }
 
 fn validate_name(name: &str) -> Result<()> {
