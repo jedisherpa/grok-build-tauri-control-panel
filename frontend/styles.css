@@ -1467,3 +1467,74 @@ img.logo {
   min-height: 100px;
   overflow: auto;
 }
+
+/* play1 #24/#25 + round4 Play B — composer must stay reachable at ~960×670
+   and must sit above floating cubes/faces so Send can't be covered. */
+.composer-always-visible,
+#composer.composer {
+  position: sticky;
+  bottom: 0;
+  z-index: 20;
+  min-height: 120px;
+  flex-shrink: 0;
+  background: var(--bg-elev, #0f1724);
+  box-shadow: 0 -8px 24px #0008;
+  isolation: isolate;
+}
+.has-panel-cubes .workspace-main,
+.has-panel-cubes .col-center,
+.has-panel-cubes #view-session,
+.has-panel-cubes #view-world,
+.has-panel-cubes .spatial-workspace {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.has-panel-cubes #composer.composer {
+  margin-top: auto;
+}
+/* Reserve bottom chrome so sticky composer isn't eaten by window chrome */
+@media (max-height: 720px) {
+  #composer.composer {
+    min-height: 108px;
+  }
+  .spatial-workspace .narrative-panel {
+    max-height: 28%;
+    min-height: 72px;
+  }
+}
+@media (max-width: 1000px), (max-height: 700px) {
+  /* Prefer collapsing narrative over hiding Send */
+  .spatial-workspace .narrative-panel {
+    flex: 0 1 24%;
+    max-height: 22vh;
+  }
+  #composer.composer .composer-row textarea {
+    min-height: 44px;
+    max-height: 72px;
+  }
+}
+
+/* play1 #02 — Session tooltip must not cover History/Builds */
+.nav-item[title] { position: relative; }
+.nav-block { overflow: visible; }
+.nav-item:hover { z-index: 2; }
+
+/* Expanded right-rail cubes scroll inside themselves (play1 #14/#22) */
+.spatial-panel-cube[data-expanded="true"] {
+  max-height: min(42vh, 420px);
+}
+.spatial-panel-cube-body {
+  max-height: calc(100% - 32px);
+}
+
+/* round4 Play B D-037 — context faces must not permanently bury the working
+   surface / composer; keep them under the sticky composer band. */
+.spatial-thread-face {
+  z-index: 2;
+  max-height: min(52vh, 480px);
+}
+.spatial-has-faces #composer.composer,
+.has-panel-cubes #composer.composer {
+  z-index: 20;
+}
