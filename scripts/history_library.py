@@ -376,18 +376,21 @@ def import_export(c, path):
 
 def search(c, payload):
     query=payload.get('query','').strip()
-    source=payload.get('source','')
+    source=payload.get('source','') or ''
     params=[];conditions=[]
+    # Hide linked/subagent rows unless explicitly included. Treat NULL parent_id
+    # like '' so older rows are not silently dropped from the primary list.
     if not payload.get('include_subagents',False):
-        conditions.append("instr(t.origin_id,'/subagent/')=0 AND t.parent_id=''")
+        conditions.append("instr(t.origin_id,'/subagent/')=0 AND IFNULL(t.parent_id,'')=''")
     if source:
         conditions.append('t.source=?');params.append(source)
     if query:
         terms=re.findall(r'\w+',query,flags=re.UNICODE)
-        if not terms: return {'threads':[],'total':0}
-        # Quote each token rather than interpreting user input as FTS syntax.
-        conditions.append('t.id IN (SELECT thread_id FROM search WHERE search MATCH ?)')
-        params.append(' AND '.join('"'+x+'"' for x in terms))
+        if terms:
+            # Quote each token rather than interpreting user input as FTS syntax.
+            conditions.append('t.id IN (SELECT thread_id FROM search WHERE search MATCH ?)')
+            params.append(' AND '.join('"'+x+'"' for x in terms))
+        # Punctuation-only query used to return total=0 (feature-deep2). Treat as browse-all.
     where=' WHERE '+' AND '.join(conditions) if conditions else ''
     total=c.execute('SELECT count(*) FROM threads t'+where,params).fetchone()[0]
     offset=max(0,int(payload.get('offset',0)))

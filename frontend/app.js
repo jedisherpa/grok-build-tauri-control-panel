@@ -3254,14 +3254,10 @@ function holdComposerFocus(ms = 12000) {
       if (!sessionIsStarting()) return;
       const el = document.activeElement;
       if (el && el.id === "prompt") return;
-      if (el && (el.tagName === "TEXTAREA" || el.tagName === "INPUT") && el.id !== "prompt") {
-        // Steal back from rename / path inputs.
-        if (e.key === "Enter") {
-          e.preventDefault();
-          e.stopPropagation();
-          refocus();
-          return;
-        }
+      // feature-deep2: History / MCP / Memory / Builds inputs must keep their
+      // keystrokes. Only redirect orphan keys from chrome (not form fields).
+      if (el && (el.tagName === "TEXTAREA" || el.tagName === "INPUT" || el.tagName === "SELECT" || el.isContentEditable)) {
+        return;
       }
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       if (e.key.length === 1 || e.key === "Backspace" || e.key === "Enter") {

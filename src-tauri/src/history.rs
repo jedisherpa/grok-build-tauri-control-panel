@@ -59,12 +59,26 @@ pub async fn history_search(
     offset: u64,
     include_subagents: bool,
 ) -> Result<Value, String> {
-    run(
-        &state,
-        "search",
-        json!({"query":query,"source":source,"offset":offset,"include_subagents":include_subagents}),
-    )
-    .await
+    let payload = json!({
+        "query": query,
+        "source": source,
+        "offset": offset,
+        "include_subagents": include_subagents
+    });
+    let result = run(&state, "search", payload.clone()).await?;
+    // feature-deep2: leave a tiny receipt so empty-list bugs are diagnosable
+    // without DevTools (query/source/total/thread count).
+    let receipt = json!({
+        "payload": payload,
+        "total": result.get("total").cloned().unwrap_or(Value::Null),
+        "threads": result.get("threads").and_then(|t| t.as_array()).map(|a| a.len()).unwrap_or(0),
+    });
+    let path = state.paths.panel_dir.join("history/last_search.json");
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::write(&path, receipt.to_string());
+    Ok(result)
 }
 
 #[tauri::command]
