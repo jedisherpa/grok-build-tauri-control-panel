@@ -214,6 +214,14 @@ impl WorktreeManager {
         Ok(out.trim().is_empty())
     }
 
+    /// True when there are no modifications to **tracked** files (staged or
+    /// unstaged). Untracked paths are ignored — leftover agent deliverables in
+    /// the project folder (D-050) must not block Land merges.
+    pub async fn is_tracked_clean(&self, path: &Path) -> Result<bool> {
+        let out = run_git(path, &["status", "--porcelain", "-uno"]).await?;
+        Ok(out.trim().is_empty())
+    }
+
     pub async fn current_branch(&self, path: &Path) -> Result<String> {
         Ok(run_git(path, &["rev-parse", "--abbrev-ref", "HEAD"])
             .await?
@@ -515,6 +523,21 @@ locked
         assert!(!mgr.is_clean(&repo).await.unwrap());
         assert!(mgr.commit_all(&repo, "add b").await.unwrap());
         assert!(mgr.is_clean(&repo).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn tracked_clean_ignores_untracked() {
+        let (dir, repo) = temp_repo().await;
+        let mgr = test_manager(dir.path());
+        assert!(mgr.is_tracked_clean(&repo).await.unwrap());
+        std::fs::write(repo.join("untracked.txt"), "x\n").unwrap();
+        assert!(!mgr.is_clean(&repo).await.unwrap(), "untracked dirties is_clean");
+        assert!(
+            mgr.is_tracked_clean(&repo).await.unwrap(),
+            "untracked must not block Land"
+        );
+        std::fs::write(repo.join("a.txt"), "b\n").unwrap();
+        assert!(!mgr.is_tracked_clean(&repo).await.unwrap());
     }
 
     #[tokio::test]

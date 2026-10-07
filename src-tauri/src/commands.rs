@@ -1467,9 +1467,16 @@ pub async fn land_thread(
         .await
         .map_err(err)?;
 
-    if !state.worktrees.is_clean(&root).await.map_err(err)? {
+    // Untracked files in the project must not block Land (feature-deep left
+    // games/ in the project while the agent still needed Land from a worktree).
+    if !state
+        .worktrees
+        .is_tracked_clean(&root)
+        .await
+        .map_err(err)?
+    {
         return Err(format!(
-            "the project folder has uncommitted changes — commit or stash them in {} first",
+            "the project folder has uncommitted edits to tracked files — commit or stash them in {} first, then Land again (untracked files are OK)",
             root.display()
         ));
     }
