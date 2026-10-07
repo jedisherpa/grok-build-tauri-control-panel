@@ -220,6 +220,17 @@
 
   function idleStatus(p, now = Date.now()) {
     if (normallyFinished(p) || !turnActive(p) || p.phase === "wait") return p;
+    // No user prompt yet → never invent a "Completion unconfirmed" ghost turn.
+    const userSent = !!(
+      p.promptChars ||
+      (p.stagesSeen && p.stagesSeen.send) ||
+      p.toolCount ||
+      (p.toolsActive || 0) > 0 ||
+      p.phase === "reply"
+    );
+    if (!userSent) {
+      return emptyPresence();
+    }
     p.completionUnconfirmed = true;
     p.note = "Session idle · response completion unconfirmed";
     p.lastSignalAt = now;

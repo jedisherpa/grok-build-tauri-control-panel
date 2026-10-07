@@ -1436,3 +1436,34 @@ img.logo {
 .recall-select { display: flex; align-items: flex-start; gap: 10px; font-weight: 600; }
 .recall-text { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
 .recall-hash { overflow-wrap: anywhere; font-family: monospace; font-size: 11px; }
+
+
+/* llm-retry #08 — pending approvals must stay reachable in World view */
+.approval-world-visible,
+#transcript .t-block.approval.pending {
+  position: relative;
+  z-index: 6;
+  scroll-margin-bottom: 140px;
+  min-height: 120px;
+  background: color-mix(in srgb, var(--bg-elev) 92%, var(--warn) 8%);
+}
+.spatial-workspace #transcript,
+.has-panel-cubes #transcript {
+  overflow: auto;
+  min-height: 140px;
+  max-height: none;
+  flex: 1 1 auto;
+}
+.spatial-workspace .conversation-column,
+.has-panel-cubes .col-center .session-stack {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+/* Give conversation more of the center column so approval buttons aren't clipped */
+.spatial-workspace .narrative-panel {
+  flex: 0 1 32%;
+  max-height: 36%;
+  min-height: 100px;
+  overflow: auto;
+}

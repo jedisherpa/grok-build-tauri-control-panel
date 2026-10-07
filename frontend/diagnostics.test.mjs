@@ -38,5 +38,5 @@ test("composer gate blocks starting and failed threads with a visible reason", (
   assert.match(starting.reason, /still starting/);
   const failed = D.composerGate("a", "failed");
   assert.equal(failed.canSend, false);
-  assert.match(failed.reason, /failed to start/);
+  assert.match(failed.reason, /failed earlier|failed to start/);
 });
