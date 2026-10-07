@@ -42,6 +42,7 @@
   const compare = byId("joe-compare"), compareLabel = byId("joe-compare-label"), example = byId("joe-cdiss-example");
   const previousReviews = new Map();
   let busy = false, generation = 0, lastResult = null, showingExample = false;
+  let memoryReview = null;
   const currentThread = () => typeof state !== "undefined" ? state.selectedSession || null : null;
   function updateComparison() {
     const prior = previousReviews.get(currentThread());
@@ -68,6 +69,14 @@
     paragraph(parent, title, "joe-label");
     const ul = node("ul"); rows.forEach(v => ul.appendChild(node("li", v))); parent.appendChild(ul);
   }
+  const memoryArea = node("details", null, "joe-details");
+  memoryArea.hidden = true; memoryArea.open = true; guide.appendChild(memoryArea);
+  function clearMemoryContext(reason) {
+    if (!memoryReview) return;
+    memoryReview = null; memoryArea.hidden = true; memoryArea.replaceChildren();
+    invalidate();
+    if (reason) status.textContent = reason;
+  }
   async function checkService() {
     try {
       const service = await invoke("joe_status");
@@ -83,6 +92,7 @@
   guide.addEventListener("toggle", () => { if (guide.open && !busy) checkService(); });
   byId("joe-refresh-service").addEventListener("click", () => { if (!busy) checkService(); });
   document.addEventListener("bomb-code:thread-selected", () => {
+    clearMemoryContext("Thread changed. Prepare selected memory again for this thread.");
     generation++; lastResult = null; showingExample = false; output.replaceChildren();
     if (compare) compare.checked = false;
     updateComparison();
@@ -90,6 +100,9 @@
     guide.dispatchEvent(new CustomEvent("bomb-code:joe-interpretation", { bubbles: true, detail: { schema: "bomb-code/joe-visual-state/v1", status: "invalidated", reason: "thread-changed", result: null } }));
   });
   function invalidate() {
+    if (memoryReview && memoryReview.question !== passage.value) {
+      memoryReview = null; memoryArea.hidden = true; memoryArea.replaceChildren();
+    }
     generation++;
     if (lastResult || showingExample) {
       lastResult = null; showingExample = false;
@@ -102,6 +115,7 @@
   passage.addEventListener("input", invalidate);
   language.addEventListener("input", invalidate);
   byId("joe-copy-composer").addEventListener("click", () => {
+    clearMemoryContext();
     passage.value = byId("prompt").value;
     invalidate();
     status.textContent = "Copied the unsent message. Nothing has been sent.";
@@ -109,8 +123,25 @@
   });
   globalThis.WizardJoeGuide = Object.freeze({
     setContextValidator(validate) { contextValid = typeof validate === "function" ? validate : () => true; },
-    setPassage(value, message) { invalidate(); passage.value = value; status.textContent = message || "Passage prepared locally."; },
+    setPassage(value, message) { clearMemoryContext(); invalidate(); passage.value = value; status.textContent = message || "Passage prepared locally."; },
+    clearMemoryContext,
+    setMemoryContext(prepared) {
+      if (!text(prepared?.receiptId) || !text(prepared.question) || prepared.context?.schema !== "bomb-code/recalled-evidence/v1" || !list(prepared.context.evidence).length) throw new Error("Prepared recall context is invalid.");
+      clearMemoryContext(); invalidate(); passage.value = prepared.question;
+      memoryReview = { receiptId: prepared.receiptId, question: prepared.question };
+      if (compare) compare.checked = false;
+      memoryArea.replaceChildren(node("summary", "Selected memory context · included only when you Analyze"));
+      paragraph(memoryArea, `Topic: ${text(prepared.context.topic) || "Not narrowed by topic"}. ${prepared.context.notice}`);
+      prepared.context.evidence.forEach(item => {
+        const source = details(memoryArea, `${text(item.title) || text(item.source)} · ${text(item.role) || "note"}`);
+        paragraph(source, item.text, "joe-source-text");
+        paragraph(source, `Citation: ${item.citationId} · source: ${item.source} · thread: ${item.threadId || "saved note"} · message: ${item.messageId || item.noteId} · span: [${item.span?.start}, ${item.span?.end}) · coverage: ${item.coverage}`);
+      });
+      memoryArea.hidden = false; memoryArea.open = true; guide.open = true;
+      status.textContent = "Question and selected historical context prepared locally. Analyze sends both to the displayed provider; sources are checked again first.";
+    },
     invalidateContext(reason) {
+      clearMemoryContext();
       generation++; lastResult = null; showingExample = false; output.replaceChildren();
       status.textContent = reason;
       guide.dispatchEvent(new CustomEvent("bomb-code:joe-interpretation", { bubbles: true, detail: { schema: "bomb-code/joe-visual-state/v1", status: "invalidated", reason: "context-changed", result: null } }));
@@ -165,10 +196,15 @@
       paragraph(section, question.reason);
       paragraph(section, `Origin: ${question.origin || "guide-proposed"} · readings: ${list(question.readingIds).join(", ") || "unreported"} · atoms: ${list(question.atomIds).join(", ") || "unreported"}`);
       const button = node("button", "Add question to unsent message", "btn ghost"); button.type = "button";
-      button.addEventListener("click", () => {
+      button.addEventListener("click", async () => {
         if (lastResult !== result || !sameInput(result, passage.value, language.value.trim(), result.threadId)) return;
         if ((typeof state !== "undefined" ? state.selectedSession || null : null) !== (result.threadId || null)) { status.textContent = "This review belongs to another thread. Select that thread or analyze again before drafting."; return; }
         if (!contextValid(result.sentence, result.threadId || null)) { status.textContent = "Thread context changed. Prepare a current review before drafting this question."; return; }
+        if (result.memoryEvidence?.receiptId) {
+          try { await invoke("memory_recall", { action: "validate", payload: { receiptId: result.memoryEvidence.receiptId } }); }
+          catch (error) { clearMemoryContext("Selected evidence changed. Prepare a current review before drafting."); return; }
+          if (lastResult !== result || !sameInput(result, passage.value, language.value.trim(), currentThread()) || !contextValid(result.sentence, result.threadId || null)) return;
+        }
         const composer = byId("prompt");
         composer.value = appendDraft(composer.value, question.question);
         composer.dispatchEvent(new Event("input", { bubbles: true }));
@@ -264,6 +300,7 @@
     const threadId = typeof state !== "undefined" ? state.selectedSession || null : null;
     if (!contextValid(sentence, threadId)) { status.textContent = "Thread context changed. Prepare a current review before analyzing."; return; }
     const compareRequestId = compare?.checked ? previousReviews.get(threadId) || null : null;
+    const memoryEvidenceId = memoryReview?.question === sentence ? memoryReview.receiptId : null;
     invalidate();
     const current = ++generation;
     busy = true; analyze.disabled = true; analyze.textContent = "Analyzing…";
@@ -272,8 +309,13 @@
     lastResult = null; output.replaceChildren();
     status.textContent = "Preparing source candidates and a model-proposed reading. No coding tools are running for this review.";
     try {
-      const result = await invoke("joe_analyze", { sentence, language: lang, threadId, compareRequestId });
+      const result = await invoke("joe_analyze", { sentence, language: lang, threadId, compareRequestId, memoryEvidenceId });
       if (current !== generation || !contextValid(sentence, threadId) || !sameInput(result, passage.value, language.value.trim(), typeof state !== "undefined" ? state.selectedSession || null : null)) { status.textContent = "Input or thread context changed while the review was running. Prepare or analyze again for a current reading."; return; }
+      if (memoryEvidenceId) {
+        if (result.memoryEvidence?.receiptId !== memoryEvidenceId) throw new Error("The returned memory receipt does not match this review.");
+        await invoke("memory_recall", { action: "validate", payload: { receiptId: memoryEvidenceId } });
+        if (current !== generation || !contextValid(sentence, threadId) || !sameInput(result, passage.value, language.value.trim(), currentThread())) return;
+      }
       render(result); lastResult = result;
       if (threadId && continuityView(result.cdiss).available && typeof result.requestId === "string") {
         previousReviews.delete(threadId); previousReviews.set(threadId, result.requestId);
@@ -282,6 +324,7 @@
       status.textContent = result.status === "interpretation-unavailable" ? "Interpretation unavailable. Its failure receipt is retained." : "Review ready. Meanings and questions remain proposals.";
       guide.dispatchEvent(new CustomEvent("bomb-code:joe-interpretation", { bubbles: true, detail: { schema: "bomb-code/joe-visual-state/v1", status: result.status, result } }));
     } catch (error) {
+      if (memoryEvidenceId) clearMemoryContext();
       output.replaceChildren(); lastResult = null;
       status.textContent = `Passage review unavailable: ${String(error)}`;
     } finally { busy = false; analyze.disabled = false; analyze.textContent = "Analyze passage"; if (example) example.disabled = false; updateComparison(); }

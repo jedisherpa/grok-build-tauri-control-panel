@@ -106,6 +106,7 @@
     }
     function open(value) { drawer.hidden = !value; button.setAttribute('aria-expanded', String(value)); if (value) { refresh(); close.focus(); } else button.focus(); }
     listen(button, 'click', () => open(drawer.hidden)); listen(close, 'click', () => open(false));
+    listen(doc, 'bomb-code:open-joe', () => { open(true); if (original) original.open = true; });
     listen(drawer, 'keydown', event => { if (event.key === 'Escape') { event.preventDefault(); open(false); } });
     listen(outcome, 'input', () => { if (selected) { goals[selected] = clip(outcome.value, 2000); try { win.localStorage.setItem('bomb-code:joe-outcomes:v1', JSON.stringify(goals)); } catch { /* This run still retains the goal. */ } } refresh(); });
     listen(corner, 'change', () => { root.dataset.corner = corner.value; try { win.localStorage.setItem('bomb-code:joe-corner', corner.value); } catch { /* Position remains usable. */ } });

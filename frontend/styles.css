@@ -1418,3 +1418,12 @@ img.logo {
 .builds-dependency { display: block; width: 100%; margin: 6px 0; text-align: left; white-space: normal; overflow-wrap: anywhere; font-size: 11px; line-height: 1.6; }
 
 .collaboration-pagination { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; margin: 8px 0; }
+/* Cited recall shares the existing Memory surface. */
+.recall-panel { margin-bottom: 28px; padding-bottom: 22px; border-bottom: 1px solid var(--border, #333); }
+.recall-panel h2 { margin: 0 0 12px; }
+.recall-panel .toolbar { flex-wrap: wrap; }
+.recall-panel .grow { min-width: 240px; }
+.recall-results { display: grid; gap: 12px; margin: 16px 0; }
+.recall-select { display: flex; align-items: flex-start; gap: 10px; font-weight: 600; }
+.recall-text { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
+.recall-hash { overflow-wrap: anywhere; font-family: monospace; font-size: 11px; }

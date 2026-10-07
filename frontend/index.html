@@ -342,6 +342,31 @@ tests/feature" spellcheck="false" required></textarea><span class="builds-help">
 
         <section id="view-memory" class="view">
           <div class="pane-pad">
+            <section class="recall-panel" aria-label="Recall from saved notes and conversations">
+              <h2>Recall from your history</h2>
+              <p class="muted">Find passages by wording and meaning. Local Nomic vectors and keyword search retain citations; old instructions and approvals remain historical evidence.</p>
+              <div class="toolbar">
+                <input id="recall-query" type="search" class="grow" maxlength="1200" placeholder="What are you trying to understand or remember?" aria-label="Memory question" />
+                <button id="recall-search" class="btn primary">Search memory</button>
+              </div>
+              <div class="toolbar">
+                <input id="recall-topic" type="text" maxlength="200" placeholder="Topic words (optional)" aria-label="Topic words" />
+                <select id="recall-source" aria-label="Recall source"><option value="">Notes and conversations</option><option value="notes">Saved notes</option><option value="history">Imported conversations</option><option value="chatgpt">ChatGPT</option><option value="codex">Codex</option><option value="claude_code">Claude Code</option><option value="grok">Grok</option><option value="claude">Claude app</option></select>
+                <select id="recall-scope" aria-label="Saved note scope"><option value="">All saved-note scopes</option></select>
+              </div>
+              <p class="muted">Topic words narrow the results by literal terms. Note scope filters saved notes; conversation sources remain controlled by the source selector.</p>
+              <div class="toolbar">
+                <button id="recall-index" class="btn">Build / refresh local index</button>
+                <button id="recall-embed" class="btn">Index local vectors</button>
+                <button id="recall-stop" class="btn ghost" disabled>Pause after this batch</button>
+                <button id="recall-refresh" class="btn ghost">Check coverage</button>
+              </div>
+              <p id="recall-status" role="status">Recall is ready to check.</p>
+              <details><summary>Coverage and sources</summary><p id="recall-coverage" class="muted"></p></details>
+              <div id="recall-results" class="recall-results"></div>
+              <button id="recall-prepare" class="btn" disabled>Prepare selected context for Joe</button>
+              <p class="muted">Preparation stays local. Inspect the question and selected context in Joe, then choose Analyze to send them to the displayed provider. Search does not save new notes or run coding tools.</p>
+            </section>
             <div class="toolbar">
               <select id="mem-scope" title="Scope — which sessions see these notes"></select>
               <button id="btn-mem-digest" class="btn"
@@ -592,6 +617,7 @@ tests/feature" spellcheck="false" required></textarea><span class="builds-help">
     <script src="app.js"></script>
     <script src="history.js"></script>
     <script src="wizard-joe.js"></script>
+    <script src="memory-recall.js"></script>
     <script src="collaboration.js"></script>
     <script src="builds.js"></script>
     <script src="spatial-world.js"></script>

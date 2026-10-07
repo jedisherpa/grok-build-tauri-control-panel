@@ -6,6 +6,7 @@ mod devserver;
 mod explainer;
 mod haven;
 mod history;
+mod memory_recall;
 mod state;
 mod wizard_joe;
 
@@ -78,6 +79,7 @@ pub fn run() {
             wizard_joe::joe_status,
             wizard_joe::joe_analyze,
             wizard_joe::joe_cdiss_example,
+            memory_recall::memory_recall,
             builds::get_build_concurrency,
             builds::set_build_concurrency,
             builds::list_builds,

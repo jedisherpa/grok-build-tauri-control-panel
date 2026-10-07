@@ -123,8 +123,10 @@ const emit = x => process.stdout.write(JSON.stringify(x)+'\n');
    return reply.text;
  }};
  const bridge=new SourceMapBridge({workspaceRoot:input.referenceRoot,python:input.python,graphPath:path.join(input.referenceRoot,'semantic_e8/outputs/aligned_graph.json'),modelPath:path.join(input.referenceRoot,'semantic_e8/outputs/model.json')});
+ const context={task_anchor:'Clarify the selected coding request',host:{thread_id:input.threadId||null}};
+ if(input.memoryContext){context.task_anchor='Clarify the current question within the user-selected topic and cited historical evidence';context.recalled_evidence=input.memoryContext;}
  const interpretation=await interpretWithAgent(agent,{sentence:input.sentence,language:input.language,
- context:{task_anchor:'Clarify the selected coding request',host:{thread_id:input.threadId||null}},latticeScale:8,bridge});
+ context,latticeScale:8,bridge});
  if(interpretation.execution){
   interpretation.execution.host_generation_policy={system_prompt_delivery:'prefix-to-provider-prompt; CLI verbatim',reasoning_effort:'low',provider_timeout_seconds:180,generation_options:'Requested temperature and maxTokens are not applied; remaining CLI defaults',tool_free:true};
   for(const call of interpretation.execution.calls||[]) call.delivered_prompt_sha256=digest(identity+'\n\n'+call.prompt);
@@ -227,6 +229,7 @@ async fn run_reader(
     language: &str,
     thread_id: &Option<String>,
     model: &str,
+    memory_context: &Option<Value>,
 ) -> Result<Value, String> {
     let mut child = Command::new(NODE)
         .args(["-e", RUNNER])
@@ -239,7 +242,7 @@ async fn run_reader(
         .map_err(|_| "Could not start the local semantic reader")?;
     let mut input = child.stdin.take().ok_or("Reader input is unavailable")?;
     let mut output = BufReader::new(child.stdout.take().ok_or("Reader output is unavailable")?);
-    let request = json!({"sentence":sentence,"language":language,"threadId":thread_id,"referenceRoot":REFERENCE,"manifestSha256":MANIFEST_SHA,"python":PYTHON,"model":model});
+    let request = json!({"sentence":sentence,"language":language,"threadId":thread_id,"referenceRoot":REFERENCE,"manifestSha256":MANIFEST_SHA,"python":PYTHON,"model":model,"memoryContext":memory_context});
     input
         .write_all(format!("{request}\n").as_bytes())
         .await
@@ -345,6 +348,7 @@ pub async fn joe_analyze(
     language: String,
     thread_id: Option<String>,
     compare_request_id: Option<String>,
+    memory_evidence_id: Option<String>,
 ) -> Result<Value, String> {
     validate_input(&sentence, &language, &thread_id)?;
     if let Some(id) = &thread_id {
@@ -360,10 +364,25 @@ pub async fn joe_analyze(
     BUSY.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
         .map_err(|_| "Joe is already analyzing a passage; wait for its result")?;
     let _guard = AnalysisGuard;
+    // Re-materialize cited context at the provider boundary; frontend text is
+    // never proof that an indexed source is still current.
+    let memory_context = match memory_evidence_id.as_deref() {
+        Some(id) => {
+            Some(crate::memory_recall::validated_context(&state, id, Some(&sentence)).await?)
+        }
+        None => None,
+    };
     let request_id = Uuid::new_v4();
     let run = tokio::time::timeout(
         Duration::from_secs(780),
-        run_reader(&state, &sentence, &language, &thread_id, &model),
+        run_reader(
+            &state,
+            &sentence,
+            &language,
+            &thread_id,
+            &model,
+            &memory_context,
+        ),
     )
     .await;
     let (interpretation, reference, error) = match run {
@@ -402,6 +421,10 @@ pub async fn joe_analyze(
     }
     let path = dir.join(format!("{request_id}.json"));
     let mut result = json!({"schema":"bomb-code/joe-result/v1","requestId":request_id,"threadId":thread_id,"sentence":sentence,"language":language,"status":status,"provider":"grok","model":model,"guide":{"identityId":"bomb-code:wizard-joe","roleVersion":"manual-clarification-guide/v1"},"interpretation":interpretation,"reference":reference,"referenceRequested":{"root":REFERENCE,"manifestSha256":MANIFEST_SHA},"runtime":{"pythonPath":PYTHON,"nodePath":NODE},"clarifications":questions,"receiptPath":path,"error":error,"at":chrono::Utc::now(),"authority":{"toolsDispatched":false,"approvalsGranted":false,"memoryCommitted":false}});
+    if let Some(context) = memory_context {
+        result["memoryEvidence"] = json!({"receiptId":memory_evidence_id,"context":context,
+            "status":"source-validated-before-provider-call","authority":"historical evidence; no current permission"});
+    }
     let prior = compare_request_id
         .as_deref()
         .map(|id| previous_review(&dir, id, &thread_id));

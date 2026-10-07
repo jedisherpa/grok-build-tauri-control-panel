@@ -4134,6 +4134,7 @@ async function refreshMemoryView() {
       }
     };
   });
+  window.MemoryRecall?.refreshStatus();
 }
 
 $("mem-scope") && ($("mem-scope").onchange = refreshMemoryView);

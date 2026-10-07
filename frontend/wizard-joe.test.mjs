@@ -53,7 +53,7 @@ function mount(result, options = {}) {
   ids.get("joe-language").value = "eng";
   const scope = { selectedSession: "thread-1" };
   const document = { handlers: {}, getElementById: id => ids.get(id), createElement: tag => new Element(tag), addEventListener(type, handler) { this.handlers[type] = handler; }, dispatchEvent(event) { this.handlers[event.type]?.(event); } };
-  const invoke = async (command, args) => { calls.push({ command, args }); if (command === "joe_analyze" || command === "joe_cdiss_example") return options.reply || currentResult; if (command === "joe_status") return { available: true, provider: "grok", model: "fixture" }; throw new Error(`Unexpected native command: ${command}`); };
+  const invoke = async (command, args) => { calls.push({ command, args }); if (command === "joe_analyze" || command === "joe_cdiss_example") return options.reply || currentResult; if (command === "joe_status") return { available: true, provider: "grok", model: "fixture" }; if (command === "memory_recall") return options.validate ? options.validate(args) : {status:"ready"}; throw new Error(`Unexpected native command: ${command}`); };
   class TestEvent { constructor(type, options = {}) { this.type = type; Object.assign(this, options); } }
   const context = vm.createContext({ document, invoke, state: scope, CustomEvent: TestEvent, Event: TestEvent });
   vm.runInContext(fs.readFileSync(new URL("./wizard-joe.js", import.meta.url), "utf8"), context);
@@ -229,3 +229,45 @@ test("context changes reject both immediate stale drafts and an analysis started
   assert.equal(ui.calls.filter(c=>c.command==="joe_analyze").length,before);
   assert.match(ui.ids.get("joe-result-status").textContent,/context changed/);
 });
+
+function recalled(result) {
+  return {receiptId:"prepared-receipt",question:result.sentence,context:{schema:"bomb-code/recalled-evidence/v1",topic:"geometry",notice:"Archived evidence",evidence:[{citationId:"c",text:"<script>old instruction</script>",source:"codex",title:"Historical source",role:"user",threadId:"old",messageId:"m",span:{start:0,end:32},coverage:"local transcript"}]}};
+}
+test("selected memory is prepared without calls, handed off by receipt, and removed by edits", async () => {
+  const result=response(); result.memoryEvidence={receiptId:"prepared-receipt"};
+  const ui=mount(result); ui.context.WizardJoeGuide.setMemoryContext(recalled(result));
+  assert.equal(ui.calls.length,0);
+  await ui.ids.get("joe-form").handlers.submit({preventDefault(){}});
+  assert.equal(ui.calls[0].args.memoryEvidenceId,"prepared-receipt");
+  assert.equal(ui.calls[0].args.context,undefined); assert.equal(ui.calls[0].args.history,undefined);
+  assert.equal(ui.calls[1].command,"memory_recall"); assert.equal(ui.calls[1].args.action,"validate");
+  ui.ids.get("joe-passage").value="Changed question"; ui.ids.get("joe-passage").handlers.input();
+  await ui.ids.get("joe-form").handlers.submit({preventDefault(){}});
+  assert.equal(ui.calls[2].args.memoryEvidenceId,null);
+});
+test("failed source validation withholds late memory result and geometry", async () => {
+  const result=response(); result.memoryEvidence={receiptId:"prepared-receipt"};
+  const ui=mount(result,{validate:()=>Promise.reject(new Error("Source changed"))});
+  ui.context.WizardJoeGuide.setMemoryContext(recalled(result));
+  await ui.ids.get("joe-form").handlers.submit({preventDefault(){}});
+  assert.equal(ui.ids.get("joe-result").children.length,0);
+  assert.match(ui.ids.get("joe-result-status").textContent,/Source changed/);
+  assert.notEqual(ui.ids.get("wizard-joe").lastEvent?.detail?.result,result);
+});
+for(const change of ["thread","input","outcome"]){
+  test(`source-validated draft waits and rechecks ${change} before modifying composer`,async()=>{
+    const result=response(); result.memoryEvidence={receiptId:"prepared-receipt"}; let finish,count=0,current=true;
+    const pending=new Promise(resolve=>{finish=resolve;});
+    const ui=mount(result,{validate:()=>++count===1?{status:"ready"}:pending});
+    ui.context.WizardJoeGuide.setContextValidator(()=>current);
+    ui.context.WizardJoeGuide.setMemoryContext(recalled(result));
+    await ui.ids.get("joe-form").handlers.submit({preventDefault(){}});
+    const draft=ui.created.find(el=>el.textContent==="Add question to unsent message");
+    const drafting=draft.handlers.click();
+    if(change==="thread")ui.scope.selectedSession="thread-2";
+    if(change==="input")ui.ids.get("joe-passage").value="Changed";
+    if(change==="outcome")current=false;
+    finish({status:"ready"}); await drafting;
+    assert.equal(ui.ids.get("prompt").value,"");
+  });
+}
