@@ -290,7 +290,18 @@
     }); observer.observe(root); cleanup.push(() => observer.disconnect());
     timer = win.setInterval(refresh, 700);
     refresh();
-    return { refresh, openFace, promote, arrange: arrangeFaces, getState: () => ({ selected, openFaces: [...faces.keys()] }), destroy() { if (destroyed) return; destroyed = true; win.clearInterval(timer); faces.forEach(removePreview); cleanup.forEach(fn => fn()); background?.setExclusionElements?.([], "secondary-faces"); scene.setExclusionElements?.([], "secondary-faces"); root.classList.remove("spatial-has-faces"); layer.remove(); toolbar.remove(); movePrimary.remove(); } };
+    function layout() {
+      return { primary: primaryRect(), secondary: [...faces.values()].filter(face => face.id !== selected).map(face => ({ id: face.id, ...face.rect })) };
+    }
+    function placeFace(id, rect) {
+      if (!rows(getState().sessions).some(row => row.id === id) || !rect) return false;
+      if (id === selected) { scene.setWorkspaceRect?.(boundedRect(rect, bounds())); return true; }
+      if (!faces.has(id)) openFace(id);
+      const face = faces.get(id);
+      if (!face) return false;
+      face.rect = boundedRect(rect, bounds()); place(face); return true;
+    }
+    return { refresh, openFace, placeFace, layout, promote, arrange: arrangeFaces, getState: () => ({ selected, openFaces: [...faces.keys()] }), destroy() { if (destroyed) return; destroyed = true; win.clearInterval(timer); faces.forEach(removePreview); cleanup.forEach(fn => fn()); background?.setExclusionElements?.([], "secondary-faces"); scene.setExclusionElements?.([], "secondary-faces"); root.classList.remove("spatial-has-faces"); layer.remove(); toolbar.remove(); movePrimary.remove(); } };
   }
   const api = Object.freeze({ attach, threadView, boundedRect, previewRect });
   global.BombSpatialFaces = api;

@@ -191,6 +191,8 @@
       },
       onViewChange: view => { options.onViewChange?.(view); doc.dispatchEvent(new win.CustomEvent("bomb-code:spatial-presentation", { detail: { view, navigationOnly: true } })); },
       onPauseChange: paused => options.onPauseChange?.(paused),
+      onWorkspaceResize: rect => options.onWorkspaceResize?.(rect),
+      frameIntervalMs: options.frameIntervalMs,
     });
     function listen(target, type, callback) { target.addEventListener(type, callback); cleanup.push(() => target.removeEventListener(type, callback)); }
     function setHostView(name) {

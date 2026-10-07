@@ -576,7 +576,7 @@ function renderMarkdown(src) {
 
 /** Native yes/no dialog — window.confirm silently falls through as truthy
  *  in the Tauri webview, which made destructive actions skip confirmation. */
-async function askConfirm(message, { title = "Bomb Code", kind = "warning" } = {}) {
+async function askConfirm(message, { title = "See Cubed", kind = "warning" } = {}) {
   try {
     if (window.__TAURI__?.dialog?.ask) {
       return await window.__TAURI__.dialog.ask(message, { title, kind });
@@ -2536,6 +2536,7 @@ async function submitLoginCode() {
         st.instructions || "Code submitted — finish any remaining steps in the browser.";
       startLoginPoll();
     }
+    document.dispatchEvent(new CustomEvent("bomb-code:sessions-ready", { detail: { count: state.sessions.length, sessions: state.sessions.slice() } }));
   } catch (e) {
     toastError(e);
     $("auth-hint").textContent = String(e.message || e);
@@ -5403,7 +5404,7 @@ async function boot() {
   await refreshDevStatus().catch(() => {});
   try {
     noteTurn("idle");
-    pushEvent("Bomb Code ready", "ok", "boom", { force: true });
+    pushEvent("See Cubed ready", "ok", "boom", { force: true });
     // Haven (Hetzner) auto-link status
     try {
       const hv = await invoke("haven_status");

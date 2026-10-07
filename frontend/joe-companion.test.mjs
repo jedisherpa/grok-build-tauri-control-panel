@@ -36,6 +36,18 @@ test('review binding changes with same-thread edits, outcome or recorded build c
   assert.notEqual(s.binding,Joe.snapshot(state,'Other goal',{id:'build',round:0,text:'33%'}).binding);
   assert.notEqual(s.binding,Joe.snapshot(state,'Goal',{id:'build',round:0,text:'50%'}).binding);
 });
+test('cube travel avoids protected rectangles and stays still while typing', () => {
+  const blocked = Joe.placeCube({ x: 20, y: 400 }, { x: 100, y: 80, width: 180, height: 90 }, [{ x: 0, y: 0, width: 960, height: 640 }], { width: 960, height: 640 }, 128);
+  assert.equal(blocked.travel, false);
+  assert.equal(blocked.fallback, true);
+  const clear = Joe.placeCube({ x: 640, y: 420 }, { x: 40, y: 40, width: 180, height: 80 }, [{ x: 0, y: 560, width: 960, height: 80 }], { width: 960, height: 640 }, 128);
+  assert.equal(clear.travel, true);
+  assert.ok(clear.y + 128 <= 560);
+  assert.deepEqual(Joe.stepCube({ x: 10, y: 10 }, { x: 300, y: 10 }, 1000, { typing: true }), { x: 10, y: 10, moving: false });
+  const moved = Joe.stepCube({ x: 10, y: 10 }, { x: 300, y: 10 }, 1000, {});
+  assert.ok(moved.x - 10 <= 320 * 0.05 + 1e-9);
+  assert.equal(moved.moving, true);
+});
 test('gesture uses resting wings and never travel frames; pause selects neutral', () => {
   const atlas=JSON.parse(fs.readFileSync(new URL('./assets/joe/wizard-joe-hd.json',import.meta.url)));
   assert.deepEqual(Joe.gestureFrame(atlas,350,true),atlas.frames['wing-adjust'].frame);

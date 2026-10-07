@@ -39,9 +39,45 @@
     const frame = atlas?.frames?.[name] || atlas?.frames?.['front-idle'];
     return frame && frame.rotated !== true && frame.trimmed !== true && frame.frame?.w > 0 && frame.frame?.h > 0 ? frame.frame : null;
   }
-  function attach({ document: doc = global.document, getState, guide = global.WizardJoeGuide, imageUrl = 'assets/joe/wizard-joe-hd.webp', atlasUrl = 'assets/joe/wizard-joe-hd.json' } = {}) {
+  function overlaps(a, b, gap = 0) { return a.x < b.x + b.width + gap && a.x + a.width + gap > b.x && a.y < b.y + b.height + gap && a.y + a.height + gap > b.y; }
+  function clampCube(point, bounds, size = 128) {
+    const width = Math.max(size + 16, Number(bounds?.width) || size + 16), height = Math.max(size + 16, Number(bounds?.height) || size + 16);
+    return { x: Math.min(Math.max(8, point.x), width - size - 8), y: Math.min(Math.max(8, point.y), height - size - 8) };
+  }
+  function segmentBlocked(from, to, blocks, size) {
+    for (let step = 0; step <= 8; step++) {
+      const t = step / 8, rect = { x: from.x + (to.x - from.x) * t, y: from.y + (to.y - from.y) * t, width: size, height: size };
+      if ((blocks || []).some(block => overlaps(rect, block, 4))) return true;
+    }
+    return false;
+  }
+  function placeCube(from, targetRect, blocks = [], bounds = { width: 960, height: 640 }, size = 128) {
+    const target = targetRect || { x: 24, y: 24, width: 0, height: 0 };
+    const candidates = [
+      { x: target.x + (target.width || 0) + 16, y: target.y },
+      { x: target.x - size - 16, y: target.y },
+      { x: target.x, y: target.y + (target.height || 0) + 16 },
+      { x: target.x, y: target.y - size - 16 },
+    ].map(point => clampCube(point, bounds, size));
+    for (const candidate of candidates) {
+      const rect = { ...candidate, width: size, height: size };
+      if (blocks.some(block => overlaps(rect, block, 4))) continue;
+      if (segmentBlocked(from, candidate, blocks, size)) continue;
+      return { ...candidate, travel: true, fallback: false };
+    }
+    return { ...clampCube(from, bounds, size), travel: false, fallback: true };
+  }
+  function stepCube(pos, dest, dtMs, flags = {}) {
+    if (!dest || flags.paused || flags.reduced || flags.typing || flags.hidden) return { x: pos.x, y: pos.y, moving: false };
+    const dt = Math.min(50, Math.max(0, Number(dtMs) || 0));
+    const dx = dest.x - pos.x, dy = dest.y - pos.y, distance = Math.hypot(dx, dy);
+    if (distance < 1) return { x: dest.x, y: dest.y, moving: false };
+    const step = Math.min(distance, 320 * dt / 1000);
+    return { x: pos.x + dx / distance * step, y: pos.y + dy / distance * step, moving: true };
+  }
+  function attach({ document: doc = global.document, getState, guide = global.WizardJoeGuide, imageUrl = 'assets/joe/wizard-joe-hd.webp', atlasUrl = 'assets/joe/wizard-joe-hd.json', cube = true } = {}) {
     const win = doc.defaultView, cleanup = [];
-    const root = doc.createElement('div'); root.className = 'joe-companion'; doc.body.appendChild(root);
+    const root = doc.createElement('div'); root.className = 'joe-companion'; if (cube) root.dataset.presentation = 'cube'; doc.body.appendChild(root);
     function element(tag, text, cls, parent = root) { const el = doc.createElement(tag); if (text) el.textContent = text; if (cls) el.className = cls; parent.appendChild(el); return el; }
     function listen(el, event, handler) { el.addEventListener(event, handler); cleanup.push(() => el.removeEventListener(event, handler)); }
     const button = element('button', '', 'joe-companion-button'); button.type = 'button'; button.setAttribute('aria-label', 'Wizard Joe — open quiet thread observations'); button.setAttribute('aria-expanded', 'false'); button.setAttribute('aria-controls', 'joe-companion-drawer');
@@ -66,6 +102,47 @@
     if (!goals || typeof goals !== 'object' || Array.isArray(goals)) goals = {};
     if (!['bottom-right', 'bottom-left', 'top-right', 'top-left'].includes(corners)) corners = 'bottom-right';
     root.dataset.corner = corner.value = corners;
+    const viewport = () => ({ width: win.innerWidth || 960, height: win.innerHeight || 640 });
+    let pos = clampCube({ x: (win.innerWidth || 960) - 154, y: (win.innerHeight || 640) - 188 }, viewport(), 128);
+    let destination = null, guideState = 'docked', quiet = false, hidden = false, blocks = [], press = null;
+    if (cube) {
+      try {
+        const saved = JSON.parse(win.localStorage.getItem('bomb-code:joe-cube:v1') || 'null');
+        if (saved?.version === 1 && Number.isFinite(saved.x) && Number.isFinite(saved.y)) { pos = clampCube(saved, viewport(), 128); quiet = saved.quiet === true; hidden = saved.hidden === true; }
+      } catch { /* Position storage is optional. */ }
+    }
+    const restore = element('button', 'Show Joe', 'joe-restore', doc.body); restore.type = 'button'; restore.hidden = !hidden;
+    function saveCube() { if (cube) { try { win.localStorage.setItem('bomb-code:joe-cube:v1', JSON.stringify({ version: 1, x: pos.x, y: pos.y, quiet, hidden })); } catch { /* This run still keeps the position. */ } } }
+    function paintPosition() {
+      root.style?.setProperty?.('--joe-x', `${pos.x}px`); root.style?.setProperty?.('--joe-y', `${pos.y}px`);
+      root.dataset.state = hidden ? 'hidden' : guideState; root.dataset.quiet = String(quiet); root.dataset.flip = pos.x > viewport().width - 460 ? 'left' : 'right';
+      restore.hidden = !hidden;
+    }
+    paintPosition();
+    if (cube) {
+      const park = element('button', 'Park here', 'btn ghost', drawer); park.type = 'button';
+      const quietButton = element('button', 'Quiet Joe', 'btn ghost', drawer); quietButton.type = 'button';
+      const hideButton = element('button', 'Hide Joe', 'btn ghost', drawer); hideButton.type = 'button';
+      listen(park, 'click', () => { destination = null; guideState = 'parked'; quiet = false; saveCube(); paintPosition(); });
+      listen(quietButton, 'click', () => { destination = null; quiet = true; guideState = 'parked'; saveCube(); paintPosition(); });
+      listen(hideButton, 'click', () => { destination = null; hidden = true; guideState = 'hidden'; saveCube(); paintPosition(); restore.focus(); });
+      listen(button, 'pointerdown', event => { if (event.button !== 0) return; press = { id: event.pointerId, x: event.clientX, y: event.clientY, left: pos.x, top: pos.y, moved: false }; button.setPointerCapture?.(event.pointerId); });
+      listen(button, 'pointermove', event => {
+        if (press?.id !== event.pointerId) return;
+        const dx = event.clientX - press.x, dy = event.clientY - press.y;
+        if (Math.hypot(dx, dy) > 4) { press.moved = true; destination = null; guideState = 'parked'; pos = clampCube({ x: press.left + dx, y: press.top + dy }, viewport(), 128); paintPosition(); }
+      });
+      listen(button, 'pointerup', () => { if (press?.moved) saveCube(); });
+      listen(button, 'keydown', event => {
+        const move = { ArrowLeft: [-12, 0], ArrowRight: [12, 0], ArrowUp: [0, -12], ArrowDown: [0, 12] }[event.key];
+        if (event.key === 'Escape') { event.preventDefault(); destination = null; open(false); return; }
+        if (!move) return;
+        event.preventDefault(); destination = null; guideState = 'parked';
+        pos = clampCube({ x: pos.x + move[0] * (event.shiftKey ? 3 : 1), y: pos.y + move[1] * (event.shiftKey ? 3 : 1) }, viewport(), 128);
+        saveCube(); paintPosition();
+      });
+    }
+    listen(restore, 'click', () => { hidden = false; guideState = 'docked'; saveCube(); paintPosition(); button.focus(); });
     const original = doc.getElementById('wizard-joe'), marker = doc.createComment('Joe guide original position');
     if (original) { original.before(marker); drawer.appendChild(original); }
     let selected, current, contextReview = null, prepared = null, reviewed = null, stale = false, lastCue = '', lastGesture = 0, gestureAt = 0, raf = null, destroyed = false, atlas, image;
@@ -82,12 +159,12 @@
       if (!paused() && gestureAt > 0 && now - gestureAt < 1400) raf = win.requestAnimationFrame(draw);
     }
     function paint() { if (raf !== null) { win.cancelAnimationFrame(raf); raf = null; } draw(); }
-    function wave() { const now = win.performance.now(); if (!paused() && now - lastGesture > 30000) { lastGesture = gestureAt = now; if (raf === null) raf = win.requestAnimationFrame(draw); } }
+    function wave() { const now = win.performance.now(); if (!quiet && !paused() && now - lastGesture > 30000) { lastGesture = gestureAt = now; if (raf === null) raf = win.requestAnimationFrame(draw); } }
     function invalidate(reason) { if (prepared || reviewed) { prepared = reviewed = null; stale = true; guide?.invalidateContext(reason); } }
     function refresh() {
       if (destroyed || doc.hidden) return;
       const source = getState(); const id = source.selectedSession || null;
-      if (id !== selected) { invalidate('Thread changed. Prepare a new thread review.'); selected = id; outcome.value = typeof goals[id] === 'string' ? clip(goals[id], 2000) : ''; stale = false; }
+      if (id !== selected) { destination = null; if (guideState === 'travelling') guideState = 'docked'; invalidate('Thread changed. Prepare a new thread review.'); selected = id; outcome.value = typeof goals[id] === 'string' ? clip(goals[id], 2000) : ''; stale = false; }
       const link = id ? global.BombBuilds?.sessionSummary(id) : null;
       current = snapshot(source, outcome.value, link);
       if (prepared && prepared.binding !== current.binding || reviewed && reviewed.binding !== current.binding) invalidate('Thread, outcome or build evidence changed. Prepare a new review; the previous result is stale.');
@@ -97,6 +174,7 @@
       if (reviewed) rows.unshift(`${reviewed.count} source-backed clarification proposal${reviewed.count === 1 ? '' : 's'} available below. These remain model proposals.`);
       notices.replaceChildren(); rows.forEach(text => element('li', text, '', notices));
       prepareButton.disabled = !current.loaded || !current.rows.length;
+      if (current.notices.some(text => text.includes('native approval'))) { destination = null; if (guideState === 'travelling') guideState = 'docked'; paintPosition(); }
       const cue = JSON.stringify([id, current.rows.at(-1)?.at, rows]);
       if (cue !== lastCue) { if (lastCue) wave(); lastCue = cue; }
       button.dataset.notice = String(rows.length > 0);
@@ -104,8 +182,8 @@
       badge.textContent = rows.length ? 'Joe · notice' : 'Joe · quiet';
       paint();
     }
-    function open(value) { drawer.hidden = !value; button.setAttribute('aria-expanded', String(value)); if (value) { refresh(); close.focus(); } else button.focus(); }
-    listen(button, 'click', () => open(drawer.hidden)); listen(close, 'click', () => open(false));
+    function open(value) { drawer.hidden = !value; button.setAttribute('aria-expanded', String(value)); if (value) { destination = null; guideState = 'explaining'; paintPosition(); refresh(); close.focus(); } else { if (guideState === 'explaining') guideState = 'docked'; paintPosition(); button.focus(); } }
+    listen(button, 'click', event => { if (press?.moved) { press = null; event.preventDefault(); return; } open(drawer.hidden); }); listen(close, 'click', () => open(false));
     listen(doc, 'bomb-code:open-joe', () => { open(true); if (original) original.open = true; });
     listen(drawer, 'keydown', event => { if (event.key === 'Escape') { event.preventDefault(); open(false); } });
     listen(outcome, 'input', () => { if (selected) { goals[selected] = clip(outcome.value, 2000); try { win.localStorage.setItem('bomb-code:joe-outcomes:v1', JSON.stringify(goals)); } catch { /* This run still retains the goal. */ } } refresh(); });
@@ -123,8 +201,22 @@
     const timer = win.setInterval(refresh, 1000);
     win.fetch(atlasUrl).then(r => { if (!r.ok) throw new Error('Joe atlas unavailable'); return r.json(); }).then(data => { if (destroyed) return; atlas = data; image = new win.Image(); image.onload = () => { if (!destroyed) paint(); }; image.src = imageUrl; }).catch(() => { if (!destroyed) paint(); });
     refresh(); paint();
-    return { refresh, open, element: root, destroy() { destroyed = true; win.clearInterval(timer); if (raf !== null) win.cancelAnimationFrame(raf); cleanup.forEach(f => f()); if (original) marker.replaceWith(original); root.remove(); } };
+    function travelTo(rect, nextBlocks = blocks) {
+      blocks = Array.isArray(nextBlocks) ? nextBlocks : blocks;
+      if (hidden || quiet) return { ...pos, travel: false, fallback: true };
+      const decision = placeCube(pos, rect, blocks, viewport(), 128);
+      destination = decision.travel ? decision : null; guideState = decision.travel ? 'travelling' : 'docked'; paintPosition(); return decision;
+    }
+    function tick(dt, flags = {}) {
+      if (!cube || hidden) return pos;
+      const next = stepCube(pos, destination, dt, flags);
+      pos = { x: next.x, y: next.y };
+      if (!next.moving && guideState === 'travelling') guideState = drawer.hidden ? 'docked' : 'explaining';
+      if (!next.moving) destination = next.moving ? destination : null;
+      paintPosition(); return pos;
+    }
+    return { refresh, open, element: root, travelTo, tick, park() { destination = null; guideState = 'parked'; paintPosition(); saveCube(); }, hide() { hidden = true; destination = null; guideState = 'hidden'; paintPosition(); saveCube(); }, show() { hidden = false; guideState = 'docked'; paintPosition(); saveCube(); }, setExclusions(next) { blocks = Array.isArray(next) ? next : []; }, destroy() { destroyed = true; win.clearInterval(timer); if (raf !== null) win.cancelAnimationFrame(raf); cleanup.forEach(f => f()); if (original) marker.replaceWith(original); restore.remove(); root.remove(); } };
   }
-  const api = Object.freeze({ snapshot, prepare, gestureFrame, attach }); global.BombJoeCompanion = api;
+  const api = Object.freeze({ snapshot, prepare, gestureFrame, placeCube, stepCube, clampCube, attach }); global.BombJoeCompanion = api;
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
 })(typeof window !== 'undefined' ? window : globalThis);

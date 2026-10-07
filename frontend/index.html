@@ -3,7 +3,7 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Bomb Code</title>
+    <title>See Cubed</title>
     <link rel="stylesheet" href="styles.css" />
     <link rel="stylesheet" href="bombs.css" />
     <link rel="stylesheet" href="world.css" />
@@ -12,6 +12,7 @@
     <link rel="stylesheet" href="spatial-faces.css" />
     <link rel="stylesheet" href="spatial-panels.css" />
     <link rel="stylesheet" href="joe-companion.css" />
+    <link rel="stylesheet" href="studio-entry.css" />
     <link rel="stylesheet" href="word-shapes.css" />
     <link rel="stylesheet" href="meaning-memory.css" />
     <script type="module" src="vendor/model-viewer.min.js"></script>
@@ -22,14 +23,15 @@
       <!-- LEFT: threads + menus -->
       <aside class="col col-left">
         <header class="col-header brand" id="brand-header">
-          <img class="logo" src="assets/logo.png" alt="Bomb Code" width="28" height="28" />
+          <img class="logo" src="assets/logo.png" alt="See Cubed" width="28" height="28" />
           <div>
-            <div class="title">Bomb Code</div>
+            <div class="title">See Cubed <span class="brand-mark">C³</span></div>
             <div class="sub" id="brand-sub"></div>
           </div>
         </header>
 
         <nav class="nav-block">
+          <button class="nav-item" id="studio-home" type="button" title="Home"><span class="nav-icon">⌂</span> Home</button>
           <button class="nav-item active" data-view="spatial" title="World"><span class="nav-icon">◇</span> World</button>
           <button class="nav-item" data-view="chat" title="Session">
             <span class="nav-icon">⌘</span> Session
@@ -284,7 +286,7 @@ tests/feature" spellcheck="false" required></textarea><span class="builds-help">
               <textarea
                 id="prompt"
                 rows="2"
-                placeholder="Message Bomb Code… (Enter to send, Shift+Enter newline)"
+                placeholder="Message See Cubed… (Enter to send, Shift+Enter newline)"
                 spellcheck="false"
               ></textarea>
               <button id="btn-send" class="btn primary">Send</button>
@@ -727,6 +729,9 @@ tests/feature" spellcheck="false" required></textarea><span class="builds-help">
     <script src="meaning-memory.js"></script>
     <script src="collaboration.js"></script>
     <script src="builds.js"></script>
+    <script src="studio-motion.js"></script>
+    <script src="studio-tour.js"></script>
+    <script src="studio-entry.js"></script>
     <script src="scheduler.js"></script>
     <script src="spatial-world.js"></script>
     <script src="spatial-host.js"></script>

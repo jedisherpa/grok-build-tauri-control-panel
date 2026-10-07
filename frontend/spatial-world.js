@@ -136,7 +136,8 @@
     let exclusionObserver = null, workspaceRect = null, resizeDrag = null;
     let destroyed = false, scaffold = null, raw = {}, sessions = [], selectedId = options.selectedSessionId || null;
     let view = options.view === "focus" && (selectedId || options.allowEmptyFocus || options.contentElement) ? "focus" : options.view === "overview" || !selectedId ? "overview" : "focus";
-    let yaw = 0, tilt = 0, plane = 0, width = 1, height = 1, dpr = 1, raf = null, ticker = null;
+    let yaw = 0, tilt = 0, plane = 0, width = 1, height = 1, dpr = 1, raf = null, frameWait = null, lastPaint = 0, ticker = null;
+    let displayPose = null;
     let aperture = view === "focus" ? 1 : 0, transition = null, userPaused = options.paused === true;
     let sprite = null, spriteImage = null, spriteLoaded = false, spriteGeneration = 0, spriteTime = 0, lastFrame = null;
     let drag = null, lastPointerX = 0, lastPointerY = 0, showAll = false, telemetryAvailable = true;
@@ -150,7 +151,7 @@
     if (options.backgroundOnly) { canvas.tabIndex = -1; canvas.setAttribute("aria-hidden", "true"); root.setAttribute("aria-hidden", "true"); }
     const ctx = canvas.getContext("2d"), spriteCtx = spriteCanvas.getContext("2d");
     const header = element("div", "spatial-header");
-    const heading = element("div", "spatial-heading", "", header); element("span", "spatial-kicker", "Bomb Code", heading); element("h2", "", "Strata Observatory", heading);
+    const heading = element("div", "spatial-heading", "", header); element("span", "spatial-kicker", "See Cubed", heading); element("h2", "", "C³", heading);
     const controls = element("div", "spatial-controls", "", header);
     function button(label, fn, parent = controls) { const b = element("button", "spatial-control", label, parent); b.type = "button"; listen(b, "click", fn); return b; }
     const overviewButton = button("Overview", () => setView("overview"));
@@ -344,7 +345,7 @@
         const points = options.backgroundScene.getRootPositions(root);
         if (Array.isArray(points) && points.length === 240) return points;
       }
-      return scaffold.roots.map(r => screen(projectVector(r.position8, scaffold.projectionBasisQ, plane, yaw, tilt)));
+      return scaffold.roots.map(r => screen(withDisplay(projectVector(r.position8, scaffold.projectionBasisQ, plane, yaw, tilt))));
     }
     function getRootPositions(target) {
       if (!scaffold) return [];
@@ -354,7 +355,7 @@
     function getPointPosition(vector, target) {
       if (!scaffold || !Array.isArray(vector) || vector.length !== 8 || vector.some(x => !Number.isFinite(x))) return null;
       if (options.backgroundScene?.getPointPosition) return options.backgroundScene.getPointPosition(vector,target || root);
-      const p = screen(projectVector(vector,scaffold.projectionBasisQ,plane,yaw,tilt));
+      const p = screen(withDisplay(projectVector(vector,scaffold.projectionBasisQ,plane,yaw,tilt)));
       const origin = root.getBoundingClientRect(), relative = target?.getBoundingClientRect?.() || origin;
       return {...p,x:p.x+origin.left-relative.left,y:p.y+origin.top-relative.top};
     }
@@ -514,10 +515,27 @@
       spriteCtx.globalAlpha = sprite.opacity; spriteCtx.drawImage(spriteImage, frame.x, frame.y, frame.width, frame.height, x - size / 2, y - h, size, h); spriteCtx.globalAlpha = 1;
     }
 
-    function requestDraw() { if (!destroyed && !doc.hidden && raf === null) raf = win.requestAnimationFrame(draw); }
+    function cancelFrame() {
+      if (raf !== null) { win.cancelAnimationFrame(raf); raf = null; }
+      if (frameWait !== null) { win.clearTimeout(frameWait); frameWait = null; }
+    }
+    function withDisplay(point) { return displayPose && global.BombStudioMotion?.orientPoint ? global.BombStudioMotion.orientPoint(point, displayPose) : point; }
+    function setDisplayOrientation(pose) {
+      const values = pose && [pose.primaryDeg, pose.secondaryAmp, pose.tertiaryAmp, pose.secondaryPhase, pose.tertiaryPhase];
+      displayPose = values?.every(Number.isFinite) ? { primaryDeg: pose.primaryDeg, secondaryAmp: pose.secondaryAmp, tertiaryAmp: pose.tertiaryAmp, secondaryPhase: pose.secondaryPhase, tertiaryPhase: pose.tertiaryPhase } : null;
+      requestDraw();
+    }
+    function requestDraw() {
+      if (destroyed || doc.hidden || raf !== null || frameWait !== null) return;
+      const gap = Number(options.frameIntervalMs) || 0;
+      const delay = gap > 0 ? Math.max(0, gap - (nowClock() - lastPaint)) : 0;
+      if (delay > 0) frameWait = win.setTimeout(() => { frameWait = null; if (!destroyed && !doc.hidden) raf = win.requestAnimationFrame(draw); }, delay);
+      else raf = win.requestAnimationFrame(draw);
+    }
     function draw(clock) {
       raf = null; if (destroyed || doc.hidden) return;
-      const delta = lastFrame === null ? 0 : Math.min(clock - lastFrame, 60); lastFrame = clock;
+      lastPaint = clock;
+      const delta = lastFrame === null ? 0 : Math.min(clock - lastFrame, 50); lastFrame = clock;
       if (transition) { const t = (clock - transition.started) / transition.duration; aperture = transition.from + (transition.to - transition.from) * smooth(t); if (t >= 1 || motionStopped()) { aperture = transition.to; transition = null; } }
       root.style.setProperty("--aperture-open", String(aperture));
       workspace.inert = view !== "focus"; workspace.setAttribute("aria-hidden", String(view !== "focus"));
@@ -552,7 +570,7 @@
       if (e.key === "Home") { setProjection({yaw:0,tilt:0,plane:0}); e.preventDefault(); }
       if (e.key === "Enter" && selectedId) { setView("focus"); e.preventDefault(); }
     });
-    listen(doc, "visibilitychange", () => { if (doc.hidden && raf !== null) { win.cancelAnimationFrame(raf); raf = null; } lastFrame = null; renderLabels(); requestDraw(); });
+    listen(doc, "visibilitychange", () => { if (doc.hidden) cancelFrame(); lastFrame = null; renderLabels(); requestDraw(); });
     listen(doc, "focusin", () => { renderLabels(); requestDraw(); }); listen(doc, "focusout", () => { win.queueMicrotask(() => { if (!destroyed) { renderLabels(); requestDraw(); } }); });
     listen(reduced, "change", () => { if (transition && reduced.matches) { aperture = transition.to; transition = null; } renderLabels(); requestDraw(); });
     const observer = new win.ResizeObserver(resize); observer.observe(root); cleanup.push(() => observer.disconnect());
@@ -582,9 +600,9 @@
     resize(); load();
     return {
       element: root, workspace,
-      update: refresh, setView, setSprite, setMotionPaused, mountContent, detachContent, getRootPositions, getPointPosition, setProjection, setExclusionElements, setExclusions, refreshExclusions:requestDraw, getWorkspaceRect, setWorkspaceRect, resetWorkspaceRect,
-      getState: () => ({ view, selectedSessionId: selectedId, paused: userPaused, reducedMotion: reduced.matches, geometryReady: scaffold !== null, rotation: projectionState() }),
-      destroy() { if (destroyed) return; destroyed = true; spriteGeneration++; if (raf !== null) win.cancelAnimationFrame(raf); cleanup.forEach(fn => fn()); options.backgroundScene?.setExclusionElements?.([],primaryExclusionOwner); detachContent(true); root.remove(); }
+      update: refresh, setView, setSprite, setMotionPaused, mountContent, detachContent, getRootPositions, getPointPosition, setProjection, setDisplayOrientation, setExclusionElements, setExclusions, refreshExclusions:requestDraw, requestDraw, getWorkspaceRect, setWorkspaceRect, resetWorkspaceRect,
+      getState: () => ({ view, selectedSessionId: selectedId, paused: userPaused, reducedMotion: reduced.matches, geometryReady: scaffold !== null, rotation: projectionState(), display: displayPose }),
+      destroy() { if (destroyed) return; destroyed = true; spriteGeneration++; cancelFrame(); cleanup.forEach(fn => fn()); options.backgroundScene?.setExclusionElements?.([],primaryExclusionOwner); detachContent(true); root.remove(); }
     };
   }
 

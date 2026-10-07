@@ -1,0 +1,43 @@
+/* Studio entry composition. Working controls stay outside this panel. */
+.studio-invitation {
+  position: fixed;
+  z-index: 40;
+  top: 76px;
+  left: max(24px, calc(50% - 280px));
+  width: min(560px, calc(100vw - 48px));
+  padding: 18px 20px 14px;
+  background: #121820f2;
+  color: #f4efe6;
+  border: 1px solid #c4a574;
+  border-radius: 8px;
+  box-shadow: 0 16px 40px #0008;
+}
+.studio-invitation[hidden] { display: none; }
+.studio-mark { margin: 0 0 6px; color: #e6c27a; font: 12px/1.4 ui-sans-serif, system-ui, sans-serif; letter-spacing: .08em; text-transform: uppercase; }
+.studio-invitation h2 { margin: 0 0 8px; font: 28px/1.2 Georgia, serif; }
+.studio-invitation p { margin: 0; font: 14px/1.5 ui-sans-serif, system-ui, sans-serif; }
+.studio-choices, .studio-tour { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.studio-tour[hidden] { display: none; }
+.studio-choices button, .studio-tour button {
+  font: 14px/1.3 ui-sans-serif, system-ui, sans-serif;
+  padding: 8px 12px;
+  border-radius: 4px;
+  border: 1px solid #91bcae;
+  background: #182838;
+  color: inherit;
+  cursor: pointer;
+}
+.studio-choices .studio-direct { border-color: #e6c27a; }
+.studio-tour { padding-top: 10px; border-top: 1px solid #ffffff22; }
+.studio-tour p { flex-basis: 100%; }
+.studio-status { min-height: 1.2em; margin-top: 10px; color: #eed8b5; }
+.studio-invitation[data-highlight="studio-invitation"] { outline: 2px solid #e6c27a; outline-offset: 3px; }
+html[data-joe-cube="on"] .spatial-joe-canvas { visibility: hidden; }
+.brand .title .brand-mark { color: #e6c27a; font-size: .82em; margin-left: .35em; }
+@media (max-width: 720px) {
+  .studio-invitation { top: 12px; left: 12px; width: calc(100vw - 24px); }
+  .studio-invitation h2 { font-size: 22px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .studio-invitation, .joe-companion { scroll-behavior: auto; transition: none; }
+}
