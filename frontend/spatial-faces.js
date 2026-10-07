@@ -177,7 +177,40 @@
         const rect = faces.size ? previewRect(bounds(), occupied) : primaryRect();
         faces.set(next, { id: next, rect }); scene.setWorkspaceRect?.(rect);
       }
-      faces.forEach(face => { if (face.id !== selected) ensurePreview(face); }); mask();
+      faces.forEach(face => { if (face.id !== selected) ensurePreview(face); });
+      restoreWorkingSurface();
+      tuckContextFaces();
+      mask();
+    }
+    /** Fill most of the scene for the working face; leave right-rail + composer. */
+    function restoreWorkingSurface() {
+      const b = bounds();
+      if (!selected) return;
+      const rect = boundedRect({
+        x: 12,
+        y: 155,
+        width: Math.max(280, b.width - 280),
+        height: Math.max(200, b.height - 155 - 140),
+      }, b);
+      scene.setWorkspaceRect?.(rect);
+      const sel = faces.get(selected);
+      if (sel) sel.rect = rect;
+    }
+    /** Park non-selected context faces as small cards, not over the composer. */
+    function tuckContextFaces() {
+      const b = bounds();
+      let i = 0;
+      faces.forEach((face) => {
+        if (face.id === selected) return;
+        face.rect = boundedRect({
+          x: Math.max(12, b.width - 340),
+          y: 155 + (i % 5) * 40,
+          width: 300,
+          height: Math.min(220, Math.max(160, b.height - 320)),
+        }, b);
+        i += 1;
+        place(face);
+      });
     }
     function openFace(id) {
       if (!rows(getState().sessions).some(row => row.id === id)) { notice.textContent = "Choose an available thread."; return; }
@@ -220,7 +253,13 @@
     listen(movePrimary, "keydown", event => { if (!/^Arrow(Left|Right|Up|Down)$/.test(event.key) || event.metaKey || event.ctrlKey || event.altKey) return; event.preventDefault(); const step = event.shiftKey ? 32 : 12, rect = primaryRect(); scene.setWorkspaceRect?.(boundedRect({ ...rect, x: rect.x + (event.key === "ArrowRight" ? step : event.key === "ArrowLeft" ? -step : 0), y: rect.y + (event.key === "ArrowDown" ? step : event.key === "ArrowUp" ? -step : 0) }, bounds())); mask(); });
     listen(doc, "bomb-code:thread-selected", refresh);
     listen(doc, "bomb-code:view-selected", () => { win.queueMicrotask(refresh); });
-    const observer = new win.ResizeObserver(() => { faces.forEach(face => { if (face.id !== selected) place(face); }); mask(); }); observer.observe(root); cleanup.push(() => observer.disconnect());
+    const observer = new win.ResizeObserver(() => {
+      // Auto reflow on resize so enlarge does not keep small-window face positions
+      // covering Send (round4 Play B — no Reset+Arrange ritual required).
+      restoreWorkingSurface();
+      tuckContextFaces();
+      mask();
+    }); observer.observe(root); cleanup.push(() => observer.disconnect());
     timer = win.setInterval(refresh, 700);
     refresh();
     return { refresh, openFace, promote, arrange: arrangeFaces, getState: () => ({ selected, openFaces: [...faces.keys()] }), destroy() { if (destroyed) return; destroyed = true; win.clearInterval(timer); faces.forEach(removePreview); cleanup.forEach(fn => fn()); background?.setExclusionElements?.([], "secondary-faces"); scene.setExclusionElements?.([], "secondary-faces"); root.classList.remove("spatial-has-faces"); layer.remove(); toolbar.remove(); movePrimary.remove(); } };

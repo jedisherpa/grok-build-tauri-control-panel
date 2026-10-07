@@ -35,3 +35,9 @@
 @media (prefers-reduced-motion:no-preference) { .spatial-panel-cube::before, .spatial-panel-cube::after { transition: background .15s; } .spatial-panel-cube:focus-within::before, .spatial-panel-cube:focus-within::after { background: #213b3c77; } }
 
 .spatial-panel-cube-body .threads-section > .section-label > span:first-child { display: none; }
+
+/* play1 #14/#22 — expanded cubes must not bury neighbors forever */
+.spatial-panel-cube[data-expanded="true"] { max-height: min(42vh, 420px); }
+.spatial-panel-cube[data-cube="preview"] { z-index: 4; }
+.spatial-panel-cube[data-cube="log"],
+.spatial-panel-cube[data-cube="view"] { z-index: 3; }

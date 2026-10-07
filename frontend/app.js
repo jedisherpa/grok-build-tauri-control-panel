@@ -593,6 +593,38 @@ function getTranscript(sessionId) {
   return state.transcriptBySession.get(sessionId);
 }
 
+
+/** Roles that may sit between stream chunks without ending a reply segment.
+ *  tool / approval / user / plan / error hard-stop and open a new bubble. */
+const STREAM_SOFT_ROLES = {
+  agent: new Set(["term", "system", "thought"]),
+  thought: new Set(["term", "system"]),
+  term: new Set(["system"]),
+};
+
+/**
+ * Index of the bubble a streaming chunk should join, or -1.
+ * Reopens a recently closed same-role agent/thought bubble when only soft
+ * noise (e.g. "prompt response ended") sits after it — late tiny fragments
+ * after prompt_finished must not become their own AGENT row (round4 S5).
+ */
+function findStreamCoalesceIndex(list, role, hopsMax = 40) {
+  if (!list || !list.length) return -1;
+  const soft = STREAM_SOFT_ROLES[role] || new Set(["term", "system"]);
+  for (let i = list.length - 1, hops = 0; i >= 0 && hops < hopsMax; i--, hops++) {
+    const entry = list[i];
+    if (entry.role === role) {
+      if (entry.streaming) return i;
+      // Late fragment after stream was closed (prompt_finished / flicker).
+      if (role === "agent" || role === "thought") return i;
+      return -1;
+    }
+    if (soft.has(entry.role)) continue;
+    return -1; // hard separator
+  }
+  return -1;
+}
+
 function appendTranscript(sessionId, role, body, at = nowIso(), opts = {}) {
   if (!sessionId) return;
   state.transcriptRevisionBySession.set(sessionId, (state.transcriptRevisionBySession.get(sessionId) || 0) + 1);
@@ -601,24 +633,24 @@ function appendTranscript(sessionId, role, body, at = nowIso(), opts = {}) {
   const stream = !!opts.stream;
 
   // Coalesce streaming agent/thought/term chunks into one live block (TTY feel).
-  // Interleaved ACP noise (term/tool/plan rows) must not split a response —
-  // look back past it to find the still-streaming block of the same role.
+  // Soft noise (term/thought) must not split a response; tools/approvals do.
+  // Late fragments after prompt_finished reopen the closed bubble (round4 S5).
   if (stream && (role === "agent" || role === "thought" || role === "term") && list.length) {
-    for (let i = list.length - 1, hops = 0; i >= 0 && hops < 40; i--, hops++) {
+    const i = findStreamCoalesceIndex(list, role);
+    if (i >= 0) {
       const entry = list[i];
-      if (entry.role === role && entry.streaming) {
-        // Rotate giant stream blocks: one multi-MB text node re-escaped on
-        // every render tanks the whole transcript.
-        if ((entry.body || "").length > 64_000) {
-          entry.streaming = false;
-          break;
-        }
+      // Rotate giant stream blocks: one multi-MB text node re-escaped on
+      // every render tanks the whole transcript.
+      if ((entry.body || "").length > 64_000) {
+        entry.streaming = false;
+      } else {
         if (role === "term") {
           entry.body = (entry.body || "") + (entry.body ? "\n" : "") + text;
         } else {
           entry.body = (entry.body || "") + text;
         }
         entry.at = at;
+        entry.streaming = true; // reopen if late fragment after close
         // Hidden ACP rows still buffer (the toggle can reveal them later)
         // but must not touch the DOM — patching would hit a visible bubble.
         const visible = role !== "term" || state.showAcpLines;
@@ -631,10 +663,6 @@ function appendTranscript(sessionId, role, body, at = nowIso(), opts = {}) {
         }
         return;
       }
-      // Skip other roles (thought/tool/term/plan/system/approval) so interleaved
-      // noise cannot open a new AGENT bubble per chunk (llm-retry #12).
-      if (entry.role !== role) continue;
-      break; // same role but not streaming → start a new bubble
     }
   }
 
@@ -777,15 +805,20 @@ function endAgentStream(sessionId) {
   if (!sessionId) return;
   const list = getTranscript(sessionId);
   if (!list.length) return;
-  const last = list[list.length - 1];
-  if (last.streaming) {
-    last.streaming = false;
-    if (sessionId === state.selectedSession) {
-      const root = $("transcript");
-      const blocks = root?.querySelectorAll(".t-block");
-      const el = blocks?.[blocks.length - 1];
-      el?.classList.remove("streaming");
+  let closed = false;
+  // Clear any live stream in the recent tail (agent may not be last if a
+  // term/tool row already landed). Re-render so markdown/fences apply —
+  // patchLastTranscriptBody writes raw textContent while streaming.
+  for (let i = list.length - 1, hops = 0; i >= 0 && hops < 40; i--, hops++) {
+    const entry = list[i];
+    if (entry.streaming) {
+      entry.streaming = false;
+      closed = true;
     }
+    if (entry.role === "user") break;
+  }
+  if (closed && sessionId === state.selectedSession) {
+    renderTranscript();
   }
 }
 
@@ -806,6 +839,41 @@ function roleBombMood(role) {
 function explainListFor(sid) {
   if (!state.explainBySession.has(sid)) state.explainBySession.set(sid, []);
   return state.explainBySession.get(sid);
+}
+
+
+/** When a turn goes idle/done, push a final What's happening card from the
+ *  coalesced agent reply so the narrator does not stay on "is writing…" (round4 S6). */
+function pushFinalExplainFromReply(sessionId) {
+  if (!sessionId || !state.explainerEnabled) return;
+  const entries = getTranscript(sessionId);
+  let body = "";
+  for (let i = entries.length - 1; i >= 0; i--) {
+    const e = entries[i];
+    if (e.role === "agent" && e.body) {
+      body = String(e.body);
+      break;
+    }
+    if (e.role === "user") break;
+  }
+  const plain = body
+    .replace(/```[\s\S]*?```/g, " ")
+    .replace(/`([^`\n]+)`/g, "$1")
+    .replace(/\*\*([^*\n]+)\*\*/g, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+  const clip = plain.length > 240 ? `${plain.slice(0, 237)}…` : plain;
+  const text = clip
+    ? `The agent finished and replied: ${clip}`
+    : "The agent finished its reply.";
+  const list = explainListFor(sessionId);
+  const last = list[list.length - 1];
+  if (last && last.kind === "done") return;
+  if (last && /finished(?: its)? reply|replied:/i.test(last.text || "")) return;
+  list.push({ text, kind: "done", requestId: null, at: nowIso() });
+  if (list.length > 50) list.splice(0, list.length - 50);
+  state.explainPending = false;
+  if (sessionId === state.selectedSession) renderExplainFeed();
 }
 
 function handleExplainEvent(sid, payload) {
@@ -868,7 +936,7 @@ function renderExplainFeed() {
         const cls = e.kind === "approval" ? " approval" : e.kind === "error" ? " error" : "";
         return `<div class="explain-card${cls}">
   <div class="explain-ts">${escapeHtml(shortTime(e.at))}${e.kind === "approval" ? " · about the approval" : ""}</div>
-  <div class="explain-text">${escapeHtml(e.text)}</div>
+  <div class="explain-text">${renderMarkdown(e.text)}</div>
 </div>`;
       })
       .join("") + pending;
@@ -1798,6 +1866,23 @@ function handleControlEvent(ev) {
       pushEvent(`response stopped · ${reason} · ${shortId(sid)}`, "err", null, { force: true });
     }
     commitPresence(sid, p);
+    if (P.normallyFinished(p) || p.phase === "done") {
+      pushFinalExplainFromReply(sid);
+    } else if (p.phase === "error") {
+      // Clear stale "is writing" on hard stop.
+      const list = explainListFor(sid);
+      const last = list[list.length - 1];
+      if (last && /is writing/i.test(last.text || "")) {
+        list.push({
+          text: `The reply stopped (${reason}).`,
+          kind: "error",
+          requestId: null,
+          at: nowIso(),
+        });
+        state.explainPending = false;
+        if (sid === state.selectedSession) renderExplainFeed();
+      }
+    }
   } else if (type === "session_status_changed" || type === "sessionStatusChanged") {
     const st = String(ev.status || "").toLowerCase();
     appendTranscript(sid, "term", `status → ${ev.status}`);
