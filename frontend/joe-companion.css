@@ -1,10 +1,10 @@
 /* Joe is a body-level foreground companion, outside every cube transform. */
-.joe-companion { position: fixed; z-index: 2000000; right: 18px; bottom: 14px; width: 120px; pointer-events: none; }
+.joe-companion { position: fixed; z-index: 5; right: 248px; bottom: 14px; width: 120px; pointer-events: none; }
 .joe-companion-button { pointer-events: auto; width: 120px; padding: 0; background: none; border: 0; cursor: pointer; color: var(--text); }
 .joe-companion-sprite { display: block; width: 120px; height: 140px; filter: drop-shadow(0 3px 3px #0009); }
 .joe-companion-badge { display: block; width: max-content; margin: 0 auto; border: 1px solid var(--border-hi); border-radius: 3px; background: #101d30; padding: 3px 8px; font: 11px var(--ui); }
 .joe-companion-button[data-notice="true"] .joe-companion-badge { border-color: var(--warn); color: var(--warn); }
-.joe-companion-drawer { pointer-events: auto; position: fixed; right: 18px; bottom: 180px; width: min(540px, calc(100vw - 36px)); max-height: calc(100vh - 230px); overflow: auto; padding: 18px; background: #101d30; border: 1px solid #91bcae; border-radius: 5px; box-shadow: 0 12px 35px #0007; }
+.joe-companion-drawer { pointer-events: auto; position: fixed; z-index: 6; right: 18px; bottom: 180px; width: min(540px, calc(100vw - 36px)); max-height: calc(100vh - 230px); overflow: auto; padding: 18px; background: #101d30; border: 1px solid #91bcae; border-radius: 5px; box-shadow: 0 12px 35px #0007; }
 .joe-companion-drawer[hidden] { display: none; }
 .joe-companion-heading { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .joe-companion-heading h2 { font: 22px Georgia; margin: 0; }

@@ -1427,3 +1427,38 @@ img.logo {
 .recall-select { display: flex; align-items: flex-start; gap: 10px; font-weight: 600; }
 .recall-text { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.5; }
 .recall-hash { overflow-wrap: anywhere; font-family: monospace; font-size: 11px; }
+
+
+/* play1 #24/#25 — composer must remain reachable in World / small windows */
+.composer-always-visible,
+#composer.composer {
+  position: sticky;
+  bottom: 0;
+  z-index: 4;
+  min-height: 120px;
+  flex-shrink: 0;
+}
+.has-panel-cubes .workspace-main,
+.has-panel-cubes .col-center,
+.has-panel-cubes #view-session,
+.has-panel-cubes #view-world {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.has-panel-cubes #composer.composer {
+  margin-top: auto;
+}
+
+/* play1 #02 — Session tooltip must not cover History/Builds */
+.nav-item[title] { position: relative; }
+.nav-block { overflow: visible; }
+.nav-item:hover { z-index: 2; }
+
+/* Expanded right-rail cubes scroll inside themselves (play1 #14/#22) */
+.spatial-panel-cube[data-expanded="true"] {
+  max-height: min(42vh, 420px);
+}
+.spatial-panel-cube-body {
+  max-height: calc(100% - 32px);
+}
