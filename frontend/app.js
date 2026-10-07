@@ -934,7 +934,7 @@ function pushFinalExplainFromReply(sessionId) {
 }
 
 function explainLooksMidTurn(text) {
-  return /\b(started a new reply|is writing|drafting|calling (?:a |the )?tool|thinking through|queued up a tool)\b/i.test(
+  return /\b(started a new reply|is writing|drafting|calling (?:a |the )?tool|thinking through|queued up a tool|paused while waiting|waiting on the next model)\b/i.test(
     String(text || "")
   );
 }

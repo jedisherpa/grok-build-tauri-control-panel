@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use chrono::{DateTime, Utc};
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::info;
@@ -400,28 +400,45 @@ impl Persistence {
         at: DateTime<Utc>,
         window_secs: i64,
     ) -> Result<u64> {
+        // Soft kinds (ACP term spam / system notices) may land between stream
+        // deltas. Look past them for the same-kind merge target — otherwise
+        // every interleaved term row fractures one reply into many AGENT bubbles
+        // (full-tip Play A S5, 2026-10-06).
+        let soft = matches!(kind, "agent" | "thought");
         let merged = {
             let _g = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
             let conn = self.conn()?;
-            let last: Option<(i64, String, String)> = conn
-                .query_row(
-                    "SELECT seq, kind, at FROM transcripts WHERE session_id=?1 ORDER BY seq DESC LIMIT 1",
-                    params![session_id.to_string()],
-                    |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-                )
-                .optional()?;
-            match last {
-                Some((seq, k, at_s))
-                    if k == kind
-                        && (at - parse_dt(&at_s)).num_seconds().abs() <= window_secs =>
-                {
+            let mut stmt = conn.prepare(
+                "SELECT seq, kind, at FROM transcripts WHERE session_id=?1 ORDER BY seq DESC LIMIT 24",
+            )?;
+            let recent: Vec<(i64, String, String)> = stmt
+                .query_map(params![session_id.to_string()], |row| {
+                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+                })?
+                .filter_map(|r| r.ok())
+                .collect();
+            let mut target: Option<(i64, String)> = None;
+            for (seq, k, at_s) in recent {
+                if k == kind {
+                    if (at - parse_dt(&at_s)).num_seconds().abs() <= window_secs {
+                        target = Some((seq, at_s));
+                    }
+                    break;
+                }
+                if soft && matches!(k.as_str(), "term" | "system") {
+                    continue;
+                }
+                break;
+            }
+            match target {
+                Some((seq, _)) => {
                     conn.execute(
                         "UPDATE transcripts SET payload = payload || ?1, at = ?2 WHERE session_id=?3 AND seq=?4",
                         params![payload, at.to_rfc3339(), session_id.to_string(), seq],
                     )?;
                     Some(seq as u64)
                 }
-                _ => None,
+                None => None,
             }
         };
         match merged {
@@ -456,39 +473,48 @@ impl Persistence {
     pub fn transcript_entries(&self, session_id: Uuid) -> Result<Vec<TranscriptEntry>> {
         let chunks = self.transcripts(session_id)?;
         // Repair sessions recorded before write-side merging: token-level
-        // streaming deltas were stored one row each. Fold consecutive
-        // same-role agent/thought rows within a short window back together.
+        // streaming deltas were stored one row each. Fold same-role
+        // agent/thought rows within a short window, looking past soft
+        // term/system noise that interleaved between deltas.
         let mut out: Vec<TranscriptEntry> = Vec::new();
-        let mut last_at: Option<DateTime<Utc>> = None;
         for c in chunks {
             let role = kind_to_role(&c.kind);
             let mergeable = matches!(role.as_str(), "agent" | "thought");
             if mergeable {
-                if let Some(prev) = out.last_mut() {
-                    let close = last_at
-                        .map(|t| (c.at - t).num_seconds().abs() <= 10)
-                        .unwrap_or(false);
-                    if prev.role == role && close {
-                        // Legacy rows lost their leading spaces to trim; add a
-                        // space unless punctuation continues the previous word.
-                        let needs_space = !prev.body.ends_with(char::is_whitespace)
-                            && !c
-                                .payload
-                                .chars()
-                                .next()
-                                .map(|ch| ".,!?;:)]}%'\"".contains(ch) || ch.is_whitespace())
-                                .unwrap_or(true);
-                        if needs_space {
-                            prev.body.push(' ');
+                let mut merge_idx: Option<usize> = None;
+                for i in (0..out.len()).rev() {
+                    let prev_role = out[i].role.as_str();
+                    if prev_role == role {
+                        let prev_at = parse_dt(&out[i].at);
+                        if (c.at - prev_at).num_seconds().abs() <= 10 {
+                            merge_idx = Some(i);
                         }
-                        prev.body.push_str(&c.payload);
-                        prev.at = c.at.to_rfc3339();
-                        last_at = Some(c.at);
+                        break;
+                    }
+                    if prev_role == "term" || prev_role == "system" {
                         continue;
                     }
+                    break;
+                }
+                if let Some(i) = merge_idx {
+                    let prev = &mut out[i];
+                    // Legacy rows lost their leading spaces to trim; add a
+                    // space unless punctuation continues the previous word.
+                    let needs_space = !prev.body.ends_with(char::is_whitespace)
+                        && !c
+                            .payload
+                            .chars()
+                            .next()
+                            .map(|ch| ".,!?;:)]}%'\"".contains(ch) || ch.is_whitespace())
+                            .unwrap_or(true);
+                    if needs_space {
+                        prev.body.push(' ');
+                    }
+                    prev.body.push_str(&c.payload);
+                    prev.at = c.at.to_rfc3339();
+                    continue;
                 }
             }
-            last_at = Some(c.at);
             out.push(TranscriptEntry {
                 role,
                 body: c.payload,
@@ -625,6 +651,37 @@ mod tests {
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0].body, "Sup — what are we building?");
         assert_eq!(entries[1].role, "user");
+    }
+
+    #[test]
+    fn streamed_chunks_merge_past_interleaved_term_noise() {
+        let dir = tempdir().unwrap();
+        let db = Persistence::open(dir.path().join("term.db")).unwrap();
+        let id = Uuid::new_v4();
+        let t = Utc::now();
+        db.append_message(id, "prompt", "hi", t).unwrap();
+        db.append_message_merged(id, "agent", "The `add`", t, 10).unwrap();
+        db.append_message(id, "term", "sampling.request sse_chunk noise", t).unwrap();
+        db.append_message_merged(id, "agent", " function", t, 10).unwrap();
+        db.append_message(id, "term", "more noise", t).unwrap();
+        db.append_message_merged(id, "agent", " returns a - b.", t, 10).unwrap();
+        let raw = db.transcripts(id).unwrap();
+        let agent_rows: Vec<_> = raw.iter().filter(|c| c.kind == "agent").collect();
+        assert_eq!(agent_rows.len(), 1, "write-side must merge past term: {:?}", agent_rows);
+        assert_eq!(agent_rows[0].payload, "The `add` function returns a - b.");
+        // Read-side also folds legacy agent/term/agent fragmentation.
+        let dir2 = tempdir().unwrap();
+        let db2 = Persistence::open(dir2.path().join("legacy-term.db")).unwrap();
+        let id2 = Uuid::new_v4();
+        db2.append_message(id2, "agent", "The `add`", t).unwrap();
+        db2.append_message(id2, "term", "noise", t).unwrap();
+        db2.append_message(id2, "agent", "function", t).unwrap();
+        db2.append_message(id2, "term", "noise2", t).unwrap();
+        db2.append_message(id2, "agent", "returns a - b.", t).unwrap();
+        let entries = db2.transcript_entries(id2).unwrap();
+        let agents: Vec<_> = entries.iter().filter(|e| e.role == "agent").collect();
+        assert_eq!(agents.len(), 1);
+        assert_eq!(agents[0].body, "The `add` function returns a - b.");
     }
 
     #[test]
