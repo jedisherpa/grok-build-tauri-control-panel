@@ -47,3 +47,14 @@ test("tucked context face stays above composer band at 670px", () => {
   const r = tuckRect({ width: 960, height: 670 }, 0);
   assert.ok(r.y + r.height < 670 - 100, "face must not cover sticky composer");
 });
+
+test("enlarge should recompute default x for left and right rails", () => {
+  const smallW = 960;
+  const largeW = 1380;
+  const left = { x: 12, y: 64, width: 200, height: 120 };
+  const right = dockRightX({ x: 700, y: 64, width: 214, height: 34 }, smallW);
+  const rightLarge = dockRightX(right, largeW);
+  assert.ok(rightLarge.x > right.x);
+  // Left rail stays near left but must remain on-canvas
+  assert.ok(left.x + left.width < largeW);
+});

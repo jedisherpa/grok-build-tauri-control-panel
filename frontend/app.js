@@ -595,32 +595,58 @@ function getTranscript(sessionId) {
 
 
 /** Roles that may sit between stream chunks without ending a reply segment.
- *  tool / approval / user / plan / error hard-stop and open a new bubble. */
+ *  user / approval / error always hard-stop. tool / plan may bridge when the
+ *  previous agent bubble has incomplete markdown (round4b bold split). */
 const STREAM_SOFT_ROLES = {
   agent: new Set(["term", "system", "thought"]),
   thought: new Set(["term", "system"]),
   term: new Set(["system"]),
 };
+/** tool/plan may sit between agent chunks only to finish broken markdown. */
+const STREAM_MD_BRIDGE_ROLES = new Set(["tool", "plan"]);
+
+/** True when body ends mid-fence / mid-bold / mid-inline-code. */
+function incompleteMarkdownTail(body) {
+  const t = String(body || "");
+  if (!t) return false;
+  const fences = (t.match(/```/g) || []).length;
+  if (fences % 2 === 1) return true;
+  const bolds = (t.match(/\*\*/g) || []).length;
+  if (bolds % 2 === 1) return true;
+  // Strip complete fences, then look for an unclosed inline backtick.
+  const noFences = t.replace(/```[\s\S]*?```/g, "");
+  const ticks = (noFences.match(/`/g) || []).length;
+  if (ticks % 2 === 1) return true;
+  return false;
+}
 
 /**
  * Index of the bubble a streaming chunk should join, or -1.
  * Reopens a recently closed same-role agent/thought bubble when only soft
- * noise (e.g. "prompt response ended") sits after it — late tiny fragments
- * after prompt_finished must not become their own AGENT row (round4 S5).
+ * noise sits after it (round4 S5). Also reopens across tool/plan when the
+ * prior agent bubble has incomplete markdown (round4b "**" split).
  */
 function findStreamCoalesceIndex(list, role, hopsMax = 40) {
   if (!list || !list.length) return -1;
   const soft = STREAM_SOFT_ROLES[role] || new Set(["term", "system"]);
+  let bridged = false;
   for (let i = list.length - 1, hops = 0; i >= 0 && hops < hopsMax; i--, hops++) {
     const entry = list[i];
     if (entry.role === role) {
       if (entry.streaming) return i;
-      // Late fragment after stream was closed (prompt_finished / flicker).
-      if (role === "agent" || role === "thought") return i;
+      if (role === "agent" || role === "thought") {
+        if (!bridged) return i;
+        if (role === "agent" && incompleteMarkdownTail(entry.body)) return i;
+        return -1;
+      }
       return -1;
     }
     if (soft.has(entry.role)) continue;
-    return -1; // hard separator
+    if (role === "agent" && STREAM_MD_BRIDGE_ROLES.has(entry.role)) {
+      bridged = true;
+      continue;
+    }
+    return -1; // user / approval / error (or other)
   }
   return -1;
 }
@@ -876,10 +902,25 @@ function pushFinalExplainFromReply(sessionId) {
   if (sessionId === state.selectedSession) renderExplainFeed();
 }
 
+function explainLooksMidTurn(text) {
+  return /\b(started a new reply|is writing|drafting|calling (?:a |the )?tool|thinking through|queued up a tool)\b/i.test(
+    String(text || "")
+  );
+}
+
 function handleExplainEvent(sid, payload) {
   if (!sid) return;
   const kind = String(payload.kind || "tick");
+  const presence = presenceFor(sid);
+  const turnOver =
+    !!P && (P.normallyFinished(presence) || presence.phase === "idle" || presence.phase === "done");
   if (kind === "pending") {
+    // Do not leave a leftover "thinking…" line after the turn is idle (round4b).
+    if (turnOver) {
+      state.explainPending = false;
+      if (sid === state.selectedSession) renderExplainFeed();
+      return;
+    }
     state.explainPending = true;
     if (sid === state.selectedSession) renderExplainFeed();
     return;
@@ -889,6 +930,16 @@ function handleExplainEvent(sid, payload) {
   const text = (D ? D.sanitize(String(payload.text || "")) : String(payload.text || "")).trim();
   if (!text) return;
   const list = explainListFor(sid);
+  const hasDone = list.some(
+    (e) =>
+      e.kind === "done" ||
+      /finished(?: its)? (?:short )?reply|finished and replied|idle again/i.test(e.text || "")
+  );
+  // Drop late out-of-order narrator cards after idle (round4b B05b/B07).
+  if (kind !== "done" && (turnOver || hasDone) && explainLooksMidTurn(text)) {
+    if (sid === state.selectedSession) renderExplainFeed();
+    return;
+  }
   list.push({ text, kind, requestId: payload.requestId || null, at: payload.at || nowIso() });
   if (list.length > 50) list.splice(0, list.length - 50);
 
@@ -1917,6 +1968,10 @@ function handleControlEvent(ev) {
         } else {
           commitPresence(sid, P.idleStatus(p));
         }
+        if (P.normallyFinished(presenceFor(sid)) || presenceFor(sid).phase === "idle") {
+          state.explainPending = false;
+          if (sid === state.selectedSession) renderExplainFeed();
+        }
         updateSendButton();
       } else if (st.includes("run")) {
         const p = presenceFor(sid);
@@ -2019,6 +2074,8 @@ function handleControlEvent(ev) {
       if (sess && payload.label) {
         sess.label = String(payload.label);
         renderThreads();
+        // Force Open-face dropdown to rebuild with the new label (round4b).
+        document.dispatchEvent(new CustomEvent("bomb-code:thread-selected"));
       }
       return;
     }
@@ -3126,11 +3183,82 @@ async function loadBackends() {
   };
 }
 
+
+/** Session is still spinning up (local flag or registry status). */
+function sessionIsStarting() {
+  if (state.startingSession) return true;
+  const sess = state.sessions.find((s) => s.id === state.selectedSession);
+  return String(sess?.status || "").toLowerCase().includes("start");
+}
+
+/**
+ * Keep keystrokes in #prompt while a thread starts so typing cannot land in
+ * rename fields / spatial chrome and produce a truncated "Loo" send (round4b).
+ */
+function holdComposerFocus(ms = 12000) {
+  const prompt = $("prompt");
+  if (!prompt) return;
+  const until = Date.now() + ms;
+  const refocus = () => {
+    if (!sessionIsStarting() && Date.now() > until) {
+      prompt.removeEventListener("blur", onBlur);
+      return;
+    }
+    if (document.activeElement !== prompt) {
+      try {
+        prompt.focus({ preventScroll: true });
+      } catch (_) {
+        prompt.focus();
+      }
+    }
+  };
+  const onBlur = () => {
+    if (sessionIsStarting()) requestAnimationFrame(refocus);
+  };
+  prompt.addEventListener("blur", onBlur);
+  refocus();
+  // Catch printable keys that landed elsewhere during start.
+  if (!state._composerFocusTrap) {
+    state._composerFocusTrap = (e) => {
+      if (!sessionIsStarting()) return;
+      const el = document.activeElement;
+      if (el && el.id === "prompt") return;
+      if (el && (el.tagName === "TEXTAREA" || el.tagName === "INPUT") && el.id !== "prompt") {
+        // Steal back from rename / path inputs.
+        if (e.key === "Enter") {
+          e.preventDefault();
+          e.stopPropagation();
+          refocus();
+          return;
+        }
+      }
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.key.length === 1 || e.key === "Backspace" || e.key === "Enter") {
+        e.preventDefault();
+        e.stopPropagation();
+        refocus();
+        if (e.key === "Backspace") {
+          prompt.value = prompt.value.slice(0, -1);
+        } else if (e.key === "Enter") {
+          // Buffer only — never send while starting.
+          return;
+        } else if (e.key.length === 1) {
+          prompt.value += e.key;
+        }
+        prompt.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+    };
+    document.addEventListener("keydown", state._composerFocusTrap, true);
+  }
+}
+
 async function startAcp() {
   const newBtn = $("btn-new-session");
   const startBtn = $("btn-start-acp");
   if (state.startingSession) return; // double-click guard
   state.startingSession = true;
+  holdComposerFocus();
+  updateSendButton();
   if (newBtn) newBtn.disabled = true;
   if (startBtn) startBtn.disabled = true;
   try {
@@ -3223,6 +3351,15 @@ async function startAcp() {
     state.startingSession = false;
     if (newBtn) newBtn.disabled = false;
     if (startBtn) startBtn.disabled = false;
+    updateSendButton();
+    const prompt = $("prompt");
+    if (prompt) {
+      try {
+        prompt.focus({ preventScroll: true });
+      } catch (_) {
+        prompt.focus();
+      }
+    }
   }
 }
 
@@ -3240,6 +3377,17 @@ async function sendPrompt() {
     }
     // Sending into a still-starting or already-failed session fails backend-side
     // (or silently no-ops). Gate with a visible reason and leave the prompt alone.
+    if (state.startingSession) {
+      holdComposerFocus();
+      pushEvent(
+        "Session is still starting — your message stays here until it's ready.",
+        "err",
+        "wait",
+        { force: true, milestone: true }
+      );
+      updateSendButton();
+      return;
+    }
     const selectedSess = state.sessions.find((s) => s.id === state.selectedSession);
     const gate = (typeof window !== "undefined" && window.BombDiagnostics)
       ? (typeof window !== "undefined" && window.BombDiagnostics).composerGate(state.selectedSession, selectedSess?.status)
@@ -3694,16 +3842,19 @@ function updateSendButton() {
   const gate = (typeof window !== "undefined" && window.BombDiagnostics)
     ? (typeof window !== "undefined" && window.BombDiagnostics).composerGate(state.selectedSession, sess?.status)
     : { canSend: true, reason: "" };
-  const blocked = !busy && !gate.canSend;
+  const starting = !!state.startingSession || sessionIsStarting();
+  const startReason = "Session is still starting — your message stays here until it's ready.";
+  const blocked = !busy && (!gate.canSend || starting);
+  const blockReason = starting ? startReason : gate.reason;
   btn.textContent = busy ? "Stop" : "Send";
   btn.disabled = blocked;
-  btn.title = blocked ? gate.reason : "";
+  btn.title = blocked ? blockReason : "";
   btn.classList.toggle("danger", busy);
   btn.classList.toggle("primary", !busy);
   const hint = $("composer-gate-hint");
   if (hint) {
     if (blocked) {
-      hint.textContent = gate.reason;
+      hint.textContent = blockReason;
       hint.style.display = "block";
     } else {
       // Clear stale "still starting" even while a real turn shows Stop (llm-retry #06).

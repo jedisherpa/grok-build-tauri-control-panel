@@ -1450,21 +1450,27 @@ img.logo {
 .spatial-workspace #transcript,
 .has-panel-cubes #transcript {
   overflow: auto;
-  min-height: 140px;
+  /* round4b: ~50px strip was too short for approvals / coalesce checks */
+  min-height: 200px;
   max-height: none;
   flex: 1 1 auto;
 }
 .spatial-workspace .conversation-column,
-.has-panel-cubes .col-center .session-stack {
-  min-height: 0;
+.has-panel-cubes .col-center .session-stack,
+.spatial-workspace .session-stack {
+  min-height: 220px;
   display: flex;
   flex-direction: column;
+  flex: 1 1 auto;
+}
+.conversation-label {
+  flex-shrink: 0;
 }
 /* Give conversation more of the center column so approval buttons aren't clipped */
 .spatial-workspace .narrative-panel {
-  flex: 0 1 32%;
-  max-height: 36%;
-  min-height: 100px;
+  flex: 0 1 28%;
+  max-height: 32%;
+  min-height: 80px;
   overflow: auto;
 }
 
@@ -1504,10 +1510,15 @@ img.logo {
   }
 }
 @media (max-width: 1000px), (max-height: 700px) {
-  /* Prefer collapsing narrative over hiding Send */
+  /* Prefer collapsing narrative over hiding Send / conversation */
   .spatial-workspace .narrative-panel {
-    flex: 0 1 24%;
-    max-height: 22vh;
+    flex: 0 1 22%;
+    max-height: 20vh;
+    min-height: 64px;
+  }
+  .spatial-workspace #transcript,
+  .has-panel-cubes #transcript {
+    min-height: 180px;
   }
   #composer.composer .composer-row textarea {
     min-height: 44px;

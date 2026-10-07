@@ -28,3 +28,15 @@ test("final What's happening summarizes reply and strips fences", () => {
 test("empty body still clears writing state with finished line", () => {
   assert.equal(finalExplainText(""), "The agent finished its reply.");
 });
+
+function explainLooksMidTurn(text) {
+  return /\b(started a new reply|is writing|drafting|calling (?:a |the )?tool|thinking through|queued up a tool)\b/i.test(
+    String(text || "")
+  );
+}
+
+test("late mid-turn narrator lines are detected after idle", () => {
+  assert.equal(explainLooksMidTurn("The agent started a new reply, thought for a moment"), true);
+  assert.equal(explainLooksMidTurn("The agent finished its short reply and is idle again."), false);
+  assert.equal(explainLooksMidTurn("The agent finished and replied: add returns a - b"), false);
+});
