@@ -12,6 +12,8 @@ use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tracing::info;
 use uuid::Uuid;
+mod journal;
+pub use journal::*;
 
 #[derive(Debug, Error)]
 pub enum PersistenceError {
@@ -25,6 +27,14 @@ pub enum PersistenceError {
     NotFound(String),
     #[error("unsupported conversation role: {0}")]
     InvalidConversationRole(String),
+    #[error("invalid persistence state: {0}")]
+    InvalidState(String),
+    #[error("persistence bound exceeded: {0}")]
+    Bounds(String),
+    #[error("invalid event input: {0}")]
+    InvalidInput(String),
+    #[error("stale runtime metadata")]
+    StaleRuntime,
 }
 
 pub type Result<T> = std::result::Result<T, PersistenceError>;
@@ -104,31 +114,94 @@ pub struct Persistence {
     path: PathBuf,
     /// Serialize writes — multiple event-loop tasks may append concurrently.
     write_lock: Mutex<()>,
+    /// Retained writer keeps WAL open and avoids a last-connection checkpoint per streamed event.
+    writer: Mutex<Connection>,
+    identity: grok_events::StoreIdentity,
+    owned_companions: Option<[std::fs::File; 2]>,
+    snapshots: Mutex<std::collections::HashMap<Uuid, journal::SnapshotLease>>,
+    #[cfg(test)]
+    after_commit_test_hook: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    // Last field: physical ownership outlives every connection and the installed sink.
+    _ownership: Option<std::sync::Arc<ProfileOwnership>>,
 }
 
 impl Persistence {
     pub fn open(path: impl Into<PathBuf>) -> Result<Self> {
         let path = path.into();
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
+        if std::fs::symlink_metadata(&path).is_ok_and(|m| m.file_type().is_symlink()) {
+            return Err(PersistenceError::InvalidState(
+                "terminal database symlink refused before opening SQLite".into(),
+            ));
         }
+        let parent = path
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .unwrap_or_else(|| Path::new("."));
+        std::fs::create_dir_all(parent)?;
+        let filename = path
+            .file_name()
+            .ok_or_else(|| PersistenceError::InvalidState("database filename required".into()))?;
+        // SQLite NOFOLLOW rejects ancestor aliases too; normalize trusted parent
+        // while retaining nofollow protection on the actual database/companions.
+        let path = std::fs::canonicalize(parent)?.join(filename);
         let db = Self {
+            writer: Mutex::new(Self::open_connection(&path)?),
             path,
             write_lock: Mutex::new(()),
+            identity: grok_events::StoreIdentity {
+                store_id: Uuid::nil(),
+                generation: Uuid::nil(),
+            },
+            owned_companions: None,
+            snapshots: Mutex::new(std::collections::HashMap::new()),
+            #[cfg(test)]
+            after_commit_test_hook: Mutex::new(None),
+            _ownership: None,
         };
+        let mut db = db;
         db.migrate()?;
+        db.migrate_journal()?;
+        db.identity = db.load_store_identity()?;
         info!(path = %db.path.display(), "session memory database open");
         Ok(db)
     }
 
+    /// Production constructor keeps physical ownership alive with every sink clone.
+    pub fn open_owned(owner: std::sync::Arc<ProfileOwnership>) -> Result<Self> {
+        owner.verify_database_identity()?;
+        let mut db = Self::open(owner.db_path())?;
+        // Migrations used temporary connections. Open the WAL on the retained
+        // writer before pinning its active companion identities.
+        {
+            let writer = db
+                .writer
+                .lock()
+                .map_err(|_| PersistenceError::InvalidState("writer lock poisoned".into()))?;
+            let _: i64 =
+                writer.query_row("SELECT COALESCE(MAX(seq),0) FROM event_journal", [], |r| {
+                    r.get(0)
+                })?;
+        }
+        db.owned_companions = Some(journal::pin_owned_companions(db.path())?);
+        db._ownership = Some(owner);
+        Ok(db)
+    }
     fn conn(&self) -> Result<Connection> {
-        let conn = Connection::open(&self.path)?;
-        // Reasonable durability for a desktop app.
-        let _ = conn.execute_batch(
-            "PRAGMA journal_mode=WAL;
-             PRAGMA synchronous=NORMAL;
-             PRAGMA foreign_keys=ON;",
-        );
+        self.verify_owned_writer_identity()?;
+        Self::open_connection(&self.path)
+    }
+
+    fn open_connection(path: &Path) -> Result<Connection> {
+        journal::verify_sqlite_companions(path)?;
+        let conn = Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::default() | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )?;
+        conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        conn.execute_batch(
+            "PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA foreign_keys=ON;",
+        )?;
+        verify_runtime(&conn)?;
         Ok(conn)
     }
 
@@ -177,6 +250,8 @@ impl Persistence {
     pub fn upsert_session(&self, rec: &SessionRecord) -> Result<()> {
         let _g = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
         let conn = self.conn()?;
+        journal::ensure_legacy_writer(&conn, rec.id)?;
+        journal::validate_metadata(&conn, rec.id, &rec.metadata_json)?;
         conn.execute(
             r#"
             INSERT INTO sessions (id, cwd, mode, model, status, worktree, acp_session_id, metadata_json, created_at, updated_at)
@@ -185,7 +260,7 @@ impl Persistence {
                 cwd=excluded.cwd,
                 mode=excluded.mode,
                 model=excluded.model,
-                status=excluded.status,
+                status=CASE WHEN EXISTS(SELECT 1 FROM session_runtimes WHERE session_id=excluded.id) THEN sessions.status ELSE excluded.status END,
                 worktree=excluded.worktree,
                 acp_session_id=excluded.acp_session_id,
                 metadata_json=excluded.metadata_json,
@@ -211,6 +286,7 @@ impl Persistence {
     pub fn update_session_status(&self, id: Uuid, status: &str) -> Result<()> {
         let _g = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
         let conn = self.conn()?;
+        journal::ensure_legacy_writer(&conn, id)?;
         let n = conn.execute(
             "UPDATE sessions SET status=?1, updated_at=?2 WHERE id=?3",
             params![status, Utc::now().to_rfc3339(), id.to_string()],
@@ -285,17 +361,11 @@ impl Persistence {
 
     pub fn delete_session(&self, id: Uuid) -> Result<()> {
         let _g = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
-        let conn = self.conn()?;
-        conn.execute(
-            "DELETE FROM transcripts WHERE session_id=?1",
-            params![id.to_string()],
-        )?;
-        conn.execute("DELETE FROM sessions WHERE id=?1", params![id.to_string()])?;
-        // Tombstone: late events for this id must not resurrect a ghost row.
-        conn.execute(
-            "INSERT INTO kv (key, value) VALUES (?1, ?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            params![format!("tombstone_{id}"), Utc::now().to_rfc3339()],
-        )?;
+        let mut conn = self.conn()?;
+        journal::ensure_legacy_writer(&conn, id)?;
+        let tx = conn.transaction()?;
+        journal::tombstone_session(&tx, id, Utc::now())?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -336,6 +406,7 @@ impl Persistence {
     ) -> Result<u64> {
         let _g = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
         let conn = self.conn()?;
+        journal::ensure_legacy_writer(&conn, session_id)?;
         if !self.ensure_session_row(&conn, session_id)? {
             return Err(PersistenceError::NotFound(format!(
                 "session {session_id} was deleted"
@@ -369,21 +440,31 @@ impl Persistence {
     pub fn import_conversation(&self, session_id: Uuid, entries: &[TranscriptEntry]) -> Result<()> {
         let _g = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
         let mut conn = self.conn()?;
+        journal::ensure_legacy_writer(&conn, session_id)?;
         if !self.ensure_session_row(&conn, session_id)? {
             return Err(PersistenceError::NotFound(session_id.to_string()));
         }
         let tx = conn.transaction()?;
-        let mut seq: i64 = tx.query_row("SELECT COALESCE(MAX(seq),0) FROM transcripts WHERE session_id=?1",
-            [session_id.to_string()], |r| r.get(0))?;
+        let mut seq: i64 = tx.query_row(
+            "SELECT COALESCE(MAX(seq),0) FROM transcripts WHERE session_id=?1",
+            [session_id.to_string()],
+            |r| r.get(0),
+        )?;
         for entry in entries {
             let kind = match entry.role.as_str() {
                 "user" => "prompt",
                 "assistant" | "agent" => "agent",
-                _ => return Err(PersistenceError::InvalidConversationRole(entry.role.clone())),
+                _ => {
+                    return Err(PersistenceError::InvalidConversationRole(
+                        entry.role.clone(),
+                    ))
+                }
             };
             seq += 1;
-            tx.execute("INSERT INTO transcripts (session_id,seq,kind,payload,at) VALUES (?1,?2,?3,?4,?5)",
-                params![session_id.to_string(),seq,kind,entry.body,entry.at])?;
+            tx.execute(
+                "INSERT INTO transcripts (session_id,seq,kind,payload,at) VALUES (?1,?2,?3,?4,?5)",
+                params![session_id.to_string(), seq, kind, entry.body, entry.at],
+            )?;
         }
         tx.commit()?;
         Ok(())
@@ -408,6 +489,7 @@ impl Persistence {
         let merged = {
             let _g = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
             let conn = self.conn()?;
+            journal::ensure_legacy_writer(&conn, session_id)?;
             let mut stmt = conn.prepare(
                 "SELECT seq, kind, at FROM transcripts WHERE session_id=?1 ORDER BY seq DESC LIMIT 24",
             )?;
@@ -564,14 +646,20 @@ impl Persistence {
 
     pub fn checkpoint(&self) -> Result<()> {
         info!(path = %self.path.display(), "persistence checkpoint");
-        self.set_kv("last_checkpoint", &Utc::now().to_rfc3339())?;
-        // Truncate WAL for a clean snapshot on disk.
-        if let Ok(conn) = self.conn() {
-            let _ = conn.execute_batch("PRAGMA wal_checkpoint(TRUNCATE);");
+        let _g = self.write_lock.lock().unwrap_or_else(|e| e.into_inner());
+        let conn = self.conn()?;
+        let (busy, log, checkpointed): (i64, i64, i64) =
+            conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+            })?;
+        if busy != 0 || log != checkpointed {
+            return Err(PersistenceError::InvalidState(format!("WAL checkpoint blocked: busy={busy}, log={log}, checkpointed={checkpointed}; committed WAL preserved")));
         }
+        // Report successful checkpoint only after observing the pragma result.
+        // This marker itself is a new durable commit and may create a small WAL.
+        conn.execute("INSERT INTO kv(key,value) VALUES('last_checkpoint',?1) ON CONFLICT(key) DO UPDATE SET value=excluded.value", [Utc::now().to_rfc3339()])?;
         Ok(())
     }
-
 }
 
 fn kind_to_role(kind: &str) -> String {
@@ -606,15 +694,33 @@ mod tests {
 
     #[test]
     fn conversation_import_is_complete_and_never_imports_approval_authority() {
-        let dir = tempdir().unwrap(); let db = Persistence::open(dir.path().join("m.db")).unwrap();
+        let dir = tempdir().unwrap();
+        let db = Persistence::open(dir.path().join("m.db")).unwrap();
         let id = Uuid::new_v4();
-        let entries = vec![TranscriptEntry { role: "user".into(), body: "prior request".into(), at: Utc::now().to_rfc3339(), seq: 0 },
-            TranscriptEntry { role: "assistant".into(), body: "prior reply".into(), at: Utc::now().to_rfc3339(), seq: 1 }];
+        let entries = vec![
+            TranscriptEntry {
+                role: "user".into(),
+                body: "prior request".into(),
+                at: Utc::now().to_rfc3339(),
+                seq: 0,
+            },
+            TranscriptEntry {
+                role: "assistant".into(),
+                body: "prior reply".into(),
+                at: Utc::now().to_rfc3339(),
+                seq: 1,
+            },
+        ];
         db.import_conversation(id, &entries).unwrap();
         assert_eq!(db.transcript_entries(id).unwrap().len(), 2);
-        let mut forbidden = entries.clone(); forbidden[1].role = "approval".into();
+        let mut forbidden = entries.clone();
+        forbidden[1].role = "approval".into();
         assert!(db.import_conversation(id, &forbidden).is_err());
-        assert_eq!(db.transcript_entries(id).unwrap().len(), 2, "failed import must roll back atomically");
+        assert_eq!(
+            db.transcript_entries(id).unwrap().len(),
+            2,
+            "failed import must roll back atomically"
+        );
     }
 
     #[test]
@@ -632,7 +738,8 @@ mod tests {
         assert_eq!(entries[1].role, "agent");
         assert_eq!(entries[1].body, "Sup — what are we building?");
         // Different kind starts a new row.
-        db.append_message_merged(id, "thought", "pondering", t, 10).unwrap();
+        db.append_message_merged(id, "thought", "pondering", t, 10)
+            .unwrap();
         assert_eq!(db.transcript_entries(id).unwrap().len(), 3);
     }
 
@@ -660,14 +767,23 @@ mod tests {
         let id = Uuid::new_v4();
         let t = Utc::now();
         db.append_message(id, "prompt", "hi", t).unwrap();
-        db.append_message_merged(id, "agent", "The `add`", t, 10).unwrap();
-        db.append_message(id, "term", "sampling.request sse_chunk noise", t).unwrap();
-        db.append_message_merged(id, "agent", " function", t, 10).unwrap();
+        db.append_message_merged(id, "agent", "The `add`", t, 10)
+            .unwrap();
+        db.append_message(id, "term", "sampling.request sse_chunk noise", t)
+            .unwrap();
+        db.append_message_merged(id, "agent", " function", t, 10)
+            .unwrap();
         db.append_message(id, "term", "more noise", t).unwrap();
-        db.append_message_merged(id, "agent", " returns a - b.", t, 10).unwrap();
+        db.append_message_merged(id, "agent", " returns a - b.", t, 10)
+            .unwrap();
         let raw = db.transcripts(id).unwrap();
         let agent_rows: Vec<_> = raw.iter().filter(|c| c.kind == "agent").collect();
-        assert_eq!(agent_rows.len(), 1, "write-side must merge past term: {:?}", agent_rows);
+        assert_eq!(
+            agent_rows.len(),
+            1,
+            "write-side must merge past term: {:?}",
+            agent_rows
+        );
         assert_eq!(agent_rows[0].payload, "The `add` function returns a - b.");
         // Read-side also folds legacy agent/term/agent fragmentation.
         let dir2 = tempdir().unwrap();
@@ -677,7 +793,8 @@ mod tests {
         db2.append_message(id2, "term", "noise", t).unwrap();
         db2.append_message(id2, "agent", "function", t).unwrap();
         db2.append_message(id2, "term", "noise2", t).unwrap();
-        db2.append_message(id2, "agent", "returns a - b.", t).unwrap();
+        db2.append_message(id2, "agent", "returns a - b.", t)
+            .unwrap();
         let entries = db2.transcript_entries(id2).unwrap();
         let agents: Vec<_> = entries.iter().filter(|e| e.role == "agent").collect();
         assert_eq!(agents.len(), 1);
@@ -705,7 +822,8 @@ mod tests {
         db.upsert_session(&rec).unwrap();
         db.append_message(id, "prompt", "hello world", Utc::now())
             .unwrap();
-        db.append_message(id, "agent", "hi back", Utc::now()).unwrap();
+        db.append_message(id, "agent", "hi back", Utc::now())
+            .unwrap();
         let loaded = db.get_session(id).unwrap();
         assert_eq!(loaded.cwd, "/tmp/proj");
         assert_eq!(loaded.message_count, 2);

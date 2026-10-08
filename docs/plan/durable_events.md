@@ -86,3 +86,39 @@ proxy for completeness or marking a failed load permanently successful.
 Keep pre-fix failures and raw receipts outside Git. Passing source tests does not
 qualify disk power-loss behavior, legacy app exclusion, a native package or a
 production download.
+
+## Implemented source contract and explicit limits
+
+The retained SQLite writer commits journal, transcript/status projection, managed
+session metadata, workflow/scheduler snapshots and correlated operations in the
+same transaction before notification. Production keeps physical profile and
+main/WAL/SHM identity ownership through every persistence clone. Identity checks
+run before transactions and after commit before acknowledgement; a post-commit
+identity failure preserves the old receipt and reports uncertainty. It cannot
+assert rollback of an already committed external effect.
+
+Snapshot leases pin a consistent read transaction for bounded pages. Leases have
+count/time limits; replay and snapshots have row and byte limits. The renderer
+keeps 2,000 rows/4MiB and at most 300 transcript DOM rows with explicit earlier
+coverage. Structured native messages that cannot fit the accepted canonical
+projection fail current-runtime coverage, rather than disappearing before a
+later successful completion. Historical approval text remains inert; restored
+controls come only from bounded current-host pending requests carrying exact
+runtime and turn identity.
+
+A prior process lifetime is retired on startup. Nonterminal records become
+recovering, unresolved operations retain their private IDs, and no effect is
+replayed automatically. A released store lock proves prior writer exit, not
+native child cleanup or external effect completion. Consistent backups preserve
+recovery identity; concurrently activating a separately cloned profile still
+requires an explicit generation-rotation protocol. Legacy process exclusion is
+a bounded known-product observation, not control of unknown noncooperating apps.
+
+Synchronous FULL commits remain subject to final signed-app responsiveness
+qualification. The generated owned-writer probe and deliberately non-yielding
+burst are useful source measurements, not native frame-time or recovery results.
+Untagged provider messages actually emitted after a new turn starts cannot prove
+their causal turn. Dedicated process groups do not contain detached descendants.
+Other utility workers, full native tool enforcement and aggregate admission are
+subsequent release gates. Do not publish these source results as packaged or
+power-loss qualification.

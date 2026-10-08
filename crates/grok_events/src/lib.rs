@@ -6,13 +6,13 @@
 pub mod diagnostics;
 
 use std::sync::Arc;
+mod publication;
+pub use publication::*;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
-use tokio::sync::broadcast;
-use tracing::debug;
 use uuid::Uuid;
 
 #[derive(Debug, Error)]
@@ -21,7 +21,22 @@ pub enum EventError {
     Lagged(u64),
     #[error("channel closed")]
     Closed,
+    #[error("event writer unhealthy: {0}")]
+    Unhealthy(String),
+    #[error("event sink failed: {0}")]
+    Sink(String),
+    #[error("producer runtime retired or superseded")]
+    StaleRuntime,
+    #[error("session was deleted")]
+    Tombstoned,
+    #[error("invalid event origin: {0}")]
+    InvalidOrigin(String),
+    #[error("durable event sink required")]
+    NotDurable,
+    #[error("event input exceeds budget: {0}")]
+    Bounds(String),
 }
+pub type SinkError = EventError;
 
 pub type Result<T> = std::result::Result<T, EventError>;
 
@@ -42,6 +57,61 @@ pub enum SessionStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ControlEvent {
+    StoreValueUpdated {
+        key: String,
+        value: String,
+        at: DateTime<Utc>,
+    },
+    StoreRecoveryObserved {
+        lifetime_id: Uuid,
+        at: DateTime<Utc>,
+    },
+    ImportedConversation {
+        session_id: Uuid,
+        metadata_json: String,
+        entries_json: String,
+        at: DateTime<Utc>,
+    },
+    HostOperationIntent {
+        operation_id: Uuid,
+        session_id: Option<Uuid>,
+        kind: String,
+        target: String,
+        at: DateTime<Utc>,
+    },
+    HostOperationOutcome {
+        operation_id: Uuid,
+        session_id: Option<Uuid>,
+        kind: String,
+        target: String,
+        result: String,
+        at: DateTime<Utc>,
+    },
+    SessionMetadataUpdated {
+        session_id: Uuid,
+        metadata_json: String,
+        at: DateTime<Utc>,
+    },
+    SessionRemoved {
+        session_id: Uuid,
+        at: DateTime<Utc>,
+    },
+    RuntimeActivated {
+        session_id: Uuid,
+        runtime_id: Uuid,
+        at: DateTime<Utc>,
+    },
+    RuntimeRetired {
+        session_id: Uuid,
+        runtime_id: Uuid,
+        at: DateTime<Utc>,
+    },
+    UserMessage {
+        session_id: Uuid,
+        operation_id: Uuid,
+        text: String,
+        at: DateTime<Utc>,
+    },
     SessionCreated {
         session_id: Uuid,
         cwd: String,
@@ -177,38 +247,7 @@ pub struct PlanStep {
     pub status: String,
 }
 
-// Heavy token streaming can burst thousands of events; a lagged receiver
-// permanently loses transcript rows, so keep generous headroom.
-const DEFAULT_CAPACITY: usize = 8192;
-
-#[derive(Debug)]
-pub struct EventBus {
-    tx: broadcast::Sender<ControlEvent>,
-}
-
 impl EventBus {
-    pub fn new() -> Self {
-        Self::with_capacity(DEFAULT_CAPACITY)
-    }
-
-    pub fn with_capacity(capacity: usize) -> Self {
-        let (tx, _) = broadcast::channel(capacity);
-        Self { tx }
-    }
-
-    pub fn subscribe(&self) -> broadcast::Receiver<ControlEvent> {
-        self.tx.subscribe()
-    }
-
-    pub fn sender(&self) -> broadcast::Sender<ControlEvent> {
-        self.tx.clone()
-    }
-
-    pub fn emit(&self, event: ControlEvent) {
-        debug!(?event, "emit");
-        let _ = self.tx.send(event);
-    }
-
     pub async fn emit_session_created(&self, session_id: Uuid, cwd: &str, mode: &str) {
         self.emit(ControlEvent::SessionCreated {
             session_id,
@@ -249,10 +288,6 @@ impl EventBus {
 
     pub fn emit_plan_update(&self, session_id: Uuid, event: PlanUpdateEvent) {
         self.emit(ControlEvent::PlanUpdate { session_id, event });
-    }
-
-    pub fn receiver_count(&self) -> usize {
-        self.tx.receiver_count()
     }
 }
 

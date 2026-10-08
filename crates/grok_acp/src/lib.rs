@@ -10,7 +10,7 @@ mod terminals;
 mod transport;
 
 pub use client::{
-    ensure_native_policy_supported, AcpClient, AcpClientConfig, ApprovalMode, BrainMode, ConnectOpts,
+    ensure_native_policy_supported, AcpClient, AcpClientConfig, LiveApproval, ApprovalMode, BrainMode, ConnectOpts,
     SpawnOptions as AcpSpawnOptions, ToolClass,
 };
 pub use error::{AcpError, Result};

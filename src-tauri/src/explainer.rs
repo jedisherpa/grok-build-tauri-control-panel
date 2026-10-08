@@ -19,7 +19,7 @@ use uuid::Uuid;
 
 use grok_cli_wrapper::GrokCli;
 use grok_config::GrokConfig;
-use grok_events::{ControlEvent, EventBus};
+use grok_events::{CommittedEvent, ControlEvent, EventBus};
 
 /// Cheapest known fast model (verified against `grok models`); config can
 /// override via `explainer_model`.
@@ -41,6 +41,10 @@ No headers, no bullet points, no fluff, don't address the reader, don't mention 
 
 #[derive(Default)]
 struct SessionBuffer {
+    /// Captured host producer; never reacquired by session ID after a call.
+    scope: Option<Arc<EventBus>>,
+    committed_seq: u64,
+    buffer_id: Uuid,
     lines: VecDeque<String>,
     /// Total lines ever pushed; cursor compares against this.
     pushed: u64,
@@ -89,12 +93,15 @@ impl ExplainerService {
         // Intake: translate bus events into compact per-session lines.
         {
             let svc = svc.clone();
-            let mut rx = event_bus.subscribe();
+            let mut rx = event_bus.subscribe_committed();
             tokio::spawn(async move {
                 loop {
                     match rx.recv().await {
                         Ok(ev) => svc.ingest(&ev).await,
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            // Incomplete activity cannot support a cached current explanation.
+                            svc.buffers.lock().await.clear();
+                        }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
                 }
@@ -147,7 +154,18 @@ impl ExplainerService {
         self.enabled.load(Ordering::Relaxed)
     }
 
-    async fn ingest(&self, ev: &ControlEvent) {
+    async fn ingest(&self, envelope: &CommittedEvent) {
+        let ev = &envelope.event;
+        if matches!(ev, ControlEvent::RuntimeRetired { .. } | ControlEvent::SessionRemoved { .. }) {
+            if let Some(sid) = envelope.origin.session_id {
+                let mut buffers = self.buffers.lock().await;
+                if buffers.get(&sid).and_then(|b| b.scope.as_ref()).map(|b| b.runtime_id()) == Some(envelope.origin.runtime_id) {
+                    buffers.remove(&sid);
+                }
+            }
+            return;
+        }
+        let Ok(scope) = self.event_bus.scope_for_origin(envelope.origin) else { return; };
         let (sid, line, approval_request_id) = match ev {
             ControlEvent::ToolCall { session_id, event } => (
                 *session_id,
@@ -208,6 +226,11 @@ impl ExplainerService {
         {
             let mut buffers = self.buffers.lock().await;
             let buf = buffers.entry(sid).or_default();
+            if envelope.seq <= buf.committed_seq || scope.ensure_healthy().is_err() { return; }
+            if buf.scope.as_ref().map(|b| b.runtime_id()) != Some(scope.runtime_id()) {
+                *buf = SessionBuffer { scope: Some(scope), buffer_id: Uuid::new_v4(), ..Default::default() };
+            }
+            buf.committed_seq = envelope.seq;
             // Dedupe bursts of identical consecutive lines (streaming chunks).
             if buf.lines.back().map(|b| b == &line).unwrap_or(false) {
                 return;
@@ -240,6 +263,8 @@ impl ExplainerService {
                 return;
             }
         }
+        let Some(scope) = self.buffers.lock().await.get(&sid).and_then(|b| b.scope.clone()) else { return; };
+        if scope.ensure_healthy().is_err() { return; }
         // One in-flight call max; approvals don't preempt, they just wait for
         // the next tick (their line is in the buffer and explained then).
         if self
@@ -250,8 +275,9 @@ impl ExplainerService {
             return;
         }
 
-        let result = self.explain_once(sid, urgent, approval_request_id).await;
+        let result = self.explain_once(&scope, sid, urgent, approval_request_id).await;
         self.busy.store(false, Ordering::Release);
+        if scope.ensure_healthy().is_err() { return; }
         if let Err(e) = result {
             warn!(error = %grok_events::diagnostics::sanitize_diagnostic(&e.to_string()), "explainer call failed; backing off");
             *self.backoff_until.lock().await =
@@ -262,8 +288,8 @@ impl ExplainerService {
                 .map(|v| !v.trim().is_empty())
                 .unwrap_or(false);
             let reason = grok_events::diagnostics::display_cli_failure(&e.to_string(), key_set);
-            self.emit(
-                sid,
+            let _ = self.emit(
+                &scope, sid,
                 &format!("(explainer paused: {reason})"),
                 "error",
                 None,
@@ -273,16 +299,18 @@ impl ExplainerService {
 
     async fn explain_once(
         &self,
+        scope: &EventBus,
         sid: Uuid,
         urgent: bool,
         approval_request_id: Option<String>,
     ) -> Result<(), String> {
         // Snapshot new lines without holding the lock across the LLM call.
-        let (new_lines, previous, pushed_now) = {
+        let (new_lines, previous, pushed_now, buffer_id) = {
             let mut buffers = self.buffers.lock().await;
             let Some(buf) = buffers.get_mut(&sid) else {
                 return Ok(());
             };
+            if buf.scope.as_ref().map(|b| b.runtime_id()) != Some(scope.runtime_id()) { return Ok(()); }
             let unexplained = buf.pushed.saturating_sub(buf.explained_to) as usize;
             if unexplained == 0 {
                 return Ok(());
@@ -294,7 +322,7 @@ impl ExplainerService {
                 .skip(buf.lines.len() - take)
                 .cloned()
                 .collect();
-            (lines, buf.last_explanation.clone(), buf.pushed)
+            (lines, buf.last_explanation.clone(), buf.pushed, buf.buffer_id)
         };
 
         let kind = if approval_request_id.is_some() {
@@ -302,7 +330,7 @@ impl ExplainerService {
         } else {
             "tick"
         };
-        self.emit(sid, "", "pending", approval_request_id.clone());
+        self.emit(scope, sid, "", "pending", approval_request_id.clone())?;
 
         let mut activity = String::new();
         for l in new_lines.iter().rev() {
@@ -326,7 +354,7 @@ impl ExplainerService {
         let model = self.model.read().await.clone();
         let backend = self.backend.read().await.clone();
         debug!(%sid, lines = new_lines.len(), kind, %backend, %model, "explainer call");
-        let out = match self.run_narrator(&backend, &model, &prompt).await {
+        let out = match self.run_narrator_on(scope, &backend, &model, &prompt).await {
             Ok(out) => out,
             // Stale/invalid model id: self-heal onto the known fast model
             // instead of parking the narrator on an error card.
@@ -338,14 +366,14 @@ impl ExplainerService {
                 warn!(%model, "narrator model rejected; falling back to {DEFAULT_EXPLAINER_MODEL}");
                 *self.model.write().await = DEFAULT_EXPLAINER_MODEL.to_string();
                 self.emit(
-                    sid,
+                    scope, sid,
                     &format!(
                         "(model '{model}' isn't available on this grok CLI — narrator switched to {DEFAULT_EXPLAINER_MODEL})"
                     ),
                     "error",
                     None,
-                );
-                self.run_narrator(&backend, DEFAULT_EXPLAINER_MODEL, &prompt)
+                )?;
+                self.run_narrator_on(scope, &backend, DEFAULT_EXPLAINER_MODEL, &prompt)
                     .await
                     .map_err(|e| e.to_string())?
             }
@@ -358,12 +386,12 @@ impl ExplainerService {
 
         {
             let mut buffers = self.buffers.lock().await;
-            if let Some(buf) = buffers.get_mut(&sid) {
+            if let Some(buf) = buffers.get_mut(&sid).filter(|b| b.buffer_id == buffer_id && b.scope.as_ref().map(|s| s.runtime_id()) == Some(scope.runtime_id())) {
+                self.emit(scope, sid, &text, kind, approval_request_id)?;
                 buf.explained_to = pushed_now;
                 buf.last_explanation = text.clone();
             }
         }
-        self.emit(sid, &text, kind, approval_request_id);
         Ok(())
     }
 
@@ -404,16 +432,16 @@ impl ExplainerService {
         // card. Exact-prompt mode and low effort passed the actual source-backed
         // outline/select check with this configured model; retain its identity.
         let args = structured_reader_args(prompt, &model);
-        self.grok_cli
-            .run_args_timeout(&args, None, Duration::from_secs(180))
-            .await
-            .map_err(|error| error.to_string())
+        crate::operations::recorded(&self.event_bus, "structured_reader", format!("grok/{model}"), async {
+            self.grok_cli.run_args_timeout(&args, None, Duration::from_secs(180)).await.map_err(|error| error.to_string())
+        }).await
     }
 
     /// One-shot 2-4 word title for a thread's first prompt (smart naming).
     /// Uses the same locked-down narrator provider; errors bubble so callers
     /// can keep the local slug.
-    pub async fn generate_title(&self, prompt: &str) -> Result<String, String> {
+    /// Asynchronous naming retains the conversation producer across provider locks.
+    pub async fn generate_title_on(&self, scope: &EventBus, prompt: &str) -> Result<String, String> {
         if !self.enabled.load(Ordering::Relaxed) {
             return Err("explainer disabled".into());
         }
@@ -424,7 +452,7 @@ impl ExplainerService {
              just the title.\n\nTask: {}",
             clip(prompt, 500)
         );
-        let out = self.run_narrator(&backend, &model, &ask).await?;
+        let out = self.run_narrator_on(scope, &backend, &model, &ask).await?;
         let title: String = out
             .trim()
             .lines()
@@ -449,6 +477,14 @@ impl ExplainerService {
         model: &str,
         prompt: &str,
     ) -> Result<String, String> {
+        self.run_narrator_on(&self.event_bus, backend, model, prompt).await
+    }
+
+    async fn run_narrator_on(&self, scope: &EventBus, backend: &str, model: &str, prompt: &str) -> Result<String, String> {
+        crate::operations::recorded(scope, "narrator", format!("{backend}/{model}"), self.run_narrator_unrecorded(backend, model, prompt)).await
+    }
+
+    async fn run_narrator_unrecorded(&self, backend: &str, model: &str, prompt: &str) -> Result<String, String> {
         match backend {
             "claude" | "codex" => {
                 let b = grok_config::Backend::from_key(backend)
@@ -487,7 +523,7 @@ impl ExplainerService {
         }
     }
 
-    fn emit(&self, sid: Uuid, text: &str, kind: &str, request_id: Option<String>) {
+    fn emit(&self, scope: &EventBus, sid: Uuid, text: &str, kind: &str, request_id: Option<String>) -> Result<(), String> {
         let mut payload = json!({
             "channel": "explain",
             "kind": kind,
@@ -497,10 +533,10 @@ impl ExplainerService {
         if let Some(rid) = request_id {
             payload["requestId"] = json!(rid);
         }
-        self.event_bus.emit(ControlEvent::Raw {
+        scope.emit_checked(ControlEvent::Raw {
             session_id: Some(sid),
             payload,
-        });
+        }).map(|_| ()).map_err(|e| e.to_string())
     }
 }
 
@@ -524,6 +560,58 @@ fn clip(s: &str, max: usize) -> String {
 #[cfg(test)]
 mod structured_reader_tests {
     use super::*;
+    use grok_persistence::Persistence;
+    use std::os::unix::fs::PermissionsExt;
+
+    fn fixture_service(cli: &std::path::Path, bus: Arc<EventBus>) -> Arc<ExplainerService> {
+        Arc::new(ExplainerService {
+            grok_cli: Arc::new(GrokCli::new(cli)),
+            config: Arc::new(RwLock::new(GrokConfig::default())),
+            event_bus: bus,
+            buffers: Mutex::new(HashMap::new()), focused: RwLock::new(None),
+            enabled: AtomicBool::new(true), busy: AtomicBool::new(false),
+            backend: RwLock::new("grok".into()), model: RwLock::new("fixture".into()),
+            backoff_until: Mutex::new(None),
+        })
+    }
+
+    #[tokio::test]
+    async fn narrator_without_durable_intent_never_launches_fixture_cli() {
+        let dir=tempfile::tempdir().unwrap();let cli=dir.path().join("fake-cli");let marker=dir.path().join("effect");
+        std::fs::write(&cli,format!("#!/bin/sh\nprintf effect > '{}'\nprintf narration\n",marker.display())).unwrap();
+        std::fs::set_permissions(&cli,std::fs::Permissions::from_mode(0o700)).unwrap();
+        let service=fixture_service(&cli,Arc::new(EventBus::new()));
+        assert!(service.run_narrator("grok","fixture","generated reference").await.is_err());
+        assert!(!marker.exists());
+    }
+
+    #[tokio::test]
+    async fn narration_keeps_captured_runtime_and_retired_reply_cannot_update_resumed_buffer() {
+        let dir=tempfile::tempdir().unwrap();let cli=dir.path().join("fake-cli");let marker=dir.path().join("started");
+        std::fs::write(&cli,format!("#!/bin/sh\nprintf started > '{}'\n/bin/sleep 0.3\nprintf 'generated narration'\n",marker.display())).unwrap();
+        std::fs::set_permissions(&cli,std::fs::Permissions::from_mode(0o700)).unwrap();
+        let db=Arc::new(Persistence::open(dir.path().canonicalize().unwrap().join("events.sqlite")).unwrap());
+        let root=Arc::new(EventBus::new());root.install_sink(db.clone()).unwrap();
+        let sid=Uuid::new_v4();let old=root.register_runtime(sid).unwrap();
+        let service=fixture_service(&cli,root.clone());
+        let activity=old.emit_checked(ControlEvent::AgentMessage {session_id:sid,text:"first runtime fixture activity".into(),at:Utc::now()}).unwrap();
+        service.ingest(&activity).await;
+        let task={let svc=service.clone();let scope=old.clone();tokio::spawn(async move {svc.explain_once(&scope,sid,false,None).await})};
+        tokio::time::timeout(Duration::from_secs(3),async {while !marker.exists() {tokio::time::sleep(Duration::from_millis(5)).await;}}).await.unwrap();
+        old.retire_runtime(old.runtime_id().unwrap()).unwrap();
+        let resumed=root.register_runtime(sid).unwrap();
+        let activity=resumed.emit_checked(ControlEvent::AgentMessage {session_id:sid,text:"resumed fixture activity".into(),at:Utc::now()}).unwrap();
+        service.ingest(&activity).await;
+        assert!(task.await.unwrap().is_err());
+        let buffers=service.buffers.lock().await;let current=buffers.get(&sid).unwrap();
+        assert_eq!(current.scope.as_ref().unwrap().runtime_id(),resumed.runtime_id());
+        assert!(current.last_explanation.is_empty());assert_eq!(current.explained_to,0);
+        assert_eq!(current.lines.len(),1);assert!(current.lines[0].contains("resumed fixture"));
+        assert!(service.emit(&old,sid,"late reply","tick",None).is_err());
+        let snapshot=db.event_snapshot(Some(sid),100).unwrap();
+        assert!(snapshot.operations.iter().any(|operation|operation.kind=="narrator" && operation.outcome_seq.is_none()));
+    }
+
     #[test]
     fn reader_preserves_complete_prompt_and_pins_tool_free_model() {
         let prompt = "Exact input 😀\nwith retained reference data";

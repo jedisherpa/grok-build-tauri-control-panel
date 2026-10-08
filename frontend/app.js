@@ -70,6 +70,100 @@ const state = {
   hostStatusText: "…",
 };
 
+let durableOwner = null;
+let durableRenderQueued = false;
+let durableFullRender = false;
+let durableTailPatch = null;
+function patchDurableTail(entry) {
+  const root = $(entry.role === "term" || entry.role === "thought" ? "technical-transcript" : "transcript");
+  const block = root?.querySelector(`.t-block[data-canonical-seq="${entry.seq}"]`);
+  const body = block?.querySelector(".t-body");
+  if (!body) return false;
+  if (entry.role === "term") return false; // preserve collapsed technical controls
+  body.innerHTML = renderMarkdown(entry.body);
+  const time = block.querySelector(".t-ts");
+  if (time) time.textContent = shortTime(entry.at || "");
+  if (state.followTail) scrollTranscriptBottom();
+  return true;
+}
+function scheduleDurableRender(tail = null) {
+  if (tail) durableTailPatch = { sid: state.selectedSession, entry: tail };
+  else durableFullRender = true;
+  if (durableRenderQueued) return;
+  durableRenderQueued = true;
+  requestAnimationFrame(() => {
+    const patch = durableTailPatch, full = durableFullRender;
+    durableRenderQueued = false; durableTailPatch = null; durableFullRender = false;
+    if (full || !patch || patch.sid !== state.selectedSession || !patchDurableTail(patch.entry)) renderTranscript();
+    renderDurableCoverage(); updateSendButton();
+  });
+}
+function applyDurableRows(id, rows) {
+  const previous = state.transcriptBySession.get(id) || [];
+  const previousBySeq = new Map(previous.filter(row => row.seq != null).map(row => [row.seq, row]));
+  const mapped = rows.map(row => {
+    const old = previousBySeq.get(row.seq);
+    if (old && old.rawBody === row.body && old.role === row.role && old.at === row.at) return old;
+    return { ...row, rawBody: row.body, body: formatStoredBody(row.role, row.body),
+      streaming: false, historical: true, expanded: old?.expanded || false };
+  });
+  // Query-backed cards are transient controls, separate from historical rows.
+  // The exact runtime/epoch binding is revalidated by the host on every action.
+  for (const approval of durableOwner?.pending(id) || []) {
+    const binding = JSON.stringify(approval);
+    const old = previous.find(row => row.role === "approval" && row.pendingBinding === binding);
+    mapped.push(old || { role: "approval", body: approval.summary || approval.tool || "Permission requested",
+      at: "", streaming: false, historical: false, pendingBinding: binding, meta: { ...approval, sid: id, liveAuthority: true } });
+  }
+  if (durableOwner?.coverage(id).loaded) state.transcriptLoaded.add(id);
+  else state.transcriptLoaded.delete(id);
+  const changed = mapped.length !== previous.length || mapped.some((row, index) => row !== previous[index]);
+  if (!changed) return;
+  const tail = mapped.at(-1);
+  const tailOnly = mapped.length === previous.length && tail?.seq != null && ["agent", "thought"].includes(tail.role)
+    && tail.seq === previous.at(-1)?.seq && mapped.slice(0, -1).every((row, index) => row === previous[index]);
+  state.transcriptBySession.set(id, mapped);
+  state.transcriptRevisionBySession.set(id, (state.transcriptRevisionBySession.get(id) || 0) + 1);
+  if (id === state.selectedSession) {
+    // Reading an older retained window must not jump to an appended tail.
+    if (tailOnly && state.transcriptWindowOffset) return;
+    scheduleDurableRender(tailOnly ? tail : null);
+  }
+}
+function renderDurableCoverage() {
+  const el = $("event-coverage");
+  if (!el || !durableOwner) return;
+  const coverage = durableOwner.coverage(state.selectedSession);
+  const shown = Math.min(300, getTranscript(state.selectedSession).length);
+  const parts = [coverage.loaded ? `Committed history · sequence ${coverage.cursor ?? "?"}` : "History coverage incomplete"];
+  if (state.selectedSession) parts.push(`${coverage.retained} rows retained · up to ${shown} shown`);
+  if (coverage.omitted) parts.push(`${coverage.omitted} earlier rows outside the retained view`);
+  if (!coverage.pendingKnown && state.selectedSession) parts.push("live approval coverage unavailable");
+  if (coverage.uncertain || coverage.uncertaintyTruncated) {
+    parts.push(`${coverage.uncertain}${coverage.uncertaintyTruncated ? "+" : ""} unresolved operation intents · outcomes uncertain`);
+    for (const record of durableOwner.uncertain(state.selectedSession)) parts.push(`${record.kind}: ${record.target || "target unavailable"} · ${record.result}`);
+  }
+  if (!coverage.healthy || !coverage.durable) parts.push("durable storage unavailable");
+  if (coverage.gap) parts.push("reconciling event coverage");
+  if (coverage.error) parts.push(coverage.error);
+  el.textContent = parts.join(" · ");
+  el.setAttribute("role", "status");
+}
+function liveApproval(id, requestId) {
+  if (!durableOwner || id !== state.selectedSession) throw new Error("Select the current approval's thread first.");
+  const coverage = durableOwner.coverage(id);
+  if (!coverage.healthy || !coverage.durable || coverage.gap || !coverage.pendingKnown || coverage.loading) throw new Error("Live approval authority is unconfirmed. Retry history first.");
+  const approval = durableOwner.pending(id).find(item => item.requestId === requestId);
+  if (!approval) throw new Error("This approval is historical or no longer pending.");
+  return approval;
+}
+async function respondLiveApproval(id, requestId, optionId) {
+  const approval = liveApproval(id, requestId);
+  await invoke("respond_approval", { id, requestId, optionId,
+    runtimeId: approval.runtimeId, hostEpoch: approval.hostEpoch });
+  await durableOwner.reconcile();
+}
+
 function openToolsFor(sid) {
   const key = sid || state.selectedSession || "_";
   if (!state.openToolsBySession.has(key)) {
@@ -707,6 +801,8 @@ function findStreamCoalesceIndex(list, role, hopsMax = 40) {
 }
 
 function appendTranscript(sessionId, role, body, at = nowIso(), opts = {}) {
+  // Production transcript rows come exclusively from committed projections.
+  if (durableOwner) return;
   if (!sessionId) return;
   state.transcriptRevisionBySession.set(sessionId, (state.transcriptRevisionBySession.get(sessionId) || 0) + 1);
   const list = getTranscript(sessionId);
@@ -1085,7 +1181,7 @@ function renderTranscript() {
   const rootEl = $("transcript");
   const switchedSession = renderTranscript._lastSid !== state.selectedSession;
   renderTranscript._lastSid = state.selectedSession;
-  if (switchedSession) state.followTail = true;
+  if (switchedSession) { state.followTail = true; state.transcriptWindowOffset = 0; }
   const prevScroll = rootEl?.scrollTop ?? null;
   const root = rootEl;
   const sid = state.selectedSession;
@@ -1113,9 +1209,14 @@ function renderTranscript() {
 
   // Raw ACP protocol rows are hidden unless the View setting enables them
   // (they still buffer, so flipping the toggle reveals full history).
-  const entries = getTranscript(sid).filter(
-    (e) => state.showAcpLines || e.role !== "term"
-  );
+  renderDurableCoverage();
+  // Bound markdown work and DOM nodes even when the store has 50,000 rows.
+  const retained = getTranscript(sid).filter((e) => state.showAcpLines || e.role !== "term");
+  const offset = state.transcriptWindowOffset || 0;
+  const end = Math.max(0, retained.length - offset);
+  const entries = retained.slice(Math.max(0, end - 300), end);
+  if ($("event-history-older")) $("event-history-older").disabled = end <= 300;
+  if ($("event-history-newer")) $("event-history-newer").disabled = !offset;
   if (!entries.length) {
     if ($("technical-transcript")) $("technical-transcript").innerHTML = "";
     root.innerHTML = `<div class="welcome">
@@ -1167,7 +1268,8 @@ function renderTranscript() {
             : "";
           // Restored rows have no live request behind them (it died with the
           // old agent process) — render an inert card, never dead buttons.
-          const isLive = !!e.meta;
+          const coverage = durableOwner?.coverage(sid);
+          const isLive = !!m.liveAuthority && !e.historical && !!coverage?.healthy && !!coverage?.durable && !!coverage?.pendingKnown && !coverage?.gap;
           // Plan approvals can be handed to a DIFFERENT backend/model for
           // execution instead of continuing with the one that planned.
           const codeWith =
@@ -1187,7 +1289,7 @@ function renderTranscript() {
             ? `${explain}<div class="approval-resolved">resolved · ${escapeHtml(String(m.resolved))}</div>`
             : isLive
               ? `${explain}<div class="approval-actions">${buttons}${deny}</div>${codeWith}`
-              : `${explain}<div class="approval-resolved">from a previous session — see the rows below for how it resolved</div>`;
+              : `${explain}<div class="approval-resolved">historical record — current approval controls appear separately</div>`;
           return `<div class="t-block approval${m.resolved || !isLive ? "" : " pending"}">
   <div class="t-role"><span class="t-ts">${escapeHtml(shortTime(e.at || ""))}</span>${bombHtml("wait", "xs")}<span>${label}</span></div>
   <div class="t-body">${escapeHtml(e.body)}${foot}</div>
@@ -1210,7 +1312,7 @@ function renderTranscript() {
           role === "agent" && !e.streaming
             ? `<button class="pin-mem" data-idx="${idx}" title="Remember this — saved to project memory, injected into future threads">📌</button>`
             : "";
-        return `<div class="t-block ${escapeHtml(role)}${streamCls}">
+        return `<div class="t-block ${escapeHtml(role)}${streamCls}" data-canonical-seq="${escapeHtml(String(e.seq ?? ""))}">
   <div class="t-role"><span class="t-ts">${escapeHtml(shortTime(e.at || ""))}</span>${bombHtml(roleBombMood(role), "xs")}<span>${label}</span>${e.streaming ? '<span class="stream-caret" aria-hidden="true"></span>' : ""}${pin}</div>
   <div class="t-body">${body}</div>
 </div>`;
@@ -1751,6 +1853,8 @@ async function selectSession(id, options = {}) {
   renderThreads();
   syncSelectorsToSession(sess);
   if (id) await loadTranscriptFromDb(id);
+  else if (durableOwner) await durableOwner.select(null);
+  if (state.selectedSession !== (id || null)) return;
   renderTranscript();
   // Point the ELI12 narrator at the newly selected thread (best-effort).
   state.explainPending = false;
@@ -1761,33 +1865,10 @@ async function selectSession(id, options = {}) {
 
 /** Load durable thread history from ~/.grok/control-panel/sessions/control_panel.db */
 async function loadTranscriptFromDb(id, { force = false } = {}) {
-  if (!id) return;
-  if (!force && state.transcriptLoaded.has(id)) return;
-  try {
-    const rows = await invoke("get_session_transcript", { id });
-    if (!Array.isArray(rows)) {
-      state.transcriptLoaded.add(id);
-      return;
-    }
-    const existing = getTranscript(id);
-    // Prefer live in-memory if it already has more messages (active stream).
-    if (!force && existing.length > rows.length) {
-      state.transcriptLoaded.add(id);
-      return;
-    }
-    const mapped = rows.map((r) => ({
-      role: r.role || "system",
-      body: formatStoredBody(r.role, r.body),
-      at: r.at || "",
-      streaming: false,
-    }));
-    state.transcriptBySession.set(id, mapped);
-    state.transcriptRevisionBySession.set(id, (state.transcriptRevisionBySession.get(id) || 0) + 1);
-    state.transcriptLoaded.add(id);
-  } catch (e) {
-    // Older builds / empty DB — ignore
-    state.transcriptLoaded.add(id);
-  }
+  if (!id || !durableOwner) return;
+  await durableOwner.select(id, { force });
+  if (durableOwner.coverage(id).loaded) state.transcriptLoaded.add(id);
+  else state.transcriptLoaded.delete(id);
 }
 
 function formatStoredBody(role, body) {
@@ -1808,6 +1889,16 @@ function formatStoredBody(role, body) {
   }
   return body == null ? "" : String(body);
 }
+
+$("event-history-retry")?.addEventListener("click", () => durableOwner?.retry().catch(toastError));
+$("event-history-older")?.addEventListener("click", () => {
+  state.transcriptWindowOffset = Math.min(Math.max(0, getTranscript(state.selectedSession).length - 1), (state.transcriptWindowOffset || 0) + 300);
+  state.followTail = false; renderTranscript();
+});
+$("event-history-newer")?.addEventListener("click", () => {
+  state.transcriptWindowOffset = Math.max(0, (state.transcriptWindowOffset || 0) - 300);
+  state.followTail = !state.transcriptWindowOffset; renderTranscript();
+});
 
 // ── Live events from backend ────────────────────────────────────────────
 function handleControlEvent(ev) {
@@ -1906,7 +1997,7 @@ function handleControlEvent(ev) {
       // args filled in) update the existing row instead of stacking dupes.
       const list = getTranscript(sid);
       let updated = false;
-      for (let i = list.length - 1, hops = 0; i >= 0 && hops < 6; i--, hops++) {
+      for (let i = list.length - 1, hops = 0; !durableOwner && i >= 0 && hops < 6; i--, hops++) {
         const entry = list[i];
         if (entry.role === "tool" && entry.meta?.toolId === toolId) {
           entry.body = body;
@@ -2568,7 +2659,9 @@ async function refreshSessions() {
     } catch (_) {
       list = await invoke("list_sessions");
     }
-    state.sessions = Array.isArray(list) ? list : [];
+    state.sessions = (Array.isArray(list) ? list : []).filter(session => !durableOwner?.isDeleted(session.id)).map(session => ({
+      ...session, status: durableOwner?.status(session.id) || session.status,
+    }));
     renderThreads();
     renderAgents();
     const stillThere =
@@ -3474,16 +3567,21 @@ async function startAcp() {
 }
 
 async function sendPrompt() {
+  if (state.promptSubmissionPending) return;
   if (state.selectedSession && (state.approvalModePending === state.selectedSession || state.approvalModeUnknown.has(state.selectedSession))) {
     toastError(new Error("Approval state is unconfirmed. Wait for the mode change or Refresh before sending."));
     return;
   }
+  const durableGate = durableOwner?.gate(state.selectedSession);
+  if (durableGate && !durableGate.canSend) { toastError(new Error(durableGate.reason)); updateSendButton(); return; }
+  let submittedSid = null;
+  const submissionToken = {};
   try {
     const prompt = $("prompt").value;
     if (!prompt.trim()) throw new Error("Empty prompt");
     // Sending means "I want to watch this" — re-arm tail following.
     state.followTail = true;
-    if (state.selectedSession && turnActive()) {
+    if (sessionTurnBusy()) {
       pushEvent("turn in progress — wait for it to finish or cancel first", "err", "wait", {
         force: true,
       });
@@ -3516,17 +3614,26 @@ async function sendPrompt() {
       updateSendButton();
       return;
     }
+    state.promptSubmissionPending = submissionToken;
+    updateSendButton();
     if (!state.selectedSession) {
       // No thread selected — start one with the current cwd/agent settings.
       await startAcp();
       if (!state.selectedSession) return; // startAcp already surfaced the error
     }
-    const sess = state.sessions.find((s) => s.id === state.selectedSession);
+    const sid = state.selectedSession;
+    submittedSid = sid;
+    if (durableOwner) {
+      await durableOwner.select(sid);
+      if (state.selectedSession !== sid) return;
+      const gate = durableOwner.gate(sid);
+      if (!gate.canSend) throw new Error(gate.reason);
+    }
+    const sess = state.sessions.find((s) => s.id === sid);
     const needsResume =
       sess && (sess.live === false || String(sess.status || "").toLowerCase().includes("saved"));
 
-    appendTranscript(state.selectedSession, "user", prompt);
-    $("prompt").value = "";
+    // The checked UserMessage commit owns the canonical user row.
     endAgentStream(state.selectedSession);
     state.phraseIndex = 0;
     clearBoomTimer(state.selectedSession);
@@ -3557,20 +3664,24 @@ async function sendPrompt() {
       { force: true }
     );
     await invoke("send_prompt", {
-      id: state.selectedSession,
+      id: sid,
       prompt,
+      clientSubmissionId: crypto.randomUUID(),
       backend: currentBackend(),
       model: currentModel(),
       approvalMode: currentApprovalMode(),
       planMode: modeOn("plan-mode"),
       alwaysApprove: modeOn("always-approve"),
     });
-    // Mark live after successful send/resume; refresh brain_mode from registry.
-    if (sess) {
-      sess.live = true;
-      sess.status = "running";
+    // Clear only the submitted draft; preserve edits made while IPC was pending.
+    if (state.selectedSession === sid && $("prompt").value === prompt) {
+      $("prompt").value = "";
+      $("prompt").dispatchEvent(new Event("input", { bubbles: true }));
     }
+    // Session status is supplied by the committed projection, not this response.
+    if (sess) sess.live = true;
     await refreshSessions();
+    if (state.selectedSession !== sid) return;
     if (needsResume) {
       const s2 = state.sessions.find((s) => s.id === state.selectedSession);
       const brain = String(s2?.brainMode || s2?.brain_mode || "history_only");
@@ -3588,8 +3699,11 @@ async function sendPrompt() {
     }
     updateBombChrome();
   } catch (e) {
-    noteTurn("error", { note: e?.message || String(e) });
+    if (!submittedSid || state.selectedSession === submittedSid) noteTurn("error", { note: e?.message || String(e) });
     toastError(e);
+  } finally {
+    if (state.promptSubmissionPending === submissionToken) state.promptSubmissionPending = null;
+    updateSendButton();
   }
 }
 
@@ -3946,17 +4060,24 @@ $("btn-land-thread") && ($("btn-land-thread").onclick = () => landThread());
 $("btn-sync-thread") && ($("btn-sync-thread").onclick = () => syncThread());
 // Send doubles as Stop while a turn is running.
 $("btn-send").onclick = () => {
-  if (turnActive() && state.selectedSession) {
+  if (sessionTurnBusy()) {
     cancelCurrentTurn();
   } else {
     sendPrompt();
   }
 };
 
+function sessionTurnBusy() {
+  if (!state.selectedSession) return false;
+  const session = state.sessions.find(item => item.id === state.selectedSession);
+  const status = String(durableOwner?.status(state.selectedSession) || session?.status || "").toLowerCase();
+  // A restored live runtime may have no local turn-presence object yet.
+  return turnActive() || (session?.live === true && (status.includes("running") || status.includes("waitingapproval")));
+}
 function updateSendButton() {
   const btn = $("btn-send");
   if (!btn) return;
-  const busy = turnActive() && !!state.selectedSession;
+  const busy = sessionTurnBusy();
   const sess = state.sessions.find((s) => s.id === state.selectedSession);
   const gate = (typeof window !== "undefined" && window.BombDiagnostics)
     ? (typeof window !== "undefined" && window.BombDiagnostics).composerGate(state.selectedSession, sess?.status)
@@ -3965,8 +4086,10 @@ function updateSendButton() {
   const modePending = state.approvalModePending === state.selectedSession && !!state.selectedSession;
   const modeUnknown = state.approvalModeUnknown.has(state.selectedSession);
   const startReason = "Session is still starting — your message stays here until it's ready.";
-  const blocked = !busy && (!gate.canSend || starting || modePending || modeUnknown);
-  const blockReason = modePending ? "Confirming the session's approval mode…" : modeUnknown
+  const durableGate = durableOwner?.gate(state.selectedSession) || { canSend: true, reason: "" };
+  const pendingSend = !!state.promptSubmissionPending;
+  const blocked = !busy && (!gate.canSend || !durableGate.canSend || pendingSend || starting || modePending || modeUnknown);
+  const blockReason = pendingSend ? "Submitting this message…" : !durableGate.canSend ? durableGate.reason : modePending ? "Confirming the session's approval mode…" : modeUnknown
     ? "Approval state is unconfirmed. Refresh before sending." : starting ? startReason : gate.reason;
   btn.textContent = busy ? "Stop" : "Send";
   btn.disabled = blocked;
@@ -3987,19 +4110,20 @@ function updateSendButton() {
 }
 async function cancelCurrentTurn() {
   try {
-    if (!state.selectedSession) throw new Error("No session selected");
-    noteTurn("wait", { note: "Cancel requested…" });
+    const sid = state.selectedSession;
+    if (!sid) throw new Error("No session selected");
+    noteTurn("wait", { note: "Cancel requested…" }, sid);
     pushEvent("cancel · requested", "", "wait", { force: true });
-    await invoke("cancel_session", { id: state.selectedSession });
-    appendTranscript(state.selectedSession, "system", "cancel requested");
-    endAgentStream(state.selectedSession);
-    noteTurn("error", { note: "Cancelled" });
+    await invoke("cancel_session", { id: sid });
+    endAgentStream(sid);
+    noteTurn("error", { note: "Cancelled" }, sid);
     await refreshSessions();
   } catch (e) {
     toastError(e);
   }
 }
 $("btn-refresh").onclick = () => {
+  durableOwner?.retry().catch(toastError);
   confirmApprovalMode(state.selectedSession).catch(toastError);
   refreshStatus().catch(toastError);
   refreshSessions();
@@ -5246,7 +5370,8 @@ function wireAccordion(toggleId, bodyId, caretId, key, defaultOpen) {
 async function codeWithModel(sid, requestId, backend, model) {
   try {
     // Decline the planner's approval — the new agent takes it from here.
-    await invoke("respond_approval", { id: sid, requestId, optionId: null }).catch(() => {});
+    await respondLiveApproval(sid, requestId, null);
+    if (state.selectedSession !== sid) return;
     resolveApprovalEntry(sid, requestId, `handed to ${backend} · ${model}`);
     // The declined approval leaves turn presence active for a beat — clear it
     // so the handoff send isn't blocked by the mid-turn guard (the backend
@@ -5300,11 +5425,7 @@ $("transcript")?.addEventListener("click", async (e) => {
   const buttons = actions ? [...actions.querySelectorAll("button")] : [btn];
   buttons.forEach((b) => (b.disabled = true));
   try {
-    await invoke("respond_approval", {
-      id: btn.dataset.sid,
-      requestId: btn.dataset.requestId,
-      optionId: btn.dataset.optionId || null,
-    });
+    await respondLiveApproval(btn.dataset.sid, btn.dataset.requestId, btn.dataset.optionId || null);
     // Card collapses via the approval_resolved event.
   } catch (err) {
     pushEvent(`approval failed: ${err?.message || err}`, "err", "error", { force: true });
@@ -5359,7 +5480,33 @@ async function boot() {
   // loaded; a failed refreshStatus skipped session loading entirely).
   try {
     if (hasTauri() && window.__TAURI__.event) {
-      await window.__TAURI__.event.listen("control-event", (e) => handleControlEvent(e.payload));
+      durableOwner = window.BombDurableEvents.createOwner({ invoke,
+        listen: (name, handler) => window.__TAURI__.event.listen(name, handler),
+        onRows: applyDurableRows,
+        onPending: id => applyDurableRows(id, durableOwner.rows(id)),
+        onCoverage: () => { renderDurableCoverage(); updateSendButton(); },
+        onSessions: sessions => {
+          for (const snapshot of sessions) {
+            const existing = state.sessions.find(item => item.id === snapshot.id);
+            if (existing) existing.status = snapshot.status;
+          }
+          renderThreads();
+        },
+        onStatus: patch => {
+          const session = state.sessions.find(item => item.id === patch.session_id);
+          if (session) session.status = patch.status;
+          renderThreads(); updateSendButton();
+        },
+        onDeleted: id => {
+          state.sessions = state.sessions.filter(item => item.id !== id);
+          state.transcriptBySession.delete(id); state.transcriptLoaded.delete(id);
+          if (state.selectedSession === id) selectSession(null);
+          renderThreads();
+        },
+        onEvicted: id => { state.transcriptBySession.delete(id); state.transcriptLoaded.delete(id); },
+        onEvent: ev => handleControlEvent(ev),
+      });
+      await durableOwner.start();
     } else {
       setStatus("error", "Not inside Tauri — use the .app");
       setBombMood($("status-bomb"), "error");

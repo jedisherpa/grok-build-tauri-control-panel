@@ -3,6 +3,8 @@ use uuid::Uuid;
 
 #[derive(Debug, Error)]
 pub enum CoreError {
+    #[error("durable event admission failed: {0}")]
+    Events(#[from] grok_events::EventError),
     #[error("session not found: {0}")]
     SessionNotFound(Uuid),
     #[error("max concurrent sessions reached ({0})")]

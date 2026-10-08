@@ -37,7 +37,8 @@ pub fn redact_secrets(s: &str) -> String {
     .replace_all(s, "${1}[team]");
     let s = re(&XAI, r"xai-(?:\.{2,}|…)?[A-Za-z0-9_\-]{2,}").replace_all(&s, "xai-[redacted]");
     let s = re(&SK, r"\bsk-[A-Za-z0-9_\-]{8,}").replace_all(&s, "sk-[redacted]");
-    let s = re(&BEARER, r"(?i)(bearer\s+)[A-Za-z0-9._~+/\-]{8,}=*").replace_all(&s, "${1}[redacted]");
+    let s =
+        re(&BEARER, r"(?i)(bearer\s+)[A-Za-z0-9._~+/\-]{8,}=*").replace_all(&s, "${1}[redacted]");
     s.into_owned()
 }
 
@@ -65,13 +66,19 @@ pub fn summarize_cli_failure(stderr: &str, api_key_set: bool) -> Option<String> 
     let lower = clean.to_ascii_lowercase();
     let fix = "Enable it or create a new key at console.x.ai → API keys (or use Log in with Grok in Services), then start the thread again.";
     if lower.contains("is disabled and cannot be used") {
-        return Some(format!("xAI rejected the API key in XAI_API_KEY: the key is disabled. {fix}"));
+        return Some(format!(
+            "xAI rejected the API key in XAI_API_KEY: the key is disabled. {fix}"
+        ));
     }
     if lower.contains("api key") && lower.contains("blocked") {
-        return Some(format!("xAI rejected the API key in XAI_API_KEY: the key or its team is blocked. {fix}"));
+        return Some(format!(
+            "xAI rejected the API key in XAI_API_KEY: the key or its team is blocked. {fix}"
+        ));
     }
     if lower.contains("incorrect api key") || lower.contains("invalid api key") {
-        return Some(format!("xAI rejected the API key in XAI_API_KEY as invalid. {fix}"));
+        return Some(format!(
+            "xAI rejected the API key in XAI_API_KEY as invalid. {fix}"
+        ));
     }
     if lower.contains("not signed in") {
         return Some(if api_key_set {
@@ -88,7 +95,10 @@ pub fn summarize_cli_failure(stderr: &str, api_key_set: bool) -> Option<String> 
         .filter(|l| !l.is_empty() && !is_log_noise(l))
         .find(|l| l.starts_with("Error:") || l.starts_with("error:"))
         .map(|l| {
-            let l = l.trim_start_matches("Error:").trim_start_matches("error:").trim();
+            let l = l
+                .trim_start_matches("Error:")
+                .trim_start_matches("error:")
+                .trim();
             l.chars().take(300).collect()
         })
 }
@@ -132,8 +142,13 @@ mod tests {
         assert!(!s.contains("KwZn"), "{s}");
         assert!(s.contains("/team/[team]/api-keys"));
         assert!(s.contains("xai-[redacted]"));
-        let full = redact_secrets("key=xai-AbCdEf0123456789 and Bearer abcdefghijkl.mn and sk-ABCDEFGHIJKL");
-        assert_eq!(full, "key=xai-[redacted] and Bearer [redacted] and sk-[redacted]");
+        let full = redact_secrets(
+            "key=xai-AbCdEf0123456789 and Bearer abcdefghijkl.mn and sk-ABCDEFGHIJKL",
+        );
+        assert_eq!(
+            full,
+            "key=xai-[redacted] and Bearer [redacted] and sk-[redacted]"
+        );
     }
 
     #[test]
@@ -146,8 +161,12 @@ mod tests {
     #[test]
     fn summarizes_not_signed_in_with_and_without_key() {
         let raw = "Not signed in. To authenticate without a browser, run:\n  grok login --device-code\nError: Not signed in.";
-        assert!(summarize_cli_failure(raw, true).unwrap().contains("XAI_API_KEY that is set"));
-        assert!(summarize_cli_failure(raw, false).unwrap().starts_with("Grok isn't signed in"));
+        assert!(summarize_cli_failure(raw, true)
+            .unwrap()
+            .contains("XAI_API_KEY that is set"));
+        assert!(summarize_cli_failure(raw, false)
+            .unwrap()
+            .starts_with("Grok isn't signed in"));
     }
 
     #[test]
@@ -160,6 +179,9 @@ mod tests {
         assert!(!s.contains("startup phase"));
         assert!(s.starts_with("something odd happened"));
         assert!(s.chars().count() <= 401);
-        assert_eq!(summarize_cli_failure("Error: boom", false).as_deref(), Some("boom"));
+        assert_eq!(
+            summarize_cli_failure("Error: boom", false).as_deref(),
+            Some("boom")
+        );
     }
 }

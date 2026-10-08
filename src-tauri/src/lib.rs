@@ -9,9 +9,11 @@ mod history;
 mod meaning_candidates;
 mod meaning_memory;
 mod memory_recall;
+mod operations;
 mod qa_profile;
 mod semantic_runtime;
 mod state;
+mod store_activation;
 mod wizard_joe;
 mod word_shapes;
 
@@ -49,45 +51,45 @@ pub fn run() {
             let app_handle = app.handle().clone();
             let state = tauri::async_runtime::block_on(AppState::initialize())?;
             let bus = state.event_bus.clone();
-            let bus_persist = state.event_bus.clone();
             let persistence = state.persistence.clone();
             let db_path = persistence.path().display().to_string();
             app.manage(state);
 
-            // Forward backend events to the frontend
+            // Subscribe before the task is scheduled. Only committed data reaches
+            // the UI; lost notifications reconcile against the durable cursor.
+            let mut rx = bus.subscribe_committed();
+            let health_bus = bus.clone();
+            let health_handle = app_handle.clone();
             tauri::async_runtime::spawn(async move {
-                let mut rx = bus.subscribe();
                 loop {
                     match rx.recv().await {
                         Ok(ev) => {
-                            let _ = app_handle.emit("control-event", &ev);
+                            let _ = app_handle.emit("committed-event", &ev);
+                            // Presentation/legacy observers receive the same
+                            // committed event; the app owner consumes envelopes.
+                            let _ = app_handle.emit("control-event", &ev.event);
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                            tracing::warn!(n, "event bus lagged");
+                            tracing::warn!(n, "UI notifications lagged; durable replay required");
+                            let _ = app_handle.emit("event-reconcile-required", n);
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
                 }
             });
 
-            // Durable thread memory — survive reboot / app updates
+            // Coverage failures are control-plane health, never fabricated
+            // committed data. This remains visible when the writer cannot append.
             tauri::async_runtime::spawn(async move {
-                let mut rx = bus_persist.subscribe();
+                let mut ticker = tokio::time::interval(std::time::Duration::from_millis(500));
+                let mut previous = None;
                 loop {
-                    match rx.recv().await {
-                        Ok(ev) => {
-                            commands::persist_control_event(&persistence, &ev);
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
-                            // Leave a visible marker: silence here reads as a
-                            // complete transcript when rows were dropped.
-                            warn!(n, "persistence event bus lagged");
-                            let _ = persistence.set_kv(
-                                "last_transcript_gap",
-                                &format!("{} events dropped at {}", n, chrono::Utc::now()),
-                            );
-                        }
-                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                    ticker.tick().await;
+                    let health = health_bus.health();
+                    let fingerprint = (health.healthy, health.error.clone(), health.generation);
+                    if previous.as_ref() != Some(&fingerprint) {
+                        let _ = health_handle.emit("event-health", &health);
+                        previous = Some(fingerprint);
                     }
                 }
             });
@@ -153,6 +155,10 @@ pub fn run() {
             commands::list_threads,
             commands::get_session,
             commands::get_session_transcript,
+            commands::get_event_snapshot,
+            commands::release_event_snapshot,
+            commands::replay_events,
+            commands::event_health,
             commands::send_prompt,
             commands::cancel_session,
             commands::remove_session,
@@ -164,6 +170,7 @@ pub fn run() {
             commands::set_explainer_enabled,
             commands::set_explainer_provider,
             commands::respond_approval,
+            commands::get_pending_approvals,
             commands::rename_thread,
             commands::land_thread,
             commands::sync_thread,

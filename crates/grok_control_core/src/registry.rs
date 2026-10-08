@@ -15,7 +15,7 @@ use grok_acp::{AcpClient, AcpClientConfig, AcpSpawnOptions, ApprovalMode, BrainM
 use grok_cli_wrapper::{GrokCli, HeadlessSpawnOptions};
 use grok_cli_wrapper::process::{ProcessHandle, ProcessConfig, ProcessOutcome, ProcessEnd};
 use grok_config::{descriptor, resolve_backend, Backend, GrokConfig, ResolvedBackend};
-use grok_events::{EventBus, SessionStatus};
+use grok_events::{ControlEvent, EventBus, SessionStatus};
 
 use crate::error::{CoreError, Result};
 use crate::handle::{AgentHandle, AgentHandleSnapshot, SessionMetadata};
@@ -71,12 +71,15 @@ async fn connect_and_fill(
     .await
     {
         Ok(client) => {
+            let scope_current=sessions.get(&id).is_some_and(|entry|entry.event_bus.runtime_id()==event_bus.runtime_id());
+            if !scope_current {client.shutdown().await?;return Err(grok_events::EventError::StaleRuntime.into());}
             let acp_session_id = client.session_id().await;
             let brain_mode = client.brain_mode().await;
             let stop_requested = sessions.get(&id).is_some_and(|entry| matches!(entry.metadata.status, SessionStatus::Cancelling | SessionStatus::Cancelled));
             let stop_result = if stop_requested { Some(client.cancel().await) } else { None };
             // Never hold a DashMap guard across an await.
             if let Some(mut entry) = sessions.get_mut(&id) {
+                if entry.event_bus.runtime_id()!=event_bus.runtime_id() {drop(entry);client.shutdown().await?;return Err(grok_events::EventError::StaleRuntime.into());}
                 entry.metadata.acp_session_id = acp_session_id;
                 entry.metadata.brain_mode = brain_mode;
                 entry.metadata.status = if stop_requested {
@@ -92,6 +95,7 @@ async fn connect_and_fill(
         }
         Err(e) => {
             if let Some(mut entry) = sessions.get_mut(&id) {
+                if entry.event_bus.runtime_id()!=event_bus.runtime_id() {return Err(e.into());}
                 if let grok_acp::AcpError::StartupCleanup { process, .. } = &e { entry.child = Some(process.clone()); }
                 entry.metadata.status = SessionStatus::Failed;
                 entry.touch();
@@ -101,6 +105,11 @@ async fn connect_and_fill(
             Err(e.into())
         }
     }
+}
+
+fn metadata_record_json(metadata:&SessionMetadata)->Result<String> {
+    let snapshot=serde_json::to_string(&json!({"metadata":metadata})).map_err(|error|CoreError::Internal(error.to_string()))?;
+    serde_json::to_string(&json!({"id":metadata.id,"cwd":metadata.cwd,"mode":match metadata.mode {AgentMode::Acp=>"acp",AgentMode::Headless=>"headless"},"model":metadata.model,"status":metadata.status,"worktree":metadata.worktree,"acpSessionId":metadata.acp_session_id,"metadataJson":snapshot,"createdAt":metadata.created_at,"updatedAt":metadata.last_activity,"messageCount":0})).map_err(|error|CoreError::Internal(error.to_string()))
 }
 
 fn outcome_status(outcome: &ProcessOutcome) -> SessionStatus {
@@ -132,22 +141,33 @@ impl SessionRegistry {
         // after the first prompt.
         if tokio::runtime::Handle::try_current().is_ok() {
             let sessions = registry.sessions.clone();
-            let mut rx = event_bus.subscribe();
+            let mut rx = event_bus.subscribe_committed();
+            let mirror_bus = event_bus.clone();
             tokio::spawn(async move {
                 loop {
                     match rx.recv().await {
-                        Ok(grok_events::ControlEvent::SessionStatusChanged {
-                            session_id,
-                            status,
-                            ..
-                        }) => {
-                            if let Some(mut entry) = sessions.get_mut(&session_id) {
-                                entry.metadata.status = status;
-                                entry.metadata.last_activity = Utc::now();
+                        Ok(envelope) => {
+                            if let ControlEvent::SessionStatusChanged{session_id,status,..}=envelope.event {
+                                if let Some(mut entry)=sessions.get_mut(&session_id) {
+                                    if entry.event_bus.runtime_id()!=envelope.origin.runtime_id {continue;}
+                                    // A queued event may predate a later commit in this runtime.
+                                    entry.metadata.status = if mirror_bus.ensure_healthy().is_err() { SessionStatus::Failed } else {
+                                        mirror_bus.current_status(session_id).filter(|(runtime,_)| Some(*runtime)==entry.event_bus.runtime_id()).map(|(_,current)| current).unwrap_or(status)
+                                    };
+                                    entry.metadata.last_activity=Utc::now();
+                                }
                             }
                         }
-                        Ok(_) => {}
-                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            // Reconcile from committed state, never from a missed raw stream.
+                            let unhealthy = mirror_bus.ensure_healthy().is_err();
+                            for mut entry in sessions.iter_mut() {
+                                if unhealthy { entry.metadata.status=SessionStatus::Failed; }
+                                else if let Some((runtime,status))=mirror_bus.current_status(*entry.key()) {
+                                    if Some(runtime)==entry.event_bus.runtime_id() { entry.metadata.status=status; }
+                                }
+                            }
+                        }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
                 }
@@ -187,13 +207,20 @@ impl SessionRegistry {
     }
 
     /// Set the display label (smart thread name).
-    pub fn set_label(&self, id: Uuid, label: &str) -> Result<()> {
-        let mut entry = self
-            .sessions
-            .get_mut(&id)
-            .ok_or(CoreError::SessionNotFound(id))?;
-        entry.metadata.label = Some(label.to_string());
-        Ok(())
+    pub fn set_label_for_runtime(&self,id:Uuid,expected_runtime:Uuid,label:&str)->Result<()> {
+        self.set_label_checked(id,Some(expected_runtime),None,label)
+    }
+    pub fn set_label_if_current(&self,id:Uuid,expected_runtime:Uuid,expected_label:Option<&str>,label:&str)->Result<()> {
+        self.set_label_checked(id,Some(expected_runtime),Some(expected_label),label)
+    }
+    pub fn set_label(&self,id:Uuid,label:&str)->Result<()> {self.set_label_checked(id,None,None,label)}
+    fn set_label_checked(&self,id:Uuid,expected_runtime:Option<Uuid>,expected_label:Option<Option<&str>>,label:&str)->Result<()> {
+        let mut entry=self.sessions.get_mut(&id).ok_or(CoreError::SessionNotFound(id))?;
+        if expected_runtime.is_some_and(|expected|entry.event_bus.runtime_id()!=Some(expected)){return Err(grok_events::EventError::StaleRuntime.into());}
+        if expected_label.is_some_and(|expected|entry.metadata.label.as_deref()!=expected){return Err(CoreError::InvalidOptions("label changed before title update".into()));}
+        let mut metadata=entry.metadata.clone();metadata.label=Some(label.into());metadata.last_activity=Utc::now();
+        entry.event_bus.emit_checked(ControlEvent::SessionMetadataUpdated{session_id:id,metadata_json:metadata_record_json(&metadata)?,at:Utc::now()})?;
+        entry.metadata=metadata;Ok(())
     }
 
     /// Re-attach a live ACP process to an existing thread id (after reboot / update).
@@ -303,9 +330,21 @@ impl SessionRegistry {
         drop(cfg);
         let approval_mode = opts.resolved_mode();
 
+        if opts.mode==AgentMode::Headless {
+                grok_acp::ensure_native_policy_supported(opts.sandbox_profile.as_deref(), opts.read_only,
+                    approval_mode == ApprovalMode::Plan, !deny_patterns.is_empty(), "Grok headless")?;
+                if !opts.rules.is_empty() {
+                    return Err(CoreError::InvalidOptions("headless policy capability unavailable: rules are metadata and cannot enforce native tool restrictions".into()));
+                }
+        }
+        if opts.mode == AgentMode::Headless || !model.eq_ignore_ascii_case("mock") { self.event_bus.ensure_durable()?; }
+        let runtime_bus = self.event_bus.register_runtime(id)?;
+        runtime_bus.emit_checked(ControlEvent::SessionCreated {session_id:id,cwd:cwd.into(),mode:match opts.mode {AgentMode::Acp=>"acp",AgentMode::Headless=>"headless"}.into(),at:Utc::now()})?;
+        runtime_bus.emit_checked(ControlEvent::SessionStatusChanged {session_id:id,status:SessionStatus::Starting,at:Utc::now()})?;
         let now = Utc::now();
         let mut metadata = SessionMetadata {
             id,
+            runtime_id: runtime_bus.runtime_id(),
             acp_session_id: None,
             cwd: cwd.to_string(),
             worktree: opts.worktree.clone(),
@@ -332,13 +371,15 @@ impl SessionRegistry {
             brain_mode: BrainMode::Fresh,
         };
 
+        runtime_bus.emit_checked(ControlEvent::SessionMetadataUpdated{session_id:id,metadata_json:metadata_record_json(&metadata)?,at:Utc::now()})?;
+        let mut headless_operation=None;
         let handle = match opts.mode {
             AgentMode::Acp => {
                 // Offline / mock threads from memory
                 if model.eq_ignore_ascii_case("mock") {
-                    let client = AcpClient::mock_for_tests(
-                        &format!("mock-{id}"),
-                        Some(self.event_bus.clone()),
+                    let client = AcpClient::mock_for_session(
+                        id, &format!("mock-{id}"),
+                        Some(runtime_bus.clone()),
                     );
                     client.set_approval_mode(approval_mode).await?;
                     metadata.acp_session_id = Some(format!("mock-{id}"));
@@ -350,6 +391,8 @@ impl SessionRegistry {
                         BrainMode::Fresh
                     };
                     AgentHandle {
+                        event_bus: runtime_bus.clone(),
+                        process_receipt_committed: false,
                         metadata,
                         child: None,
                         acp_client: Some(client),
@@ -421,16 +464,15 @@ impl SessionRegistry {
                         }
                         dashmap::mapref::entry::Entry::Vacant(v) => {
                             v.insert(AgentHandle {
+                                event_bus: runtime_bus.clone(),
+                                process_receipt_committed: false,
                                 metadata: metadata.clone(),
                                 child: None,
                                 acp_client: None,
                             });
                         }
                     }
-                    self.event_bus.emit_session_created(id, cwd, "acp").await;
-                    self.event_bus
-                        .emit_status(id, SessionStatus::Starting)
-                        .await;
+
 
                     let pending = PendingConnect {
                         client_cfg,
@@ -443,7 +485,7 @@ impl SessionRegistry {
                     if background {
                         let starting = self.starting.clone();
                         let sessions = self.sessions.clone();
-                        let bus = self.event_bus.clone();
+                        let bus = runtime_bus.clone();
                         tokio::spawn(async move {
                             let _ = connect_and_fill(sessions, starting, bus, id, pending).await;
                         });
@@ -453,7 +495,7 @@ impl SessionRegistry {
                         connect_and_fill(
                             self.sessions.clone(),
                             self.starting.clone(),
-                            self.event_bus.clone(),
+                            runtime_bus.clone(),
                             id,
                             pending,
                         )
@@ -464,11 +506,6 @@ impl SessionRegistry {
                 }
             }
             AgentMode::Headless => {
-                grok_acp::ensure_native_policy_supported(opts.sandbox_profile.as_deref(), opts.read_only,
-                    approval_mode == ApprovalMode::Plan, !deny_patterns.is_empty(), "Grok headless")?;
-                if !opts.rules.is_empty() {
-                    return Err(CoreError::InvalidOptions("headless policy capability unavailable: rules are metadata and cannot enforce native tool restrictions".into()));
-                }
                 let prompt = opts.prompt.clone().unwrap_or_default();
                 let headless = HeadlessSpawnOptions {
                     model: Some(model),
@@ -479,12 +516,17 @@ impl SessionRegistry {
                     sandbox_profile: opts.sandbox_profile.clone(),
                     timeout_secs: None,
                 };
+                let operation_id=Uuid::new_v4();headless_operation=Some(operation_id);
+                runtime_bus.emit_checked(ControlEvent::UserMessage {session_id:id,operation_id,text:prompt.clone(),at:Utc::now()})?;
+                runtime_bus.ensure_durable()?;
                 let (child,proof) = self
                     .grok_cli
                     .spawn_headless(cwd_path, &prompt, &headless)
                     .await?;
                 metadata.status = SessionStatus::Running;
                 AgentHandle {
+                    event_bus: runtime_bus.clone(),
+                    process_receipt_committed: false,
                     metadata,
                     child: Some(ProcessHandle::adopt_attested(child,proof, ProcessConfig::default(), vec![])?),
                     acp_client: None,
@@ -500,23 +542,29 @@ impl SessionRegistry {
         self.sessions.insert(id, handle);
         self.workspace_leases.lock().map_err(|_| CoreError::Internal("workspace admission poisoned".into()))?.insert(id, workspace);
         slot.commit();
-        self.event_bus.emit_session_created(id, cwd, mode_str).await;
-        self.event_bus.emit_status(id, status).await;
+        runtime_bus.emit_checked(ControlEvent::SessionStatusChanged {session_id:id,status,at:Utc::now()})?;
         if let Some(process) = self.sessions.get(&id).and_then(|entry| entry.child.clone()) {
-            let sessions = self.sessions.clone(); let bus = self.event_bus.clone();
+            let sessions = self.sessions.clone(); let bus = runtime_bus.clone();
+            let cleanup_gate=self.cleanup_updates.lock().map_err(|_|CoreError::Internal("cleanup gate poisoned".into()))?.entry(id).or_insert_with(||Arc::new(tokio::sync::Mutex::new(()))).clone();
             tokio::spawn(async move {
                 let outcome = process.wait_outcome().await;
-                let status = outcome_status(&outcome);
-                if let Some(mut entry) = sessions.get_mut(&id) {
-                    if entry.child.as_ref().is_some_and(|current| current.same_process(&process)) {
-                        entry.metadata.process_outcome = Some(outcome.clone());
-                        entry.metadata.status = status; entry.touch();
-                    } else { return; }
-                } else { return; }
-                let text = outcome.output.text();
-                if !text.is_empty() { bus.emit(grok_events::ControlEvent::AgentMessage { session_id:id, text, at:Utc::now() }); }
-                if let Some(error) = outcome.error { bus.emit_error(Some(id),error); }
-                bus.emit_status(id,status).await;
+                // Wait for physical settlement first. Only publication shares Stop's gate.
+                let _cleanup=cleanup_gate.lock().await;
+                let Some(mut entry)=sessions.get_mut(&id) else {return;};
+                if entry.event_bus.runtime_id()!=bus.runtime_id() || !entry.child.as_ref().is_some_and(|current|current.same_process(&process)) {return;}
+                let status=if matches!(entry.metadata.status,SessionStatus::Cancelling|SessionStatus::Cancelled) {entry.metadata.status}else{outcome_status(&outcome)};
+                let mut metadata=entry.metadata.clone();metadata.process_outcome=Some(outcome.clone());metadata.status=status;metadata.last_activity=Utc::now();
+                let publication = (|| -> Result<()> {
+                    let text=outcome.output.text();
+                    if !text.is_empty() {bus.emit_checked(ControlEvent::AgentMessage{session_id:id,text,at:Utc::now()})?;}
+                    if let Some(error)=&outcome.error {bus.emit_checked(ControlEvent::Error{session_id:Some(id),message:error.clone(),at:Utc::now()})?;}
+                    if let Some(operation_id)=headless_operation {bus.emit_checked(ControlEvent::HostOperationOutcome{session_id:Some(id),operation_id,kind:"submission".into(),target:"conversation".into(),result:if outcome.end==ProcessEnd::Success && outcome.cleanup_complete {"completed"}else{"uncertain"}.into(),at:Utc::now()})?;}
+                    bus.emit_checked(ControlEvent::SessionMetadataUpdated{session_id:id,metadata_json:metadata_record_json(&metadata)?,at:Utc::now()})?;
+                    bus.emit_checked(ControlEvent::SessionStatusChanged{session_id:id,status,at:Utc::now()})?;Ok(())
+                })();
+                entry.process_receipt_committed=publication.is_ok();
+                entry.metadata.process_outcome=Some(outcome);
+                entry.metadata.status=if publication.is_ok(){status}else{SessionStatus::Failed};entry.touch();
             });
         }
 
@@ -548,7 +596,18 @@ impl SessionRegistry {
     pub async fn wait_headless(&self, id: Uuid) -> Result<ProcessOutcome> {
         let process = self.sessions.get(&id).ok_or(CoreError::SessionNotFound(id))?
             .child.clone().ok_or(CoreError::NotHeadless)?;
-        Ok(process.wait_outcome().await)
+        let bus=self.scoped_bus(id)?;let outcome=process.wait_outcome().await;
+        tokio::time::timeout(std::time::Duration::from_secs(10),async {
+            loop {
+                bus.ensure_healthy()?;
+                let entry=self.sessions.get(&id).ok_or(CoreError::SessionNotFound(id))?;
+                if entry.event_bus.runtime_id()!=bus.runtime_id(){return Err(grok_events::EventError::StaleRuntime.into());}
+                if entry.process_receipt_committed && entry.metadata.process_outcome.is_some(){return Ok::<(),CoreError>(());}
+                drop(entry);tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        }).await.map_err(|_|CoreError::Internal("completion publication unresolved; retain worker owner".into()))??;
+        bus.ensure_healthy()?;
+        Ok(outcome)
     }
 
     pub async fn brain_mode(&self, id: Uuid) -> Option<BrainMode> {
@@ -570,6 +629,10 @@ impl SessionRegistry {
             .ok_or(CoreError::SessionNotFound(id))
     }
 
+    pub async fn send_user_prompt(&self,id:Uuid,prompt:&str,client_submission_id:Option<Uuid>)->Result<()> {
+        self.send_prompt_admitted(id,prompt,false,client_submission_id).await
+    }
+
     pub async fn send_prompt(&self, id: Uuid, prompt: &str) -> Result<()> {
         self.send_prompt_inner(id, prompt, false).await
     }
@@ -580,7 +643,10 @@ impl SessionRegistry {
         self.send_prompt_inner(id, prompt, true).await
     }
 
-    async fn send_prompt_inner(&self, id: Uuid, prompt: &str, review: bool) -> Result<()> {
+    async fn send_prompt_inner(&self,id:Uuid,prompt:&str,review:bool)->Result<()> {
+        self.send_prompt_admitted(id,prompt,review,None).await
+    }
+    async fn send_prompt_admitted(&self, id: Uuid, prompt: &str, review: bool,client_submission_id:Option<Uuid>) -> Result<()> {
         let client = {
             let mut entry = self
                 .sessions
@@ -598,8 +664,10 @@ impl SessionRegistry {
             entry.touch();
             client
         };
-        // ACP owns accepted-turn status; a rejected turn must not publish Running.
-        if review { client.send_review_prompt(prompt).await?; } else { client.send_prompt(prompt).await?; }
+        let bus=self.scoped_bus(id)?;
+        bus.ensure_healthy()?;
+        // Host operation identity is prepared here; ACP commits it after serialized admission.
+        client.send_recorded_prompt(prompt,review,Uuid::new_v4(),client_submission_id).await?;
         Ok(())
     }
 
@@ -631,25 +699,31 @@ impl SessionRegistry {
             (entry.acp_client.clone(), entry.child.is_some())
         };
 
+        let mut errors=Vec::new();
         if let Some(client) = acp {
-            client.cancel().await?;
+            if let Err(error)=client.cancel_without_status().await {errors.push(error.to_string());}
         }
         if has_child {
             let process = self.sessions.get(&id).and_then(|entry| entry.child.clone());
             if let Some(process) = process {
                 let outcome = process.cancel().await;
-                if let Some(mut entry) = self.sessions.get_mut(&id) { entry.metadata.process_outcome = Some(outcome.clone()); }
+                if let Some(mut entry) = self.sessions.get_mut(&id) {
+                    entry.metadata.process_outcome=Some(outcome.clone());entry.process_receipt_committed=false;entry.touch();
+                    let receipt=(||->Result<()> {entry.event_bus.emit_checked(ControlEvent::SessionMetadataUpdated{session_id:id,metadata_json:metadata_record_json(&entry.metadata)?,at:Utc::now()})?;Ok(())})();
+                    if let Err(error)=receipt {errors.push(format!("native process receipt unresolved: {error}"));}
+                    else {entry.process_receipt_committed=true;}
+                }
                 if !outcome.cleanup_complete {
-                    return Err(CoreError::Internal(format!("native cleanup unresolved: {}", outcome.error.unwrap_or_default())));
+                    errors.push(format!("native cleanup unresolved: {}", outcome.error.unwrap_or_default()));
                 }
             }
         }
 
-        if let Some(mut entry) = self.sessions.get_mut(&id) {
-            entry.metadata.status = SessionStatus::Cancelled;
-            entry.touch();
-        }
-        self.event_bus.emit_session_cancelled(id).await;
+        if !errors.is_empty(){return Err(CoreError::Internal(format!("Stop cleanup or durable evidence unresolved: {}",errors.join("; "))));}
+        let published=self.scoped_bus(id)?.emit_checked(ControlEvent::SessionCancelled {session_id:id,at:Utc::now()});
+        if let Err(error)=published {errors.push(error.to_string());}
+        if !errors.is_empty(){return Err(CoreError::Internal(format!("Stop cleanup or durable evidence unresolved: {}",errors.join("; "))));}
+        if let Some(mut entry) = self.sessions.get_mut(&id) {entry.metadata.status=SessionStatus::Cancelled;entry.touch();}
         Ok(())
     }
 
@@ -666,6 +740,7 @@ impl SessionRegistry {
         };
         let expected_client = self.sessions.get(&id).ok_or(CoreError::SessionNotFound(id))?
             .acp_client.clone().ok_or(CoreError::NotAcp)?;
+        let expected_runtime=self.sessions.get(&id).ok_or(CoreError::SessionNotFound(id))?.event_bus.runtime_id();
         let _transition = lock.lock().await;
         let client = {
             let entry = self
@@ -688,9 +763,22 @@ impl SessionRegistry {
             if !entry.acp_client.as_ref().is_some_and(|current| Arc::ptr_eq(current, &client)) {
                 return Err(CoreError::InvalidOptions("session generation changed during mode transition".into()));
             }
-            entry.metadata.approval_mode = applied;
-            entry.metadata.plan_mode = applied == ApprovalMode::Plan;
-            entry.metadata.always_approve = applied == ApprovalMode::Yolo;
+            let mut updated=entry.metadata.clone();
+            updated.approval_mode = applied;
+            updated.plan_mode = applied == ApprovalMode::Plan;
+            updated.always_approve = applied == ApprovalMode::Yolo;
+            if let Err(error)=entry.event_bus.emit_checked(ControlEvent::SessionMetadataUpdated{session_id:id,metadata_json:metadata_record_json(&updated)?,at:Utc::now()}) {
+                // The policy operation was already acknowledged. Keep its actual
+                // authority visible locally, while the failed receipt remains explicit.
+                if entry.acp_client.as_ref().is_some_and(|current|Arc::ptr_eq(current,&client))
+                    && entry.event_bus.runtime_id()==expected_runtime {
+                    updated.status=SessionStatus::Failed;
+                    entry.metadata=updated;
+                    entry.touch();
+                }
+                return Err(error.into());
+            }
+            entry.metadata=updated;
             entry.touch();
             drop(entry);
             let wanted = match mode {
@@ -700,7 +788,9 @@ impl SessionRegistry {
                 ApprovalMode::Ask => "default",
             };
             if let Err(e) = client.set_mode(wanted).await {
-                tracing::warn!(error = %e, ?mode, "agent-side mode not applied (client gate still enforces it)");
+                if matches!(&e,grok_acp::AcpError::Protocol(message) if message.starts_with("agent does not advertise a '")) {
+                    tracing::warn!(error = %e, ?mode, "agent-side mode unavailable (client gate still enforces it)");
+                } else {return Err(e.into());}
             }
         }
         Ok(())
@@ -715,12 +805,23 @@ impl SessionRegistry {
             .acp_client
             .clone()
             .ok_or(CoreError::NotAcp)?;
-        client.add_session_allow_rule(pattern).await;
+        client.add_session_allow_rule(pattern).await?;
         Ok(())
     }
 
     pub async fn set_always_approve(&self, id: Uuid, enabled: bool) -> Result<()> {
         self.set_approval_mode(id, if enabled { ApprovalMode::Yolo } else { ApprovalMode::Ask }).await
+    }
+
+    pub async fn pending_approvals(&self,id:Uuid)->Result<Vec<grok_acp::LiveApproval>> {
+        let client=self.sessions.get(&id).ok_or(CoreError::SessionNotFound(id))?.acp_client.clone().ok_or(CoreError::NotAcp)?;
+        Ok(client.pending_approvals().await?)
+    }
+    pub async fn respond_approval_for_runtime(&self,id:Uuid,runtime_id:Uuid,host_epoch:u64,request_id:&str,option_id:Option<&str>)->Result<()> {
+        let client={let entry=self.sessions.get(&id).ok_or(CoreError::SessionNotFound(id))?;
+            if entry.event_bus.runtime_id()!=Some(runtime_id){return Err(grok_events::EventError::StaleRuntime.into());}
+            entry.acp_client.clone().ok_or(CoreError::NotAcp)?};
+        client.respond_approval_scoped(runtime_id,host_epoch,request_id,option_id).await?;Ok(())
     }
 
     pub async fn respond_approval(
@@ -761,15 +862,24 @@ impl SessionRegistry {
             // shutdown is the cleanup boundary. A failed shutdown retains all
             // handles and leases, independently of the cancel response.
             client.shutdown().await?;
-        } else {
-            cancelled?;
         }
+        cancelled?;
+        let bus=self.scoped_bus(id)?;
+        bus.retire_runtime(bus.runtime_id().ok_or_else(||CoreError::Internal("runtime scope missing".into()))?)?;
         self.sessions.remove(&id);
         self.workspace_leases.lock().map_err(|_| CoreError::Internal("workspace admission poisoned".into()))?.remove(&id);
         self.admitted.lock().map_err(|_| CoreError::Internal("admission poisoned".into()))?.remove(&id);
         self.mode_updates.lock().map_err(|_| CoreError::Internal("mode transition gate poisoned".into()))?.remove(&id);
         self.cleanup_updates.lock().map_err(|_| CoreError::Internal("cleanup gate poisoned".into()))?.remove(&id);
         Ok(())
+    }
+
+    /// Capture this runner's producer once, before starting asynchronous work.
+    pub fn session_event_bus(&self, id:Uuid)->Result<Arc<EventBus>> {
+        self.scoped_bus(id)
+    }
+    pub fn scoped_bus(&self, id:Uuid)->Result<Arc<EventBus>> {
+        Ok(self.sessions.get(&id).ok_or(CoreError::SessionNotFound(id))?.event_bus.clone())
     }
 
     pub fn session_count(&self) -> usize {
@@ -821,6 +931,167 @@ mod tests {
         let cfg = Arc::new(tokio::sync::RwLock::new(GrokConfig::default()));
         let cli = Arc::new(GrokCli::new(PathBuf::from("/bin/true")));
         SessionRegistry::new(bus, cfg, cli)
+    }
+
+    struct RejectProcessReceipt {store:Arc<grok_persistence::Persistence>}
+    impl grok_events::EventSink for RejectProcessReceipt {
+        fn identity(&self)->grok_events::StoreIdentity {grok_events::EventSink::identity(self.store.as_ref())}
+        fn commit(&self,origin:&grok_events::EventOrigin,event:&ControlEvent)->grok_events::Result<grok_events::CommittedEvent> {
+            if let ControlEvent::SessionMetadataUpdated{metadata_json,..}=event {
+                let record:serde_json::Value=serde_json::from_str(metadata_json).unwrap();
+                let snapshot:serde_json::Value=serde_json::from_str(record["metadataJson"].as_str().unwrap()).unwrap();
+                if !snapshot["metadata"]["processOutcome"].is_null() {return Err(grok_events::EventError::Sink("generated failure saving observed process receipt".into()));}
+            }
+            grok_events::EventSink::commit(self.store.as_ref(),origin,event)
+        }
+    }
+
+    struct RejectModeMetadata {store:Arc<grok_persistence::Persistence>,armed:Arc<std::sync::atomic::AtomicBool>}
+    impl grok_events::EventSink for RejectModeMetadata {
+        fn identity(&self)->grok_events::StoreIdentity {grok_events::EventSink::identity(self.store.as_ref())}
+        fn commit(&self,origin:&grok_events::EventOrigin,event:&ControlEvent)->grok_events::Result<grok_events::CommittedEvent> {
+            if self.armed.load(Ordering::Acquire) && matches!(event,ControlEvent::SessionMetadataUpdated{..}) {
+                return Err(grok_events::EventError::Sink("generated secondary mode receipt failure".into()));
+            }
+            grok_events::EventSink::commit(self.store.as_ref(),origin,event)
+        }
+    }
+
+    #[tokio::test]
+    async fn acknowledged_policy_with_failed_snapshot_retains_actual_mode_and_explicit_uncertainty() {
+        let cwd=tempfile::tempdir().unwrap();let store=Arc::new(grok_persistence::Persistence::open(cwd.path().join("mode.sqlite")).unwrap());
+        let armed=Arc::new(std::sync::atomic::AtomicBool::new(false));let bus=shared_bus();
+        bus.install_sink(Arc::new(RejectModeMetadata{store:store.clone(),armed:armed.clone()})).unwrap();
+        let reg=SessionRegistry::new(bus.clone(),Arc::new(tokio::sync::RwLock::new(GrokConfig::default())),Arc::new(GrokCli::new("/usr/bin/true")));
+        let id=reg.spawn_mock(cwd.path().to_str().unwrap()).await.unwrap();let client=reg.sessions.get(&id).unwrap().acp_client.clone().unwrap();
+        assert_eq!(client.approval_mode().await,ApprovalMode::Plan);armed.store(true,Ordering::Release);
+        assert!(reg.set_approval_mode(id,ApprovalMode::Yolo).await.is_err());
+        let snapshot=reg.get_snapshot(id).unwrap();assert_eq!(snapshot.metadata.approval_mode,ApprovalMode::Yolo);
+        assert_eq!(client.approval_mode().await,ApprovalMode::Yolo);assert_eq!(snapshot.metadata.status,SessionStatus::Failed);
+        assert!(!bus.health().healthy);assert!(reg.send_prompt(id,"must preserve generated draft").await.is_err());
+        let persisted=store.event_snapshot(Some(id),128).unwrap();
+        assert!(persisted.operations.iter().any(|operation|operation.kind=="approval_mode_change" && operation.target=="approval:Yolo" && operation.outcome_seq.is_some()));
+        let record=store.get_session(id).unwrap();let saved:serde_json::Value=serde_json::from_str(&record.metadata_json).unwrap();
+        assert_eq!(saved["metadata"]["approvalMode"],"plan");
+    }
+
+    #[cfg(target_os="macos")]
+    #[tokio::test]
+    async fn actual_success_without_durable_process_receipt_is_not_acknowledged_completed() {
+        let cwd=tempfile::tempdir().unwrap();let store=Arc::new(grok_persistence::Persistence::open(cwd.path().join("events.sqlite")).unwrap());
+        let bus=shared_bus();bus.install_sink(Arc::new(RejectProcessReceipt{store:store.clone()})).unwrap();
+        let config=Arc::new(tokio::sync::RwLock::new(GrokConfig::default()));config.write().await.permissions.deny.clear();
+        let reg=SessionRegistry::new(bus.clone(),config,Arc::new(GrokCli::new("/usr/bin/true")));
+        let id=reg.spawn_agent(cwd.path().to_str().unwrap(),SpawnOptions{mode:AgentMode::Headless,prompt:Some("generated fixture".into()),plan_mode:false,approval_mode:Some(ApprovalMode::Ask),sandbox_profile:Some("unrestricted".into()),..Default::default()}).await.unwrap();
+        assert!(reg.wait_headless(id).await.is_err());assert!(!bus.health().healthy);
+        assert_eq!(reg.sessions.get(&id).unwrap().child.as_ref().unwrap().outcome().unwrap().end,ProcessEnd::Success);
+        assert!(!reg.sessions.get(&id).unwrap().process_receipt_committed);
+        assert_ne!(store.get_session(id).unwrap().status,"completed");
+        assert!(reg.cancel_session(id).await.is_err());assert!(reg.is_live(id));
+        assert!(reg.sessions.get(&id).unwrap().child.as_ref().unwrap().outcome().unwrap().cleanup_complete);
+    }
+
+    #[tokio::test]
+    async fn scoped_producer_commits_without_ui_and_old_runtime_cannot_change_resumed_metadata() {
+        let cwd=tempfile::tempdir().unwrap();
+        let store=Arc::new(grok_persistence::Persistence::open(cwd.path().join("events.sqlite")).unwrap());
+        let bus=shared_bus();bus.install_sink(store.clone()).unwrap();
+        let reg=SessionRegistry::new(bus.clone(),Arc::new(tokio::sync::RwLock::new(GrokConfig::default())),Arc::new(GrokCli::new(PathBuf::from("/bin/true"))));
+        let id=reg.spawn_mock(cwd.path().to_str().unwrap()).await.unwrap();
+        let old=reg.session_event_bus(id).unwrap();let old_id=old.runtime_id();
+        old.emit_checked(ControlEvent::SessionStatusChanged{session_id:id,status:SessionStatus::Cancelled,at:Utc::now()}).unwrap();
+        reg.remove_session(id).await.unwrap();
+        reg.spawn_agent_preallocated(id,cwd.path().to_str().unwrap(),SpawnOptions{model:Some("mock".into()),..Default::default()},ConnectOpts::default()).await.unwrap();
+        let current=reg.session_event_bus(id).unwrap();assert_ne!(current.runtime_id(),old_id);
+        assert!(old.emit_checked(ControlEvent::SessionStatusChanged{session_id:id,status:SessionStatus::Cancelled,at:Utc::now()}).is_err());
+        assert!(old.emit_checked(ControlEvent::AgentMessage{session_id:id,text:"retired output".into(),at:Utc::now()}).is_err());
+        reg.send_user_prompt(id,"generated durable prompt",Some(Uuid::new_v4())).await.unwrap();
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        assert_eq!(reg.get_snapshot(id).unwrap().metadata.status,SessionStatus::Idle);
+        let transcripts=store.transcript_entries(id).unwrap();
+        assert!(transcripts.iter().any(|row|row.role=="user" && row.body=="generated durable prompt"));
+        assert!(!transcripts.iter().any(|row|row.body.contains("retired output")));
+        assert!(bus.health().healthy && bus.health().durable);
+        reg.remove_session(id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_headless_admission_rejects_volatile_sink_before_child_spawn() {
+        let cwd=tempfile::tempdir().unwrap();let reg=test_registry();
+        reg.config.write().await.permissions.deny.clear();
+        let result=reg.spawn_agent(cwd.path().to_str().unwrap(),SpawnOptions{mode:AgentMode::Headless,prompt:Some("generated offline fixture".into()),plan_mode:false,approval_mode:Some(ApprovalMode::Ask),sandbox_profile:Some("unrestricted".into()),..Default::default()}).await;
+        assert!(matches!(result,Err(CoreError::Events(grok_events::EventError::NotDurable))));
+        assert_eq!(reg.session_count(),0);
+        assert!(reg.admitted.lock().unwrap().is_empty());
+        let result=reg.spawn_agent(cwd.path().to_str().unwrap(),SpawnOptions{model:Some("mock".into()),mode:AgentMode::Headless,prompt:Some("generated offline fixture".into()),plan_mode:false,approval_mode:Some(ApprovalMode::Ask),sandbox_profile:Some("unrestricted".into()),..Default::default()}).await;
+        assert!(matches!(result,Err(CoreError::Events(grok_events::EventError::NotDurable))));
+        assert_eq!(reg.session_count(),0);
+    }
+
+    #[tokio::test]
+    async fn status_mirror_recovers_committed_idle_after_broadcast_lag() {
+        let bus=Arc::new(EventBus::with_capacity(4));
+        let reg=SessionRegistry::new(bus,Arc::new(tokio::sync::RwLock::new(GrokConfig::default())),Arc::new(GrokCli::new("/bin/true")));
+        let cwd=tempfile::tempdir().unwrap();let id=reg.spawn_mock(cwd.path().to_str().unwrap()).await.unwrap();
+        reg.sessions.get_mut(&id).unwrap().metadata.status=SessionStatus::Running;
+        let scope=reg.session_event_bus(id).unwrap();
+        scope.emit_checked(ControlEvent::SessionStatusChanged{session_id:id,status:SessionStatus::Idle,at:Utc::now()}).unwrap();
+        // Fill the small queue without yielding; the status event is evicted.
+        for index in 0..64 {scope.emit_checked(ControlEvent::Raw{session_id:Some(id),payload:serde_json::json!({"fixture":index})}).unwrap();}
+        tokio::time::timeout(std::time::Duration::from_secs(1),async {
+            while reg.get_snapshot(id).unwrap().metadata.status!=SessionStatus::Idle {tokio::task::yield_now().await;}
+        }).await.unwrap();
+        reg.remove_session(id).await.unwrap();
+    }
+
+    #[cfg(target_os="macos")]
+    #[tokio::test]
+    async fn healthy_sink_never_commits_cancelled_until_all_owned_cleanup_is_observed() {
+        use grok_cli_wrapper::process::{spawn_group,DrainTicket};
+        let cwd=tempfile::tempdir().unwrap();let store=Arc::new(grok_persistence::Persistence::open(cwd.path().join("events.sqlite")).unwrap());
+        let bus=shared_bus();bus.install_sink(store.clone()).unwrap();let mut committed=bus.subscribe_committed();
+        let reg=SessionRegistry::new(bus.clone(),Arc::new(tokio::sync::RwLock::new(GrokConfig::default())),Arc::new(GrokCli::new(PathBuf::from("/bin/true"))));
+        let id=reg.spawn_mock(cwd.path().to_str().unwrap()).await.unwrap();
+        let mut command=tokio::process::Command::new("/bin/sleep");command.arg("30");
+        let(child,proof)=spawn_group(&mut command).unwrap();let(reporter,ticket)=DrainTicket::pair();
+        let process=ProcessHandle::adopt_attested(child,proof,ProcessConfig{timeout:None,cleanup_timeout:std::time::Duration::from_millis(100),..Default::default()},vec![ticket]).unwrap();
+        reg.sessions.get_mut(&id).unwrap().child=Some(process.clone());
+        while committed.try_recv().is_ok(){}
+        assert!(reg.cancel_session(id).await.is_err());
+        assert!(reg.is_live(id));assert!(!process.outcome().unwrap().cleanup_complete);
+        assert_ne!(store.get_session(id).unwrap().status,"cancelled");
+        while let Ok(event)=committed.try_recv(){assert!(!matches!(event.event,ControlEvent::SessionCancelled{..}|ControlEvent::SessionStatusChanged{status:SessionStatus::Cancelled,..}));}
+        reporter.complete(Ok(()));
+        reg.cancel_session(id).await.unwrap();
+        assert!(process.outcome().unwrap().cleanup_complete);
+        assert_eq!(store.get_session(id).unwrap().status,"cancelled");
+        reg.remove_session(id).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn checked_label_compare_and_swap_preserves_manual_label_and_retired_runner_identity() {
+        let reg=test_registry();let cwd=tempfile::tempdir().unwrap();let id=reg.spawn_mock(cwd.path().to_str().unwrap()).await.unwrap();let old=reg.session_event_bus(id).unwrap().runtime_id().unwrap();
+        reg.set_label(id,"manual title").unwrap();
+        assert!(reg.set_label_if_current(id,old,Some("mock"),"stale generated title").is_err());
+        assert_eq!(reg.get_snapshot(id).unwrap().metadata.label.as_deref(),Some("manual title"));
+        reg.set_label_if_current(id,old,Some("manual title"),"reviewed title").unwrap();
+        reg.remove_session(id).await.unwrap();reg.spawn_agent_preallocated(id,cwd.path().to_str().unwrap(),SpawnOptions{model:Some("mock".into()),..Default::default()},ConnectOpts::default()).await.unwrap();
+        assert!(reg.set_label_for_runtime(id,old,"old runner title").is_err());assert_ne!(reg.get_snapshot(id).unwrap().metadata.label.as_deref(),Some("old runner title"));reg.remove_session(id).await.unwrap();
+    }
+    struct RejectAdmissionSink {store:Arc<grok_persistence::Persistence>}
+    impl grok_events::EventSink for RejectAdmissionSink {
+        fn identity(&self)->grok_events::StoreIdentity {grok_events::EventSink::identity(self.store.as_ref())}
+        fn commit(&self,_origin:&grok_events::EventOrigin,_event:&ControlEvent)->grok_events::Result<grok_events::CommittedEvent>{Err(grok_events::EventError::Sink("generated pre-spawn commit failure".into()))}
+    }
+    #[cfg(target_os="macos")]
+    #[tokio::test]
+    async fn durable_admission_failure_never_launches_generated_marker_child() {
+        use std::os::unix::fs::PermissionsExt;
+        let cwd=tempfile::tempdir().unwrap();let program=cwd.path().join("worker");std::fs::write(&program,"#!/bin/sh\nprintf effect > \"$0.marker\"\n").unwrap();std::fs::set_permissions(&program,std::fs::Permissions::from_mode(0o700)).unwrap();
+        let bus=shared_bus();bus.install_sink(Arc::new(RejectAdmissionSink{store:Arc::new(grok_persistence::Persistence::open(cwd.path().join("events.sqlite")).unwrap())})).unwrap();let config=Arc::new(tokio::sync::RwLock::new(GrokConfig::default()));config.write().await.permissions.deny.clear();
+        let reg=SessionRegistry::new(bus.clone(),config,Arc::new(GrokCli::new(&program)));
+        assert!(reg.spawn_agent(cwd.path().to_str().unwrap(),SpawnOptions{mode:AgentMode::Headless,prompt:Some("generated fixture".into()),plan_mode:false,approval_mode:Some(ApprovalMode::Ask),sandbox_profile:Some("unrestricted".into()),..Default::default()}).await.is_err());
+        assert!(!program.with_file_name("worker.marker").exists());assert_eq!(reg.session_count(),0);assert!(reg.admitted.lock().unwrap().is_empty());assert!(!bus.health().healthy);
     }
 
     #[tokio::test]
@@ -906,7 +1177,8 @@ mod tests {
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
         let config = Arc::new(tokio::sync::RwLock::new(GrokConfig::default()));
         config.write().await.permissions.deny.clear();
-        let reg = SessionRegistry::new(shared_bus(), config.clone(), Arc::new(GrokCli::new(&program)));
+        let bus=shared_bus();bus.install_sink(Arc::new(grok_persistence::Persistence::open(cwd.path().join("policy-fixture.sqlite")).unwrap())).unwrap();
+        let reg = SessionRegistry::new(bus, config.clone(), Arc::new(GrokCli::new(&program)));
         let base = SpawnOptions { mode:AgentMode::Headless, prompt:Some("generated offline fixture".into()),
             approval_mode:Some(ApprovalMode::Ask), plan_mode:false,
             sandbox_profile:Some("unrestricted".into()), ..Default::default() };
@@ -1007,19 +1279,24 @@ mod tests {
         let script = cwd.path().join("generated-worker");
         std::fs::write(&script,"#!/bin/sh\nsleep 0.08\nprintf 'final λ\n'\nprintf 'diagnostic\n' >&2\n").unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
-        let bus = shared_bus(); let mut events = bus.subscribe();
+        let bus = shared_bus();
+        let store=Arc::new(grok_persistence::Persistence::open(cwd.path().join("fixture-events.sqlite")).unwrap());
+        bus.install_sink(store.clone()).unwrap();
+        let mut events = bus.subscribe();
         let config = Arc::new(tokio::sync::RwLock::new(GrokConfig::default()));
         config.write().await.permissions.deny.clear();
         let reg = SessionRegistry::new(bus,config,Arc::new(GrokCli::new(script)));
         let options = SpawnOptions { mode:AgentMode::Headless,prompt:Some("generated offline fixture".into()),plan_mode:false,approval_mode:Some(ApprovalMode::Ask),sandbox_profile:Some("unrestricted".into()),..Default::default() };
         let id = reg.spawn_agent(cwd.path().to_str().unwrap(),options.clone()).await.unwrap();
         assert_eq!(reg.get_snapshot(id).unwrap().metadata.status,SessionStatus::Running);
-        assert!(matches!(events.recv().await.unwrap(),grok_events::ControlEvent::SessionCreated {session_id,..} if session_id==id));
-        assert!(matches!(events.recv().await.unwrap(),grok_events::ControlEvent::SessionStatusChanged {session_id,status:SessionStatus::Running,..} if session_id==id));
+        loop {if matches!(events.recv().await.unwrap(),grok_events::ControlEvent::SessionStatusChanged {session_id,status:SessionStatus::Running,..} if session_id==id){break;}}
         let outcome = reg.wait_headless(id).await.unwrap();
         assert_eq!(outcome.end,ProcessEnd::Success);
         assert!(outcome.cleanup_complete && outcome.pipes_complete);
         assert!(outcome.output.stdout.contains("final λ") && outcome.output.stderr.contains("diagnostic"));
+        let saved=store.get_session(id).unwrap();let snapshot:serde_json::Value=serde_json::from_str(&saved.metadata_json).unwrap();
+        assert_eq!(snapshot["metadata"]["processOutcome"],serde_json::to_value(&outcome).unwrap());
+        assert_eq!(saved.status,"completed");
         assert!(reg.spawn_agent(cwd.path().to_str().unwrap(),options.clone()).await.is_err());
         reg.remove_session(id).await.unwrap();
         let id2=reg.spawn_agent(cwd.path().to_str().unwrap(),options).await.unwrap();
@@ -1027,6 +1304,9 @@ mod tests {
         let outcome=reg.wait_headless(id2).await.unwrap();
         assert_eq!(outcome.end,ProcessEnd::Cancelled);
         assert!(outcome.cleanup_complete);
+        let saved=store.get_session(id2).unwrap();let snapshot:serde_json::Value=serde_json::from_str(&saved.metadata_json).unwrap();
+        assert_eq!(snapshot["metadata"]["processOutcome"],serde_json::to_value(&outcome).unwrap());
+        assert_eq!(saved.status,"cancelled");
         assert!(reg.is_live(id2));
         reg.remove_session(id2).await.unwrap();
     }

@@ -586,14 +586,18 @@ async fn cleanup(
             "leader identity already reaped; refusing stale process-group signal",
         ));
     }
-    if live_group_members(pgid, false).await? && unsafe { libc::kill(-pgid, libc::SIGKILL) } != 0 {
-        let error = io::Error::last_os_error();
-        if error.raw_os_error() != Some(libc::ESRCH) {
-            return Err(error);
-        }
-    }
     tokio::time::timeout(budget, async {
         while live_group_members(pgid, false).await? {
+            // A fork can race the first group signal and inherit the group
+            // without inheriting its parent's pending SIGKILL. Re-signal live
+            // members within this same deadline. WNOWAIT still pins the leader;
+            // it is reaped only after the entire dedicated group is quiescent.
+            if unsafe { libc::kill(-pgid, libc::SIGKILL) } != 0 {
+                let error = io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::ESRCH) {
+                    return Err(error);
+                }
+            }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
         child.wait().await
@@ -912,27 +916,48 @@ mod tests {
     }
     #[tokio::test]
     async fn external_failure_is_sticky_and_stops_an_indefinite_worker() {
-        let (reporter, ticket) = DrainTicket::pair();
-        let mut command = tokio::process::Command::new("/bin/sh");
-        command
-            .args(["-c", "sleep 120 & wait"])
-            .process_group(0)
-            .kill_on_drop(true);
-        let config = ProcessConfig {
-            timeout: None,
-            cleanup_timeout: Duration::from_secs(1),
-            ..Default::default()
-        };
-        let budget = config.cleanup_timeout * 2 + Duration::from_secs(2);
-        let process = adopted(&mut command, config, vec![ticket]);
-        reporter.fail("oversized external frame");
-        reporter.complete(Ok(()));
-        let outcome = tokio::time::timeout(budget, process.wait_outcome())
-            .await
-            .unwrap();
-        assert_eq!(outcome.end, ProcessEnd::IoFailure);
-        assert!(outcome.cleanup_complete && outcome.pipes_complete);
-        assert!(outcome.error.unwrap().contains("oversized"));
+        // Exercise immediate failure while the shell is still forking its child.
+        for _ in 0..32 {
+            let (reporter, ticket) = DrainTicket::pair();
+            let mut command = tokio::process::Command::new("/bin/sh");
+            command
+                .args(["-c", "sleep 120 & wait"])
+                .process_group(0)
+                .kill_on_drop(true);
+            let config = ProcessConfig {
+                timeout: None,
+                cleanup_timeout: Duration::from_secs(1),
+                ..Default::default()
+            };
+            let budget = config.cleanup_timeout * 2 + Duration::from_secs(2);
+            let (child, proof) = spawn_group(&mut command).unwrap();
+            let pgid = child.id().unwrap() as i32;
+            let process =
+                ProcessHandle::adopt_attested(child, proof, config, vec![ticket]).unwrap();
+            reporter.fail("oversized external frame");
+            reporter.complete(Ok(()));
+            let outcome = tokio::time::timeout(budget, process.wait_outcome())
+                .await
+                .unwrap();
+            if !outcome.cleanup_complete {
+                let retried = process.cancel().await;
+                eprintln!("initial retained outcome for group {pgid}: {outcome:#?}; explicit cleanup retry: {retried:#?}");
+                assert!(
+                    retried.cleanup_complete,
+                    "generated worker remains retained: {retried:#?}"
+                );
+            }
+            assert!(
+                !live_group_members(pgid, false).await.unwrap(),
+                "generated group {pgid} still has live members"
+            );
+            assert_eq!(outcome.end, ProcessEnd::IoFailure, "{outcome:#?}");
+            assert!(
+                outcome.cleanup_complete && outcome.pipes_complete,
+                "{outcome:#?}"
+            );
+            assert!(outcome.error.unwrap().contains("oversized"));
+        }
     }
     #[tokio::test]
     async fn supplied_unverified_group_is_retained_instead_of_abandoned() {

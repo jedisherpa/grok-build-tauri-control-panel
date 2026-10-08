@@ -43,6 +43,7 @@ toml.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+rusqlite.workspace = true
 
 [lib]
 name = "grok_build_control_panel_lib"

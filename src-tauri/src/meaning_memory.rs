@@ -553,7 +553,10 @@ pub async fn meaning_memory(
     action: String,
     payload: Value,
 ) -> Result<Value, String> {
+    let target=serde_json::json!({"action":action}).to_string();
+    crate::operations::recorded(&state.event_bus,"meaning_memory",target,async {
     run(&state, &action, payload).await
+    }).await
 }
 pub(crate) async fn run(state: &AppState, action: &str, payload: Value) -> Result<Value, String> {
     if !payload.is_object()

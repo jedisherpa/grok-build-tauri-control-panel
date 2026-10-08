@@ -101,6 +101,8 @@ impl<'de> Deserialize<'de> for JsonRpcMessage {
 /// Agent → client JSON-RPC request that needs a response.
 #[derive(Debug, Clone)]
 pub struct IncomingAgentRequest {
+    /// Captured by the host transport, never deserialized from provider input.
+    pub(crate) host_epoch: Option<u64>,
     pub id: Value,
     pub method: String,
     pub params: Option<Value>,

@@ -127,6 +127,7 @@ pub struct BuildService {
     sessions: Mutex<HashMap<String, Uuid>>,
     registry: Arc<SessionRegistry>,
     trees: Arc<WorktreeManager>,
+    #[cfg(test)]
     db: Arc<Persistence>,
     bus: Arc<EventBus>,
 }
@@ -155,7 +156,7 @@ impl BuildService {
                 record.submitted_commit = record.workflow.base_commit.clone();
             }
         }
-        db.set_kv(STORAGE, &serde_json::to_string(&records)?)?;
+        commit_build_value(&bus,STORAGE,serde_json::to_string(&records)?)?;
         let concurrency = db
             .get_kv("reviewed_build_concurrency")?
             .map(|s| s.parse::<usize>())
@@ -185,6 +186,7 @@ impl BuildService {
             sessions: Mutex::new(restored_sessions),
             registry,
             trees,
+            #[cfg(test)]
             db,
             bus,
         });
@@ -263,8 +265,7 @@ impl BuildService {
                 );
             }
         }
-        self.db
-            .set_kv("reviewed_build_concurrency", &limit.to_string())?;
+        commit_build_value(&self.bus,"reviewed_build_concurrency",limit.to_string())?;
         *cap = limit;
         drop(cap);
         self.dispatch().await?;
@@ -342,8 +343,7 @@ impl BuildService {
                     .context("queue task disappeared")?
                     .reserved = true;
             }
-            self.db
-                .set_kv(STORAGE, &serde_json::to_string(&candidate)?)?;
+            commit_build_value(&self.bus,STORAGE,serde_json::to_string(&candidate)?)?;
             leases.extend(acquired);
             *guard = candidate;
             selected
@@ -388,8 +388,7 @@ impl BuildService {
             record.checkout_fingerprint = Some(fingerprint);
         }
         let out = record.workflow.clone();
-        self.db
-            .set_kv(STORAGE, &serde_json::to_string(&candidate)?)?;
+        commit_build_value(&self.bus,STORAGE,serde_json::to_string(&candidate)?)?;
         *guard = candidate;
         Ok(out)
     }
@@ -625,8 +624,7 @@ impl BuildService {
                 },
             );
             validate_graph(&coordination_tasks(&candidate))?;
-            self.db
-                .set_kv(STORAGE, &serde_json::to_string(&candidate)?)?;
+            commit_build_value(&self.bus,STORAGE,serde_json::to_string(&candidate)?)?;
             *guard = candidate;
         }
         self.dispatch().await?;
@@ -662,17 +660,22 @@ impl BuildService {
             .into())
     }
     pub async fn cancel(self: &Arc<Self>, id: &str) -> Result<BuildDto> {
-        let out = self
-            .update(id, |w| {
-                w.cancel()?;
-                Ok(())
-            })
-            .await?;
-        if let Some(session) = self.sessions.lock().await.get(id).copied() {
-            let _ = self.registry.cancel_session(session).await;
+        let saved=self.update(id,|workflow|{workflow.cancel()?;Ok(())}).await;
+        // Re-read admission after waiting for its records gate. Startup reserves
+        // cleanup_session durably before either registration or native spawn.
+        let registered=self.sessions.lock().await.get(id).copied();
+        let reserved=self.records.lock().await.get(id).and_then(|record|record.cleanup_session);
+        let session=registered.or(reserved);
+        // Protective Stop must still run when cancellation cannot be recorded.
+        let cleanup=if let Some(session)=session {self.registry.cancel_session(session).await.map_err(anyhow::Error::from)}else{Ok(())};
+        if let Err(error)=cleanup {
+            if let Some(session)=session {let _=self.set_cleanup(id,session,true).await;}
+            bail!("Build Stop cleanup is unresolved; owner and reservation are retained: {error}. Cancellation recording: {}",saved.as_ref().err().map(ToString::to_string).unwrap_or_else(||"committed".into()));
         }
+        let out=saved.context("Protective Stop requested; cancellation could not be committed. Inspect recovery before restarting")?;
         Ok(out.into())
     }
+
     pub async fn is_managed(&self, session: Uuid) -> bool {
         self.sessions.lock().await.values().any(|id| *id == session)
     }
@@ -685,8 +688,7 @@ impl BuildService {
         }
         record.cleanup_pending = pending;
         record.cleanup_session = pending.then_some(session);
-        self.db
-            .set_kv(STORAGE, &serde_json::to_string(&candidate)?)?;
+        commit_build_value(&self.bus,STORAGE,serde_json::to_string(&candidate)?)?;
         *guard = candidate;
         Ok(())
     }
@@ -783,18 +785,10 @@ impl BuildService {
                         .context("accepted prerequisite changed")?;
                 }
                 let owner = self.workspace_leases.lock().await.get(id).cloned().context("missing host workspace reservation")?;
-                let tree = self
-                    .trees
-                    .create_owned(
-                        root,
-                        CreateWorktreeRequest {
-                            name: format!("build-{}", &id[..8]),
-                            base_ref: Some(base.clone()),
-                            prefer_grok_cli: false,
-                        },
-                        Some(&owner),
-                    )
-                    .await?;
+                let target=serde_json::json!({"build_id":id,"repository":root,"base_ref":base,"name":format!("build-{}",&id[..8])}).to_string();
+                let tree=crate::operations::recorded(&self.bus,"create_build_worktree",target,async {
+                    self.trees.create_owned(root,CreateWorktreeRequest{name:format!("build-{}",&id[..8]),base_ref:Some(base.clone()),prefer_grok_cli:false},Some(&owner)).await.map_err(|error|error.to_string())
+                }).await.map_err(anyhow::Error::msg)?;
                 let identity = VerifiedCheckoutIdentity::discover(&tree.path).await?;
                 owner.bind_verified_checkout(&identity)?;
                 let fingerprint = checkout_fingerprint(&tree.path).await?;
@@ -924,7 +918,9 @@ impl BuildService {
                 .context("accepted prerequisite changed")?;
             prompt.push_str(&format!("\nAccepted prerequisite {}: {}\nRetained reference checkout: {}\nDependency gates start order. This build's checkout has its own submitted baseline. Inspect the reference as needed; any changes you incorporate must stay within this task's declared write paths.\n", dependency, prerequisite.workflow.spec.objective, prerequisite.workflow.worktree.as_deref().unwrap_or("unavailable")));
         }
-        let mut rx = self.bus.subscribe();
+        let runtime_bus=self.registry.session_event_bus(session)?;
+        let runtime_id=runtime_bus.runtime_id().context("build session runtime identity missing")?;
+        let mut rx = self.bus.subscribe_committed();
         {
             // Cancellation and prompt submission share the record lock: once a
             // cancellation is acknowledged, no new native prompt may be sent.
@@ -933,8 +929,6 @@ impl BuildService {
             if current.revision != workflow.revision || current.role_to_run() != Some(role) {
                 bail!("build stopped before native prompt");
             }
-            self.db
-                .append_message(session, "user", &prompt, Utc::now())?;
             tokio::time::timeout(
                 Duration::from_secs(10),
                 async {
@@ -952,7 +946,8 @@ impl BuildService {
                     .recv()
                     .await
                     .context("native output stream lost; build stopped")?;
-                if let Some(output) = collector.receive(session, event)? {
+                if event.origin.session_id!=Some(session)||event.origin.runtime_id!=Some(runtime_id){continue;}
+                if let Some(output) = collector.receive(session, event.event)? {
                     return Ok(output);
                 }
             }
@@ -962,7 +957,9 @@ impl BuildService {
     }
     fn persist_session(&self, id: Uuid) -> Result<()> {
         let s = self.registry.get_snapshot(id)?;
-        self.db.upsert_session(&SessionRecord {
+        let bus=self.registry.session_event_bus(id)?;
+        if bus.runtime_id()!=s.metadata.runtime_id {bail!("build runtime changed while saving metadata");}
+        let record=SessionRecord {
             id,
             cwd: s.metadata.cwd.clone(),
             mode: "acp".into(),
@@ -974,9 +971,15 @@ impl BuildService {
             created_at: s.metadata.created_at,
             updated_at: Utc::now(),
             message_count: 0,
-        })?;
+        };
+        bus.emit_checked(ControlEvent::SessionMetadataUpdated{session_id:id,metadata_json:serde_json::to_string(&record)?,at:Utc::now()})?;
         Ok(())
     }
+}
+fn commit_build_value(bus:&EventBus,key:&str,value:String)->Result<()> {
+    bus.ensure_durable()?;
+    bus.emit_checked(ControlEvent::StoreValueUpdated{key:key.into(),value,at:Utc::now()})?;
+    Ok(())
 }
 fn apply_role_result(w: &mut Workflow, role: Role, output: String, session: Uuid) -> Result<()> {
     let count = w.steps.len();
@@ -1812,14 +1815,15 @@ mod tests {
         }
     }
     fn service_without_timer(root: &Path, records: Vec<BuildRecord>) -> Arc<BuildService> {
-        let bus = grok_events::shared_bus();
+        let bus = Arc::new(EventBus::new());
+        let db = Arc::new(Persistence::open(root.join("queue.sqlite")).unwrap());
+        bus.install_sink(db.clone()).unwrap();
         let cli = Arc::new(grok_cli_wrapper::GrokCli::new("/bin/true"));
         let registry = SessionRegistry::new(
             bus.clone(),
             Arc::new(tokio::sync::RwLock::new(grok_config::GrokConfig::default())),
             cli.clone(),
         );
-        let db = Arc::new(Persistence::open(root.join("queue.sqlite")).unwrap());
         let records: BTreeMap<_, _> = records
             .into_iter()
             .map(|r| (r.workflow.id.clone(), r))
@@ -2105,12 +2109,54 @@ mod tests {
             vec![coordination_record(&workflow, "first000", "src", 1)],
         );
         let dbpath = fixture.0.join("queue.sqlite");
-        std::fs::rename(&dbpath, fixture.0.join("queue-backup.sqlite")).unwrap();
-        std::fs::create_dir(&dbpath).unwrap();
+        let fault=rusqlite::Connection::open(&dbpath).unwrap();
+        fault.execute_batch("CREATE TRIGGER abort_build_reservation BEFORE UPDATE ON kv WHEN NEW.key='reviewed_builds_v1' BEGIN SELECT RAISE(ABORT,'generated reservation fault'); END;").unwrap();
         assert!(service.reserve_ready().await.is_err());
         assert!(!service.get_record("first000").await.unwrap().reserved);
         assert!(service.running.lock().await.is_empty());
         assert_eq!(service.registry.session_count(), 0);
+    }
+
+    #[tokio::test]
+    async fn failed_cancellation_commit_still_requests_stop_and_retains_recovery_binding() {
+        let (fixture,workflow)=fixture().await;
+        let mut record=coordination_record(&workflow,"first000","src",1);
+        record.reserved=true;record.workflow.status=WorkflowStatus::Implementing;
+        let service=service_without_timer(&fixture.0,vec![record]);
+        let session=service.registry.spawn_mock(fixture.0.to_str().unwrap()).await.unwrap();
+        service.sessions.lock().await.insert("first000".into(),session);
+        let fault=rusqlite::Connection::open(fixture.0.join("queue.sqlite")).unwrap();
+        fault.execute_batch("CREATE TRIGGER abort_build_stop BEFORE UPDATE ON kv WHEN NEW.key='reviewed_builds_v1' BEGIN SELECT RAISE(ABORT,'generated stop recording fault'); END;").unwrap();
+        assert!(service.cancel("first000").await.is_err());
+        // This checks host Stop admission; native child cleanup is separately
+        // exercised by the real process fixtures in control-core.
+        assert_eq!(service.registry.get_snapshot(session).unwrap().metadata.status,SessionStatus::Cancelling);
+        assert_eq!(service.sessions.lock().await.get("first000"),Some(&session));
+        let retained=service.get_record("first000").await.unwrap();
+        assert!(retained.reserved);assert_eq!(retained.workflow.status,WorkflowStatus::Implementing);
+        assert!(!service.bus.health().healthy);
+    }
+
+    #[tokio::test]
+    async fn stop_rechecks_owner_registered_while_waiting_for_record_admission() {
+        let (fixture,workflow)=fixture().await;
+        let mut record=coordination_record(&workflow,"first000","src",1);
+        record.reserved=true;record.workflow.status=WorkflowStatus::Implementing;
+        let service=service_without_timer(&fixture.0,vec![record]);
+        let records=service.records.lock().await;
+        let entered=Arc::new(tokio::sync::Notify::new());
+        let worker=service.clone();let signal=entered.clone();
+        let stopping=tokio::spawn(async move {signal.notify_one();worker.cancel("first000").await});
+        entered.notified().await;
+        let session=service.registry.spawn_mock(fixture.0.to_str().unwrap()).await.unwrap();
+        service.sessions.lock().await.insert("first000".into(),session);
+        let fault=rusqlite::Connection::open(fixture.0.join("queue.sqlite")).unwrap();
+        fault.execute_batch("CREATE TRIGGER abort_delayed_stop BEFORE UPDATE ON kv WHEN NEW.key='reviewed_builds_v1' BEGIN SELECT RAISE(ABORT,'generated delayed stop fault'); END;").unwrap();
+        drop(records);
+        assert!(stopping.await.unwrap().is_err());
+        assert_eq!(service.registry.get_snapshot(session).unwrap().metadata.status,SessionStatus::Cancelling);
+        assert_eq!(service.sessions.lock().await.get("first000"),Some(&session));
+        assert!(service.get_record("first000").await.unwrap().reserved);
     }
 
     #[tokio::test]

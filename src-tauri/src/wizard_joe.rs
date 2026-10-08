@@ -440,6 +440,8 @@ pub async fn joe_analyze(
     compare_request_id: Option<String>,
     memory_evidence_id: Option<String>,
 ) -> Result<Value, String> {
+    let target=serde_json::json!({"thread_id":thread_id,"language":language}).to_string();
+    crate::operations::recorded(&state.event_bus,"joe_analyze",target,async {
     validate_input(&sentence, &language, &thread_id)?;
     if let Some(id) = &thread_id {
         let id = Uuid::parse_str(id).map_err(|_| "Invalid thread identifier")?;
@@ -534,6 +536,7 @@ pub async fn joe_analyze(
         Err(reason) => json!({"status":"unavailable","profileSaved":false,"reason":reason}),
     };
     Ok(result)
+    }).await
 }
 
 /// Authored source-backed fixtures exercise the installed local math path.

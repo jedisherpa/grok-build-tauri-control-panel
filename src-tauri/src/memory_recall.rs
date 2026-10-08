@@ -289,6 +289,8 @@ pub async fn memory_recall(
     action: String,
     payload: Value,
 ) -> Result<Value, String> {
+    let target=serde_json::json!({"action":action}).to_string();
+    crate::operations::recorded(&state.event_bus,"memory_recall",target,async {
     validate_payload(&action, &payload)?;
     if action == "validate" {
         let id = payload["receiptId"]
@@ -328,6 +330,7 @@ pub async fn memory_recall(
         result["context"] = context;
     }
     Ok(result)
+    }).await
 }
 
 #[cfg(test)]

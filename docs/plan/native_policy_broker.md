@@ -254,3 +254,45 @@ backends are required product behavior, not optional regressions to hide.
 The parent owns implementation dispatch, code review, full source gates, release
 checkpoint and final signed qualification. This research document alone changes
 no runtime authority and closes no production gate.
+
+## Follow-up installed-artifact review — 2026-10-07
+
+The observed Claude SDK/native package is 0.3.185, native SHA256
+`a280c23b210525218f5bd86f001c9dbc89b9e07410175c5a9355044bfadc0af1`.
+Its declarations expose `strictMcpConfig`, empty built-in tools, custom process
+spawn and `toolAliases`. Aliases alone are insufficient: the SDK explicitly
+requires corresponding `disallowedTools` because internal direct tool-object
+calls can bypass alias lookup. The installed ACP also overrides the supplied
+`allowDangerouslySkipPermissions` value with its own bypass setting. Its warm
+session fingerprint covers cwd and MCP servers, omitting policy/options/extra
+roots. The private reviewed adapter must construct policy before settings
+initialization and bind warm/new/load/resume identity to that policy. JSON
+metadata cannot supply the required SDK process-spawn or in-process MCP callbacks.
+
+Codex ACP's default app-server startup resolves its bundled native dependency,
+0.159.3-darwin-arm64, SHA256
+`4d210f7c5a18fd0386434df23b5bdbb8c0e7257d3e8a2b30b0769c8bbe99a878`.
+It does not default to the separately installed PATH CLI in that startup path.
+Reject unexpected executable overrides and pin all executing inputs. The installed
+adapter contains no dynamic-tool mapping; its package version alone does not
+establish complete tool suppression.
+
+Both ACP adapter licenses are Apache 2.0. The installed Claude SDK/native
+licenses retain proprietary vendor terms; do not treat the adapter license as
+covering those binaries. Preserve unmodified vendor-native authentication and
+user-owned accounts, without collecting or routing subscription tokens through
+C3. The official [Claude plan SDK update](https://support.claude.com/en/articles/15036540-use-the-claude-agent-sdk-with-your-claude-plan)
+expressly retains subscription compatibility as of its October 7 update. The
+separate developer-login restrictions do not justify silently replacing existing
+native authentication with an API-only product. Exact redistribution and the
+specific native flow remain distribution evidence requirements.
+
+The local Apple SDK and sandbox-exec/sandbox_init manuals mark those interfaces
+deprecated. Inherited filesystem restrictions can survive a child's process-group
+escape, while our current group cleanup cannot follow that escape. These are
+distinct claims. Hardened Runtime alone is not a confinement receipt. A durable
+helper design must be checked against Apple's supported privilege separation and
+[sandbox helper inheritance](https://developer.apple.com/documentation/xcode/embedding-a-helper-tool-in-a-sandboxed-app),
+including static entitlements, dynamic file access, inherited descriptors and the
+exact signed vendor process. No source inspection establishes final notarization
+acceptance or complete child cleanup.

@@ -239,7 +239,13 @@ tests/feature" spellcheck="false" required></textarea><span class="builds-help">
         </div>
 
           <div class="conversation-label">Conversation &amp; decisions</div>
-          <div id="transcript" class="transcript" aria-live="polite">
+          <div class="muted" id="event-coverage" role="status">Connecting to committed history…</div>
+            <div class="row">
+              <button id="event-history-retry" type="button">Retry history</button>
+              <button id="event-history-older" type="button">Older retained rows</button>
+              <button id="event-history-newer" type="button">Newer retained rows</button>
+            </div>
+            <div id="transcript" class="transcript" aria-live="polite">
             <div class="welcome">
               <div class="welcome-hero">
                 <span class="px-bomb xl mood-ready" aria-hidden="true"><model-viewer class="bomb-solid" src="assets/platonic-octahedron.glb" poster="assets/platonic-solids-poster.png" alt="" environment-image="neutral" auto-rotate rotation-per-second="18deg" interaction-prompt="none" shadow-intensity="0.2" exposure="1.05" disable-zoom disable-pan disable-tap touch-action="none" tabindex="-1"></model-viewer></span>
@@ -726,7 +732,8 @@ tests/feature" spellcheck="false" required></textarea><span class="builds-help">
     <script src="presence.js"></script>
     <script src="diagnostics.js"></script>
     <script src="thread-drafts.js"></script>
-    <script src="app.js"></script>
+    <script src="durable-events.js"></script>
+<script src="app.js"></script>
     <script src="history.js"></script>
     <script src="word-shapes.js"></script>
     <script src="word-shape-controls.js"></script>

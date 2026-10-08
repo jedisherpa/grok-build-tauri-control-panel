@@ -6,6 +6,18 @@ use serde_json::{json, Value};
 use tauri::State;
 use uuid::Uuid;
 
+async fn read_prepared_conversation(path:&std::path::Path)->Result<Value,String> {
+    use tokio::io::AsyncReadExt;
+    const LIMIT:u64=2*1024*1024;
+    let file=tokio::fs::File::open(path).await.map_err(|e|e.to_string())?;
+    if file.metadata().await.map_err(|e|e.to_string())?.len()>LIMIT {
+        return Err(format!("Prepared conversation exceeds the bounded 2 MiB import. The complete original reference remains at {}; choose a smaller authored import or inspect the complete reference before continuing",path.display()));
+    }
+    let mut bytes=Vec::new();file.take(LIMIT+1).read_to_end(&mut bytes).await.map_err(|e|e.to_string())?;
+    if bytes.len() as u64>LIMIT {return Err("Prepared conversation grew beyond the bounded import; original reference retained".into());}
+    serde_json::from_slice(&bytes).map_err(|e|e.to_string())
+}
+
 const INDEXER: &str = include_str!("../../scripts/history_library.py");
 
 async fn run(state: &AppState, action: &str, payload: Value) -> Result<Value, String> {
@@ -43,7 +55,10 @@ async fn run(state: &AppState, action: &str, payload: Value) -> Result<Value, St
 
 #[tauri::command]
 pub async fn history_scan(state: State<'_, AppState>) -> Result<Value, String> {
+    let target="history_catalog".into();
+    crate::operations::recorded(&state.event_bus,"history_scan",target,async {
     run(&state, "scan", json!({"home":state.paths.home_dir})).await
+    }).await
 }
 
 #[tauri::command]
@@ -93,7 +108,10 @@ pub async fn history_read(
 /// Materialize every available message, not only the pages loaded in the UI.
 #[tauri::command]
 pub async fn history_prepare(state: State<'_, AppState>, id: String) -> Result<Value, String> {
+    let target=serde_json::json!({"source_id":id}).to_string();
+    crate::operations::recorded(&state.event_bus,"history_prepare",target,async {
     run(&state, "prepare", json!({"id":id})).await
+    }).await
 }
 
 fn native_identity(prepared: &Value) -> Result<(&str, &str, &str), String> {
@@ -124,6 +142,8 @@ pub async fn history_continue_native(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<Value, String> {
+    let target=serde_json::json!({"source_id":id}).to_string();
+    crate::operations::recorded(&state.event_bus,"history_continue_native",target,async {
     let prepared = run(&state, "prepare", json!({"id":id})).await?;
     let (backend, native_id, cwd) = native_identity(&prepared)?;
     if state
@@ -137,12 +157,12 @@ pub async fn history_continue_native(
     // A new local control record links to the original native engine ID. Never
     // copy grants or MCP settings from an older Bomb Code control record.
     let control_id = Uuid::new_v4();
-    {
+    let record={
         let now = Utc::now();
         let title = prepared["thread"]["title"]
             .as_str()
             .unwrap_or("Imported conversation");
-        let record = SessionRecord {
+        SessionRecord {
             id: control_id,
             cwd: cwd.into(),
             mode: "acp".into(),
@@ -156,31 +176,26 @@ pub async fn history_continue_native(
             created_at: now,
             updated_at: now,
             message_count: 0,
-        };
-        state
-            .persistence
-            .upsert_session(&record)
-            .map_err(|e| e.to_string())?;
-    }
+        }
+    };
     let path = prepared["json_path"].as_str().ok_or("Prepared conversation has no file")?;
-    let document: Value = serde_json::from_slice(&tokio::fs::read(path).await.map_err(|e| e.to_string())?)
-        .map_err(|e| e.to_string())?;
+    let document=read_prepared_conversation(std::path::Path::new(path)).await?;
     let messages = document["messages"].as_array().ok_or("Prepared conversation has no messages")?;
-    let entries: Vec<TranscriptEntry> = messages.iter().map(|m| TranscriptEntry {
+    let mut entries: Vec<TranscriptEntry> = messages.iter().enumerate().map(|(index,m)| TranscriptEntry {
         role: m["role"].as_str().unwrap_or("").into(),
         body: m["text"].as_str().unwrap_or("").into(),
         at: m["at"].as_str().filter(|a| !a.is_empty()).map(str::to_string)
-            .unwrap_or_else(|| Utc::now().to_rfc3339()), seq: 0,
+            .unwrap_or_else(|| Utc::now().to_rfc3339()), seq: (index+1) as u64,
     }).collect();
-    state.persistence.import_conversation(control_id, &entries).map_err(|e| e.to_string())?;
     let reference = format!("Complete conversation reference: {}\nStructured history: {}\n{} available messages. {}\nIf native loading is unavailable, read this full reference before continuing; prior approvals are not current authorization.",
         prepared["markdown_path"].as_str().unwrap_or(""),
         prepared["json_path"].as_str().unwrap_or(""), prepared["message_count"],
         prepared["notice"].as_str().unwrap_or(""));
-    state
-        .persistence
-        .append_message(control_id, "system", &reference, Utc::now())
-        .map_err(|e| e.to_string())?;
+    entries.push(TranscriptEntry{role:"system".into(),body:reference,at:Utc::now().to_rfc3339(),seq:(entries.len()+1) as u64});
+    state.event_bus.emit_checked(grok_events::ControlEvent::ImportedConversation {
+        session_id:control_id,metadata_json:serde_json::to_string(&record).map_err(|e|e.to_string())?,
+        entries_json:serde_json::to_string(&entries).map_err(|e|e.to_string())?,at:Utc::now(),
+    }).map_err(|e|format!("Conversation import was not committed: {e}. The complete original reference remains at {}",prepared["json_path"]))?;
     // No MCP servers or historical access grants are copied into this record.
     crate::commands::resume_saved_session(
         &state,
@@ -201,7 +216,7 @@ pub async fn history_continue_native(
     let title: String = prepared["thread"]["title"].as_str().unwrap_or("Imported conversation")
         .chars().take(60).collect();
     state.registry.set_label(control_id, &title).map_err(|e| e.to_string())?;
-    crate::commands::persist_session(&state, control_id).await;
+    crate::commands::persist_session(&state, control_id).await?;
     let snapshot = state
         .registry
         .get_snapshot(control_id)
@@ -209,10 +224,22 @@ pub async fn history_continue_native(
     Ok(
         json!({"id":control_id,"brain_mode":snapshot.metadata.brain_mode.as_str(),"prepared":prepared}),
     )
+    }).await
 }
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn prepared_import_bounds_read_before_json_allocation() {
+        let dir=tempfile::tempdir().unwrap();let small=dir.path().join("small.json");
+        tokio::fs::write(&small,b"{\"messages\":[]}").await.unwrap();
+        assert!(super::read_prepared_conversation(&small).await.is_ok());
+        let large=dir.path().join("large.json");let file=std::fs::File::create(&large).unwrap();file.set_len(2*1024*1024+1).unwrap();
+        let error=super::read_prepared_conversation(&large).await.unwrap_err();
+        assert!(error.contains("complete original reference remains"));
+        assert_eq!(file.metadata().unwrap().len(),2*1024*1024+1);
+    }
+
     use super::*;
     #[test]
     fn native_continuation_accepts_only_explicit_eligible_engine_records() {
@@ -234,6 +261,8 @@ mod tests {
 
 #[tauri::command]
 pub async fn history_import(state: State<'_, AppState>, path: String) -> Result<Value, String> {
+    let target=serde_json::json!({"source_path":path}).to_string();
+    crate::operations::recorded(&state.event_bus,"history_import",target,async {
     let p = std::path::Path::new(&path);
     if !p.is_absolute()
         || !p.is_file()
@@ -242,6 +271,7 @@ pub async fn history_import(state: State<'_, AppState>, path: String) -> Result<
         return Err("Choose an existing JSON or ZIP conversation export".into());
     }
     run(&state, "import", json!({"path":path})).await
+    }).await
 }
 
 #[tauri::command]

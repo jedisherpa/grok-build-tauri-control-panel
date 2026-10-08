@@ -23,5 +23,6 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+grok_persistence = { path = "../grok_persistence" }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }

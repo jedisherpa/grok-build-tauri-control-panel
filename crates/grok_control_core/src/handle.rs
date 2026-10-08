@@ -15,6 +15,9 @@ use crate::options::AgentMode;
 #[serde(rename_all = "camelCase")]
 pub struct SessionMetadata {
     pub id: Uuid,
+    /// Current host runtime identity, informational when serialized; never restored as authority.
+    #[serde(default)]
+    pub runtime_id: Option<Uuid>,
     pub acp_session_id: Option<String>,
     pub cwd: String,
     pub worktree: Option<String>,
@@ -67,6 +70,10 @@ pub struct AgentHandleSnapshot {
 }
 
 pub struct AgentHandle {
+    /// Host-owned producer scope; saved metadata never selects this authority.
+    pub(crate) event_bus: Arc<grok_events::EventBus>,
+    /// Physical observation is acknowledged only after its checked durable receipt.
+    pub(crate) process_receipt_committed: bool,
     pub metadata: SessionMetadata,
     pub child: Option<ProcessHandle>,
     pub acp_client: Option<Arc<AcpClient>>,

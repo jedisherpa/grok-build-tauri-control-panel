@@ -150,3 +150,61 @@ The candidate evidence validator enforces pinned receipt consistency, current
 story contracts, independent repeat passes and raw matched native performance
 evidence. Its generated tests use mock candidates. It neither independently
 verifies observations nor asserts human approval, signs, submits or publishes.
+
+## Durable events, ownership and recovery source checkpoint
+
+Gate3 now uses one retained SQLite writer for committed events and their
+transcript/status/metadata projections, workflow/scheduler snapshots and typed
+operation records. Publication follows the transaction; subscribers are no
+longer responsible for independent best-effort persistence. Runtime generations
+fence retired producers. Database, WAL and SHM identity are checked before
+transactions and after commit before acknowledgement. A post-commit failure
+retains the old receipt and reports uncertainty, without claiming rollback.
+
+The frontend subscribes before consistent paged snapshots, replays above the
+watermark, deduplicates sequences and reconciles lag/import/removal. Failed reads
+remain retryable. A 2,000-row/4MiB tail and 300-row DOM window expose earlier
+coverage rather than using transcript length as completeness. Historical approval
+text is inert; current pending controls require the exact host runtime and turn.
+Unresolved and explicitly uncertain/dispatched operation outcomes remain visible.
+
+Prompt admission persists each accepted user submission once and preserves rejected
+drafts. Completion waits for queued output. Accepted native projection overflow
+fails current-runtime coverage instead of disappearing before success. Policy
+changes commit intent before mutation and restore local state if their outcome
+fails while dispatch remains locked. A secondary metadata failure exposes the
+actual already-acknowledged mode locally as Failed and blocks new prompts. Saved
+renames preserve flat/nested authority schemas and reject corrupt metadata.
+Headless terminal outcomes are saved before completion acknowledgement.
+
+The integrated locked/offline suite passes **380 Rust tests, zero failures and
+six existing prerequisite-dependent ignored tests**. ACP86, core22, panel85,
+persistence32 and events6 are included. Frontend passes245; Python passes158.
+Workspace check, strict all-target Clippy, affected JavaScript syntax and
+whitespace checks pass. Both independent review lanes accept the scoped source.
+Receipts are `gate3-workspace-tests-final-v2.log`,
+`gate3-workspace-check-final-v2.log`, `gate3-workspace-clippy-final-v1.log`,
+`gate3-frontend-tests-final-v1.log` and `gate3-python-tests-final-v1.log` in the
+local release qualification output directory. Failed probes remain outside Git.
+
+A full-suite failure exposed a kill-versus-fork race. Cleanup now re-signals live
+members inside the unchanged deadline, retaining the unreaped leader identity.
+Eight repeated parallel wrapper suites pass168 test executions, including256
+immediate failure/fork trials with actual group-quiescence checks. This does not
+extend the supervisor beyond its documented dedicated process-group scope.
+
+The generated owned-writer probe measured commit p50 170µs, p95 3,775µs,
+p99 9,357µs and maximum17,406µs. A deliberately non-yielding1,000-event Tokio
+burst delayed its heartbeat584ms. These are source measurements, not accepted
+native responsiveness budgets. Final signed real-ingress/frame/RSS testing is
+required. Snapshot count/time limits, structured event byte limits, physical
+lock scope, clone-generation rotation, untagged late provider attribution and
+legacy noncooperating writers remain explicit limits in the implementation plan.
+
+No installed app, original store, credentials, provider workflow, new signature,
+Apple submission or production publication was changed by this source checkpoint.
+Whole-native enforcement, remaining utility-worker bounds/ownership and final
+signed packaged workflow/recovery/accessibility/performance remain release gates.
+The installed-adapter follow-up in `docs/plan/native_policy_broker.md` preserves
+native authentication and records the concrete suppression/resume/distribution
+work required before lifting restrictive-role guards.

@@ -14,7 +14,7 @@ use grok_events::{shared_bus, EventBus};
 use grok_extensions::ExtensionsService;
 use grok_mcp::McpManager;
 use grok_memory::MemoryService;
-use grok_persistence::Persistence;
+use grok_persistence::{Persistence, ProfileOwnership};
 use grok_scheduler::{JobCleanupHandler, JobHandler, JobOutcome, JobRunContext, ScheduledJob, Scheduler, SchedulerSnapshot};
 use grok_worktree::WorktreeManager;
 
@@ -23,6 +23,9 @@ use crate::explainer::ExplainerService;
 use crate::haven::HavenClient;
 
 pub struct AppState {
+    // Retained for the entire process; dropping a failed initialization releases
+    // the OS ownership without deleting or breaking the lock file.
+    _profile_ownership: Arc<ProfileOwnership>,
     pub builds: Arc<crate::builds::BuildService>,
     pub paths: GrokPaths,
     pub config: Arc<RwLock<GrokConfig>>,
@@ -41,7 +44,7 @@ pub struct AppState {
     pub explainer: Arc<ExplainerService>,
 }
 
-fn load_startup_config(paths: &GrokPaths, resolved_binary: Option<PathBuf>) -> Result<GrokConfig> {
+fn prepare_startup_config(paths: &GrokPaths, resolved_binary: Option<PathBuf>) -> Result<(GrokConfig, GrokConfig)> {
     // Validate both layers before saving discovery. Missing is distinct from corrupt.
     let mut config = GrokConfig::load(paths)
         .context("load panel/project configuration; original files preserved")?;
@@ -60,8 +63,13 @@ fn load_startup_config(paths: &GrokPaths, resolved_binary: Option<PathBuf>) -> R
             config.grok_binary = Some(binary);
         }
     }
-    base.save(&paths.config_file)
-        .context("save resolved panel configuration")?;
+    Ok((config, base))
+}
+
+#[cfg(test)]
+fn load_startup_config(paths: &GrokPaths, resolved_binary: Option<PathBuf>) -> Result<GrokConfig> {
+    let (config, base) = prepare_startup_config(paths, resolved_binary)?;
+    base.save(&paths.config_file).context("save resolved panel configuration")?;
     Ok(config)
 }
 
@@ -70,6 +78,7 @@ impl AppState {
     /// running app usable through the separate scheduler stop_all operation.
     pub async fn shutdown_for_exit(&self) -> Result<()> {
         let cleanup=shutdown_owned_runtime(&self.scheduler,&self.registry).await;
+        self.persistence.release_all_snapshots();
         let checkpoint=self.persistence.checkpoint();
         let errors=[cleanup.err().map(|e|e.to_string()),checkpoint.err().map(|e|e.to_string())].into_iter().flatten().collect::<Vec<_>>();
         if errors.is_empty() {Ok(())} else {Err(anyhow::anyhow!(errors.join("; ")))}
@@ -80,7 +89,10 @@ impl AppState {
 
         let paths = GrokPaths::discover(std::env::current_dir().ok().as_deref())
             .context("path discovery")?;
-        paths.ensure_dirs().context("create panel directories")?;
+        if is_normal_physical_profile(&paths.grok_dir,&paths.home_dir)? {crate::store_activation::require_closed_legacy_product().await?;}
+        let persistence_path = paths.sessions_dir.join("control_panel.db");
+        let profile_ownership = Arc::new(ProfileOwnership::acquire(&paths.grok_dir, &persistence_path)
+            .context("another writer or unsafe physical profile; no configuration/memory mutation admitted")?);
 
         // Resolve the binary against the BASE (global-only) config and save
         // that — saving the overlay-merged view would silently promote
@@ -95,14 +107,21 @@ impl AppState {
                 None
             }
         };
-        let config = load_startup_config(&paths, resolved_binary)?;
+        let (config, base) = prepare_startup_config(&paths, resolved_binary)?;
+        let persistence = Arc::new(Persistence::open_owned(profile_ownership.clone())
+            .context("persistence open")?);
+        let event_bus = shared_bus();
+        event_bus.install_sink(persistence.clone()).context("install durable event owner before producers")?;
+        event_bus.ensure_durable().context("durable event coverage unavailable")?;
+        event_bus.begin_owned_lifetime().context("record prior runtime interruption before admission")?;
+        paths.ensure_dirs().context("create panel directories")?;
+        base.save(&paths.config_file).context("save resolved panel configuration")?;
 
         let binary = config
             .resolve_grok_binary()
             .unwrap_or_else(|_| PathBuf::from("grok"));
 
         let config = Arc::new(RwLock::new(config));
-        let event_bus = shared_bus();
         let grok_cli = Arc::new(GrokCli::new(binary));
 
         let registry = SessionRegistry::new(event_bus.clone(), config.clone(), grok_cli.clone());
@@ -139,10 +158,6 @@ impl AppState {
         let memory = MemoryService::open(paths.memory_dir.clone(), event_bus.clone())
             .await
             .context("memory service")?;
-
-        let persistence_path = paths.sessions_dir.join("control_panel.db");
-        let persistence =
-            Arc::new(Persistence::open(persistence_path).context("persistence open")?);
 
         let builds = crate::builds::BuildService::open(
             registry.clone(),
@@ -191,10 +206,11 @@ impl AppState {
             }
         })).await;
         {
-            let persistence_for_sched = persistence.clone();
+            let bus_for_sched = event_bus.clone();
             scheduler.set_change_hook(move |snapshot| {
                 let json = serde_json::to_string(&snapshot).map_err(|error|error.to_string())?;
-                persistence_for_sched.set_kv("scheduler_jobs_v2", &json).map_err(|error|error.to_string())
+                bus_for_sched.ensure_durable().map_err(|error|error.to_string())?;
+                bus_for_sched.emit_checked(grok_events::ControlEvent::StoreValueUpdated{key:"scheduler_jobs_v2".into(),value:json,at:chrono::Utc::now()}).map(|_|()).map_err(|error|error.to_string())
             }).await;
             if let Some(json) = persistence.get_kv("scheduler_jobs_v2")? {
                 let snapshot: SchedulerSnapshot = serde_json::from_str(&json)
@@ -252,6 +268,7 @@ impl AppState {
         }
 
         Ok(Self {
+            _profile_ownership: profile_ownership,
             builds,
             paths,
             config,
@@ -272,6 +289,26 @@ impl AppState {
     }
 }
 
+fn physical_path_identity(path:&std::path::Path)->Result<PathBuf> {
+    let mut ancestor=path.to_path_buf();let mut suffix=Vec::new();
+    loop {
+        match std::fs::symlink_metadata(&ancestor) {
+            Ok(_)=>break,
+            Err(error) if error.kind()==std::io::ErrorKind::NotFound=> {
+                suffix.push(ancestor.file_name().context("profile path has no resolvable ancestor")?.to_os_string());
+                ancestor=ancestor.parent().context("profile path has no parent")?.to_path_buf();
+            }
+            Err(error)=>return Err(error).context("cannot verify physical profile identity"),
+        }
+    }
+    let mut resolved=ancestor.canonicalize().context("cannot resolve physical profile identity")?;
+    for component in suffix.into_iter().rev(){resolved.push(component);}
+    Ok(resolved)
+}
+fn is_normal_physical_profile(profile:&std::path::Path,home:&std::path::Path)->Result<bool> {
+    Ok(physical_path_identity(profile)?==physical_path_identity(&home.join(".grok"))?)
+}
+
 async fn shutdown_owned_runtime(scheduler:&Arc<Scheduler>,registry:&Arc<SessionRegistry>) -> Result<()> {
     scheduler.fence_admission();registry.fence_admission()?;
     // The scheduler must save its typed result before its session can be removed.
@@ -285,6 +322,22 @@ async fn shutdown_owned_runtime(scheduler:&Arc<Scheduler>,registry:&Arc<SessionR
 #[cfg(test)]
 mod release_tests {
     use super::*;
+
+    #[test]
+    fn legacy_guard_uses_physical_profile_including_explicit_home_and_aliases() {
+        let dir=tempfile::tempdir().unwrap();let home=dir.path().join("home");
+        std::fs::create_dir(&home).unwrap();
+        assert!(is_normal_physical_profile(&home.join(".grok"),&home).unwrap());
+        let qa=dir.path().join("qa");std::fs::create_dir(&qa).unwrap();
+        assert!(!is_normal_physical_profile(&qa.join(".grok"),&home).unwrap());
+        #[cfg(unix)] {
+            let alias=dir.path().join("home-alias");std::os::unix::fs::symlink(&home,&alias).unwrap();
+            assert!(is_normal_physical_profile(&alias.join(".grok"),&home).unwrap());
+            std::fs::create_dir(home.join(".grok")).unwrap();
+            std::os::unix::fs::symlink(home.join(".grok"),qa.join(".grok")).unwrap();
+            assert!(is_normal_physical_profile(&qa.join(".grok"),&home).unwrap());
+        }
+    }
 
     #[test]
     fn discovery_cannot_replace_explicit_base_or_project_backend() {
@@ -331,7 +384,9 @@ mod release_tests {
         use std::sync::atomic::{AtomicBool,Ordering};
         let cwd=tempfile::tempdir().unwrap();let script=cwd.path().join("worker");
         std::fs::write(&script,"#!/bin/sh\nsleep 120 & wait\n").unwrap();std::fs::set_permissions(&script,std::fs::Permissions::from_mode(0o700)).unwrap();
-        let bus=grok_events::shared_bus();let config=Arc::new(tokio::sync::RwLock::new(GrokConfig::default()));config.write().await.permissions.deny.clear();
+        let persistence=Arc::new(Persistence::open(cwd.path().join("fixture.sqlite")).unwrap());
+        let bus=grok_events::shared_bus();bus.install_sink(persistence).unwrap();
+        let config=Arc::new(tokio::sync::RwLock::new(GrokConfig::default()));config.write().await.permissions.deny.clear();
         let registry=SessionRegistry::new(bus.clone(),config,Arc::new(GrokCli::new(script)));
         let scheduler=Scheduler::new(bus);let fail=Arc::new(AtomicBool::new(false));let failing=fail.clone();
         scheduler.set_change_hook(move |_|{if failing.load(Ordering::SeqCst){Err("injected full disk".into())}else{Ok(())}}).await;

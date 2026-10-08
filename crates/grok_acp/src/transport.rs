@@ -1,7 +1,7 @@
 //! Newline-delimited JSON transport over process stdio.
 
 use std::collections::HashMap;
-use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
+use std::sync::{Arc, atomic::{AtomicBool, AtomicU64, Ordering}};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -49,10 +49,12 @@ pub(crate) async fn discard_to_eof<R: tokio::io::AsyncRead + Unpin>(reader: &mut
 /// Local fences share the notification FIFO but cannot be supplied by the agent.
 pub enum NotificationEvent {
     Notification(JsonRpcNotification),
+    ScopedNotification(u64,JsonRpcNotification),
     Fence(oneshot::Sender<()>),
 }
 
 pub struct NdjsonTransport {
+    turn_epoch: Option<Arc<AtomicU64>>,
     stdin: Mutex<Option<ChildStdin>>,
     poisoned: AtomicBool,
     write_timeout: Duration,
@@ -80,7 +82,11 @@ impl NdjsonTransport {
         agent_request_tx: tokio::sync::mpsc::UnboundedSender<IncomingAgentRequest>,
         drain_reporter: Option<DrainReporter>,
     ) -> Arc<Self> {
+        Self::new_scoped(stdin,stdout,notification_tx,agent_request_tx,drain_reporter,None)
+    }
+    pub(crate) fn new_scoped(stdin:ChildStdin,stdout:ChildStdout,notification_tx:tokio::sync::mpsc::UnboundedSender<NotificationEvent>,agent_request_tx:tokio::sync::mpsc::UnboundedSender<IncomingAgentRequest>,drain_reporter:Option<DrainReporter>,turn_epoch:Option<Arc<AtomicU64>>)->Arc<Self> {
         let transport = Arc::new(Self {
+            turn_epoch,
             stdin: Mutex::new(Some(stdin)),
             poisoned: AtomicBool::new(false),
             write_timeout: Duration::from_secs(5),
@@ -99,6 +105,10 @@ impl NdjsonTransport {
         });
 
         transport
+    }
+
+    fn scoped_notification(&self,notification:JsonRpcNotification)->NotificationEvent {
+        match &self.turn_epoch {Some(epoch)=>NotificationEvent::ScopedNotification(epoch.load(Ordering::Acquire),notification),None=>NotificationEvent::Notification(notification)}
     }
 
     async fn read_loop(self: Arc<Self>, stdout: ChildStdout) -> Result<()> {
@@ -156,12 +166,13 @@ impl NdjsonTransport {
                     }
                 }
                 Ok(JsonRpcMessage::Notification(n)) => {
-                    let _ = self.notification_tx.send(NotificationEvent::Notification(n));
+                    let _ = self.notification_tx.send(self.scoped_notification(n));
                 }
                 Ok(JsonRpcMessage::Request(req)) => {
                     // Agent → client request (fs/*, session/request_permission, …).
                     // MUST be answered or the agent turn hangs forever.
                     let _ = self.agent_request_tx.send(IncomingAgentRequest {
+                        host_epoch:self.turn_epoch.as_ref().map(|epoch|epoch.load(Ordering::Acquire)),
                         id: req.id,
                         method: req.method,
                         params: req.params,
@@ -172,6 +183,7 @@ impl NdjsonTransport {
                     if let Ok(v) = serde_json::from_str::<Value>(trimmed) {
                         if v.get("method").is_some() && v.get("id").is_some() {
                             let _ = self.agent_request_tx.send(IncomingAgentRequest {
+                                host_epoch:self.turn_epoch.as_ref().map(|epoch|epoch.load(Ordering::Acquire)),
                                 id: v.get("id").cloned().unwrap_or(Value::Null),
                                 method: v
                                     .get("method")
@@ -183,7 +195,7 @@ impl NdjsonTransport {
                             continue;
                         }
                         if v.get("method").is_some() && v.get("id").is_none() {
-                            let _ = self.notification_tx.send(NotificationEvent::Notification(JsonRpcNotification {
+                            let _ = self.notification_tx.send(self.scoped_notification(JsonRpcNotification {
                                 jsonrpc: "2.0".into(),
                                 method: v
                                     .get("method")
@@ -389,6 +401,16 @@ mod tests {
     use tokio::sync::oneshot::error::TryRecvError;
 
     #[tokio::test]
+    async fn queued_frames_keep_host_epoch_and_provider_cannot_choose_it() {
+        let mut command=tokio::process::Command::new("/bin/sh");
+        command.args(["-c",r#"printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"message":"generated old output","hostEpoch":9999}}' '{"jsonrpc":"2.0","id":"old-request","method":"fs/write_text_file","host_epoch":9999,"params":{"path":"generated","content":"test"}}'; sleep 30"#]).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).kill_on_drop(true);
+        let mut child=command.spawn().unwrap();let(tx,mut notifications)=tokio::sync::mpsc::unbounded_channel();let(requests,mut request_rx)=tokio::sync::mpsc::unbounded_channel();
+        let epoch=Arc::new(AtomicU64::new(7));let _transport=NdjsonTransport::new_scoped(child.stdin.take().unwrap(),child.stdout.take().unwrap(),tx,requests,None,Some(epoch.clone()));
+        let notification=tokio::time::timeout(Duration::from_secs(2),notifications.recv()).await.unwrap().unwrap();let request=tokio::time::timeout(Duration::from_secs(2),request_rx.recv()).await.unwrap().unwrap();
+        epoch.store(9,Ordering::Release);assert!(matches!(notification,NotificationEvent::ScopedNotification(7,_)));assert_eq!(request.host_epoch,Some(7));child.kill().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn oversized_newline_free_frame_has_a_fixed_allocation_bound() {
         let payload = vec![b'x'; MAX_FRAME_BYTES * 2];
         let mut reader = BufReader::new(std::io::Cursor::new(payload));
@@ -498,12 +520,13 @@ mod tests {
                     assert_eq!(message, expected); messages.push(message);
                 }
                 NotificationEvent::Fence(_) => panic!("completion overtook native output"),
+                NotificationEvent::ScopedNotification(..)=>panic!("fixture unexpectedly scoped"),
             }
             assert!(matches!(finished_rx.try_recv(), Err(TryRecvError::Empty)));
         }
         match tokio::time::timeout(Duration::from_secs(3), updates.recv()).await.unwrap().unwrap() {
             NotificationEvent::Fence(ack) => { assert_eq!(messages, vec!["early PASS", "final FAIL"]); ack.send(()).unwrap(); }
-            NotificationEvent::Notification(_) => panic!("unexpected native output"),
+            NotificationEvent::Notification(_) | NotificationEvent::ScopedNotification(..) => panic!("unexpected native output"),
         }
         tokio::time::timeout(Duration::from_secs(3), finished_rx).await.unwrap().unwrap();
         completion.await.unwrap();

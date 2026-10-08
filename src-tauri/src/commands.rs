@@ -108,12 +108,15 @@ pub async fn list_backends(state: State<'_, AppState>) -> Result<Vec<BackendInfo
 
 #[tauri::command]
 pub async fn save_config(state: State<'_, AppState>, config: GrokConfig) -> Result<(), String> {
+    let target="panel_config".into();
+    crate::operations::recorded(&state.event_bus,"save_config",target,async {
     {
         let mut cfg = state.config.write().await;
+        config.save(&state.paths.config_file).map_err(err)?;
         *cfg = config;
-        cfg.save(&state.paths.config_file).map_err(err)?;
     }
     Ok(())
+    }).await
 }
 
 #[tauri::command]
@@ -151,7 +154,7 @@ pub async fn open_backend_login(state: State<'_, AppState>, backend: String, log
         &backend, if logout { "logout" } else { "login" }, &cfg)
     .ok_or_else(|| format!("no way to sign in to {backend}: install its CLI, or npx"))?;
 
-    spawn_in_terminal(&cmd).map_err(|e| format!("could not open a terminal: {e}"))
+    crate::operations::recorded(&state.event_bus,"backend_auth_handoff",serde_json::json!({"backend":backend,"logout":logout}).to_string(),async {spawn_in_terminal(&cmd).map_err(|e|format!("could not open a terminal: {e}"))}).await
 }
 
 /// Open `cmd` in the platform's terminal. The command string is built by
@@ -190,7 +193,7 @@ fn spawn_in_terminal(cmd: &str) -> std::io::Result<()> {
 pub async fn start_grok_login(
     state: State<'_, AppState>,
 ) -> Result<grok_cli_wrapper::LoginSessionState, String> {
-    state.login.start_device_login().await.map_err(err)
+    crate::operations::recorded(&state.event_bus,"start_device_login","grok".into(),async {state.login.start_device_login().await.map_err(err)}).await
 }
 
 /// Fallback OAuth browser login start.
@@ -198,7 +201,7 @@ pub async fn start_grok_login(
 pub async fn start_grok_login_oauth(
     state: State<'_, AppState>,
 ) -> Result<grok_cli_wrapper::LoginSessionState, String> {
-    state.login.start_oauth_login().await.map_err(err)
+    crate::operations::recorded(&state.event_bus,"start_oauth_login","grok".into(),async {state.login.start_oauth_login().await.map_err(err)}).await
 }
 
 /// Poll login session (phase, confirm code, logged-in status).
@@ -215,14 +218,14 @@ pub async fn submit_grok_login_code(
     state: State<'_, AppState>,
     code: String,
 ) -> Result<grok_cli_wrapper::LoginSessionState, String> {
-    state.login.submit_code(&code).await.map_err(err)
+    crate::operations::recorded(&state.event_bus,"submit_login_code","grok".into(),async {state.login.submit_code(&code).await.map_err(err)}).await
 }
 
 #[tauri::command]
 pub async fn open_grok_login_url(
     state: State<'_, AppState>,
 ) -> Result<Option<String>, String> {
-    state.login.open_login_url().await.map_err(err)
+    crate::operations::recorded(&state.event_bus,"open_login_url","grok".into(),async {state.login.open_login_url().await.map_err(err)}).await
 }
 
 #[tauri::command]
@@ -234,7 +237,7 @@ pub async fn cancel_grok_login(state: State<'_, AppState>) -> Result<(), String>
 #[tauri::command]
 pub async fn logout_grok(state: State<'_, AppState>) -> Result<grok_cli_wrapper::AuthStatus, String> {
     state.login.cancel().await;
-    state.grok_cli.logout().await.map_err(err)
+    crate::operations::recorded(&state.event_bus,"logout","grok".into(),async {state.grok_cli.logout().await.map_err(err)}).await
 }
 
 #[derive(Debug, Serialize)]
@@ -371,6 +374,8 @@ pub async fn haven_set_config(
     state: State<'_, AppState>,
     mut config: crate::haven::HavenConfig,
 ) -> Result<crate::haven::HavenStatus, String> {
+    let target="haven_config".into();
+    crate::operations::recorded(&state.event_bus,"haven_set_config",target,async {
     // If UI sent a masked token, keep existing secret.
     let existing = state.haven.config().await;
     if config.auth_token.contains('…') || config.auth_token.contains("...") {
@@ -392,6 +397,7 @@ pub async fn haven_set_config(
     }
     state.haven.set_config(config).await?;
     Ok(state.haven.connect_and_status().await)
+    }).await
 }
 
 /// True for hosts where plaintext http is acceptable: loopback, RFC1918 LAN,
@@ -432,10 +438,8 @@ pub async fn haven_start_shell(
     cwd: Option<String>,
     keep_alive: Option<bool>,
 ) -> Result<serde_json::Value, String> {
-    state
-        .haven
-        .start_shell(name, command, cwd, keep_alive.unwrap_or(false))
-        .await
+    let target=serde_json::json!({"name":name,"cwd":cwd,"keep_alive":keep_alive.unwrap_or(false)}).to_string();
+    crate::operations::recorded(&state.event_bus,"haven_start_shell",target,async {state.haven.start_shell(name,command,cwd,keep_alive.unwrap_or(false)).await}).await
 }
 
 #[tauri::command]
@@ -452,7 +456,7 @@ pub async fn haven_remove_job(
     state: State<'_, AppState>,
     id: String,
 ) -> Result<serde_json::Value, String> {
-    state.haven.remove_job(id).await
+    crate::operations::recorded(&state.event_bus,"haven_remove_job",serde_json::json!({"job_id":id}).to_string(),async {state.haven.remove_job(id).await}).await
 }
 
 #[tauri::command]
@@ -484,6 +488,8 @@ pub async fn create_project_folder(
     name: String,
     parent: Option<String>,
 ) -> Result<CreateFolderResult, String> {
+    let target=serde_json::json!({"name":name,"parent":parent}).to_string();
+    crate::operations::recorded(&state.event_bus,"create_project_folder",target,async {
     let slug = sanitize_folder_name(&name)?;
     let parent_dir = resolve_projects_parent(parent)?;
     std::fs::create_dir_all(&parent_dir).map_err(err)?;
@@ -504,6 +510,7 @@ pub async fn create_project_folder(
         name: slug,
         created,
     })
+    }).await
 }
 
 fn sanitize_folder_name(name: &str) -> Result<String, String> {
@@ -610,18 +617,10 @@ pub async fn start_session(
             isolation_admission = Some(grok_worktree::WorkspaceCoordinator::shared()
                 .session(std::path::Path::new(&cwd), None).await.map_err(err)?);
             let short = &id.to_string()[..8];
-            match state
-                .worktrees
-                .create(
-                    std::path::Path::new(&cwd),
-                    CreateWorktreeRequest {
-                        name: format!("t-{short}"),
-                        base_ref: None,
-                        prefer_grok_cli: false,
-                    },
-                )
-                .await
-            {
+            let target=serde_json::json!({"session_id":id,"repository":cwd,"name":format!("t-{short}")}).to_string();
+            match crate::operations::recorded(&state.event_bus,"isolate_session_worktree",target,async {
+                state.worktrees.create(std::path::Path::new(&cwd),CreateWorktreeRequest{name:format!("t-{short}"),base_ref:None,prefer_grok_cli:false}).await.map_err(err)
+            }).await {
                 Ok(wt) => {
                     spawn_cwd = wt.path.display().to_string();
                     opts.worktree = Some(wt.name.clone());
@@ -654,28 +653,10 @@ pub async fn start_session(
         .await
         .map_err(err)?;
     drop(isolation_admission);
-    if let Some(note) = isolation_note {
-        let _ = state
-            .persistence
-            .append_message(id, "system", &note, Utc::now());
-        state.event_bus.emit(grok_events::ControlEvent::Raw {
-            session_id: Some(id),
-            payload: serde_json::json!({ "channel": "term", "stream": "worktree", "line": note }),
-        });
-    }
-    // Tell the thread why a server was left out — otherwise it just looks broken.
-    for s in &mcp_skipped {
-        let msg = format!("⚠ MCP `{}` skipped: {}", s.name, s.reason);
-        let _ = state
-            .persistence
-            .append_message(id, "system", &msg, Utc::now());
-        state.event_bus.emit(grok_events::ControlEvent::Raw {
-            session_id: Some(id),
-            payload: serde_json::json!({ "channel": "term", "stream": "mcp", "line": msg }),
-        });
-    }
+    if let Some(note) = isolation_note {thread_note(&state,id,"worktree",&note)?;}
+    for skipped in &mcp_skipped {thread_note(&state,id,"mcp",&format!("⚠ MCP `{}` skipped: {}",skipped.name,skipped.reason))?;}
     let _ = state.persistence.set_kv("last_cwd", &cwd);
-    persist_session(&state, id).await;
+    persist_session(&state, id).await?;
     Ok(SessionIdResponse {
         id: id.to_string(),
     })
@@ -688,7 +669,7 @@ pub async fn start_mock_session(
 ) -> Result<SessionIdResponse, String> {
     let id = state.registry.spawn_mock(&cwd).await.map_err(err)?;
     let _ = state.persistence.set_kv("last_cwd", &cwd);
-    persist_session(&state, id).await;
+    persist_session(&state, id).await?;
     Ok(SessionIdResponse {
         id: id.to_string(),
     })
@@ -737,6 +718,7 @@ pub async fn send_prompt(
     approval_mode: Option<String>,
     plan_mode: Option<bool>,
     always_approve: Option<bool>,
+    client_submission_id: Option<String>,
 ) -> Result<(), String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
     if state.builds.is_managed(id).await {
@@ -772,11 +754,10 @@ pub async fn send_prompt(
                 want_backend.unwrap_or(cur.backend).key(),
                 want_model.clone().unwrap_or_else(|| cur.model.clone()),
             );
-            persist_session(&state, id).await;
+            persist_session(&state, id).await?;
             state.registry.remove_session(id).await.map_err(err)?;
-            let _ = state
-                .persistence
-                .append_message(id, "system", &label, Utc::now());
+            // The continuation commits its own runtime before this note.
+
             resume_saved_session(
                 &state,
                 id,
@@ -787,6 +768,7 @@ pub async fn send_prompt(
                 always_approve,
             )
             .await?;
+            thread_note(&state,id,"thread",&label)?;
         }
     }
 
@@ -805,69 +787,31 @@ pub async fn send_prompt(
         .await?;
     }
 
-    // Smart thread naming on the FIRST prompt: instant word-slug, then an
-    // async narrator-provider title upgrade.
-    let needs_label = state
-        .registry
-        .get_snapshot(id)
-        .map(|s| s.metadata.label.is_none())
-        .unwrap_or(false);
-    if needs_label {
-        let slug = prompt_slug(&prompt);
+    let submission=client_submission_id.map(|value|Uuid::parse_str(&value)).transpose().map_err(err)?;
+    state.registry.send_user_prompt(id,&prompt,submission).await.map_err(err)?;
+    persist_session(&state,id).await?;
+    // Optional title generation starts only after durable prompt admission.
+    let snap=state.registry.get_snapshot(id).map_err(err)?;
+    if snap.metadata.label.is_none() {
+        let bus=state.registry.session_event_bus(id).map_err(err)?;
+        let runtime=bus.runtime_id().ok_or("session has no runtime identity")?;
+        let slug=prompt_slug(&prompt);
         if !slug.is_empty() {
-            let _ = state.registry.set_label(id, &slug);
-            emit_thread_label(&state, id, &slug);
+            state.registry.set_label_for_runtime(id,runtime,&slug).map_err(err)?;
+            persist_session(&state,id).await?;
+            emit_thread_label(&state,id,&slug)?;
         }
-        let explainer = state.explainer.clone();
-        let registry = state.registry.clone();
-        let bus = state.event_bus.clone();
-        let persistence = state.persistence.clone();
-        let prompt_for_title = prompt.clone();
+        let explainer=state.explainer.clone();let registry=state.registry.clone();
         tauri::async_runtime::spawn(async move {
-            if let Ok(title) = explainer.generate_title(&prompt_for_title).await {
-                if !title.is_empty() && registry.set_label(id, &title).is_ok() {
-                    bus.emit(grok_events::ControlEvent::Raw {
-                        session_id: Some(id),
-                        payload: serde_json::json!({
-                            "channel": "thread", "kind": "label", "label": title,
-                        }),
-                    });
-                    // Persist the upgraded label into the session record.
-                    if let Ok(snap) = registry.get_snapshot(id) {
-                        let _ = persistence.upsert_session(&SessionRecord {
-                            id,
-                            cwd: snap.metadata.cwd.clone(),
-                            mode: "acp".into(),
-                            model: snap.metadata.model.clone(),
-                            status: format!("{:?}", snap.metadata.status).to_lowercase(),
-                            worktree: snap.metadata.worktree.clone(),
-                            acp_session_id: snap.metadata.acp_session_id.clone(),
-                            metadata_json: serde_json::to_string(&snap)
-                                .unwrap_or_else(|_| "{}".into()),
-                            created_at: snap.metadata.created_at,
-                            updated_at: Utc::now(),
-                            message_count: 0,
-                        });
-                    }
+            if let Ok(title)=explainer.generate_title_on(&bus,&prompt).await {
+                if title.is_empty(){return;}
+                let expected=if slug.is_empty(){None}else{Some(slug.as_str())};
+                if registry.set_label_if_current(id,runtime,expected,&title).is_ok() {
+                    let _=bus.emit_checked(ControlEvent::Raw{session_id:Some(id),payload:serde_json::json!({"channel":"thread","kind":"label","label":title})});
                 }
             }
         });
     }
-
-    let prompt_len = prompt.len();
-    state.registry.send_prompt(id, &prompt).await.map_err(err)?;
-    // User message — durable immediately (agent side streams via event bus).
-    let _ = state
-        .persistence
-        .append_message(id, "prompt", prompt, Utc::now());
-    // Terminal breadcrumb so center column never looks idle after send.
-    let _ = state.persistence.append_message(
-        id,
-        "system",
-        format!("→ prompt accepted ({prompt_len} chars) · agent stream open"),
-        Utc::now(),
-    );
-    persist_session(&state, id).await;
     Ok(())
 }
 
@@ -980,6 +924,7 @@ pub(crate) async fn resume_saved_session(
         opts.mode = grok_control_core::AgentMode::Acp;
     }
 
+    let mut resume_notes=Vec::new();
     if !opts.mcp_server_names.is_empty() {
         let resolution = state
             .mcp
@@ -989,12 +934,7 @@ pub(crate) async fn resume_saved_session(
         opts.mcp_servers = resolution.payload;
         opts.mcp_server_names = resolution.attached_names;
         for s in &resolution.skipped {
-            let _ = state.persistence.append_message(
-                id,
-                "system",
-                format!("⚠ MCP `{}` skipped on resume: {}", s.name, s.reason),
-                Utc::now(),
-            );
+            resume_notes.push(format!("⚠ MCP `{}` skipped on resume: {}",s.name,s.reason));
         }
     }
 
@@ -1031,10 +971,9 @@ pub(crate) async fn resume_saved_session(
             "agent resumed — fresh ACP session (no prior agent id / history pack)"
         }
     };
-    let _ = state
-        .persistence
-        .append_message(id, "system", msg, Utc::now());
-    persist_session(state, id).await;
+    persist_session(state,id).await?;
+    for note in resume_notes {thread_note(state,id,"mcp",&note)?;}
+    thread_note(state,id,"thread",msg)?;
     Ok(())
 }
 
@@ -1057,11 +996,12 @@ fn prompt_slug(prompt: &str) -> String {
     s
 }
 
-fn emit_thread_label(state: &AppState, id: Uuid, label: &str) {
-    state.event_bus.emit(grok_events::ControlEvent::Raw {
+fn emit_thread_label(state: &AppState, id: Uuid, label: &str) ->Result<(),String> {
+    thread_bus(state,id)?.emit_checked(grok_events::ControlEvent::Raw {
         session_id: Some(id),
         payload: serde_json::json!({ "channel": "thread", "kind": "label", "label": label }),
-    });
+    }).map_err(err)?;
+    Ok(())
 }
 
 /// Pack recent transcript for history-only rehydration (bounded).
@@ -1177,7 +1117,7 @@ fn build_transcript_context(state: &AppState, id: Uuid) -> Option<String> {
 pub async fn cancel_session(state: State<'_, AppState>, id: String) -> Result<(), String> {
     let id = Uuid::parse_str(&id).map_err(err)?;
     state.registry.cancel_session(id).await.map_err(err)?;
-    persist_session(&state, id).await;
+    persist_session(&state, id).await?;
     Ok(())
 }
 
@@ -1194,25 +1134,22 @@ pub async fn remove_session(
     } else {
         None
     };
-    // Live handle may be gone after reboot — still wipe SQLite memory.
     if state.builds.is_managed(id).await { return Err("This session belongs to a reviewed build; use its build cleanup controls.".into()); }
-    if state.registry.is_live(id) { state.registry.remove_session(id).await.map_err(err)?; }
-    if let Some((worktree, root, _branch, _)) = wt_ctx {
-        let worktree = std::fs::canonicalize(&worktree).map_err(err)?;
-        let root = std::fs::canonicalize(&root).map_err(err)?;
-        let managed_root = std::fs::canonicalize(state.worktrees.worktrees_root()).map_err(err)?;
-        // Only remove managed worktrees (never the project root itself).
-        if worktree != root && worktree.starts_with(&managed_root) {
-            state
-                .worktrees
-                .remove(&root, &worktree.display().to_string(), true)
-                .await
-                .map_err(err)?;
-        } else {
-            return Err("Requested worktree is outside the managed root; thread evidence was retained.".into());
-        }
-    }
-    state.persistence.delete_session(id).map_err(err)?;
+    // Resolve all authority boundaries before admitting a destructive effect.
+    let removal=if let Some((worktree,root,_branch,_))=wt_ctx {
+        let worktree=std::fs::canonicalize(&worktree).map_err(err)?;
+        let root=std::fs::canonicalize(&root).map_err(err)?;
+        let managed=std::fs::canonicalize(state.worktrees.worktrees_root()).map_err(err)?;
+        if worktree==root||!worktree.starts_with(&managed){return Err("Requested worktree is outside the managed root; thread evidence was retained.".into());}
+        Some((worktree,root))
+    }else{None};
+    let target=serde_json::json!({"session_id":id,"worktree":removal.as_ref().map(|(worktree,_)|worktree.display().to_string())}).to_string();
+    crate::operations::recorded(&state.event_bus,"remove_session",target,async {
+        if state.registry.is_live(id){state.registry.remove_session(id).await.map_err(err)?;}
+        if let Some((worktree,root))=removal {state.worktrees.remove(&root,&worktree.display().to_string(),true).await.map_err(err)?;}
+        state.event_bus.emit_checked(ControlEvent::SessionRemoved{session_id:id,at:Utc::now()}).map_err(err)?;
+        Ok(())
+    }).await?;
     Ok(())
 }
 
@@ -1254,6 +1191,8 @@ pub async fn set_explainer_provider(
     backend: Option<String>,
     model: Option<String>,
 ) -> Result<(), String> {
+    let target="explainer_configuration".into();
+    crate::operations::recorded(&state.event_bus,"set_explainer_provider",target,async {
     state
         .explainer
         .set_provider(backend.clone(), model.clone())
@@ -1269,6 +1208,7 @@ pub async fn set_explainer_provider(
         cfg.save(&state.paths.config_file).map_err(err)?;
     }
     Ok(())
+    }).await
 }
 
 #[tauri::command]
@@ -1276,6 +1216,8 @@ pub async fn set_explainer_enabled(
     state: State<'_, AppState>,
     enabled: bool,
 ) -> Result<bool, String> {
+    let target=serde_json::json!({"enabled":enabled}).to_string();
+    crate::operations::recorded(&state.event_bus,"set_explainer_enabled",target,async {
     state.explainer.set_enabled(enabled);
     {
         let mut cfg = state.config.write().await;
@@ -1283,6 +1225,7 @@ pub async fn set_explainer_enabled(
         cfg.save(&state.paths.config_file).map_err(err)?;
     }
     Ok(state.explainer.enabled())
+    }).await
 }
 
 /// Set a live session's approval stance: plan | ask | auto | yolo.
@@ -1308,7 +1251,7 @@ pub async fn set_approval_mode(
         .set_approval_mode(id, mode)
         .await
         .map_err(err)?;
-    persist_session(&state, id).await;
+    persist_session(&state, id).await?;
     Ok(())
 }
 
@@ -1333,12 +1276,7 @@ pub async fn add_session_allow_rule(
         .add_session_allow_rule(id, pattern.clone())
         .await
         .map_err(err)?;
-    let _ = state.persistence.append_message(
-        id,
-        "system",
-        format!("✓ always allowing `{pattern}` for the rest of this session"),
-        Utc::now(),
-    );
+    thread_note(&state,id,"policy",&format!("✓ always allowing `{pattern}` for the rest of this session"))?;
     Ok(())
 }
 
@@ -1361,17 +1299,18 @@ pub async fn set_always_approve(
 
 #[tauri::command]
 pub async fn respond_approval(
-    state: State<'_, AppState>,
-    id: String,
-    request_id: String,
-    option_id: Option<String>,
-) -> Result<(), String> {
-    let id = Uuid::parse_str(&id).map_err(err)?;
-    state
-        .registry
-        .respond_approval(id, &request_id, option_id.as_deref())
-        .await
-        .map_err(err)
+    state: State<'_, AppState>, id:String,request_id:String,option_id:Option<String>,
+    runtime_id:String,host_epoch:u64,
+)->Result<(),String> {
+    let id=Uuid::parse_str(&id).map_err(err)?;
+    let runtime=Uuid::parse_str(&runtime_id).map_err(err)?;
+    state.registry.respond_approval_for_runtime(id,runtime,host_epoch,&request_id,option_id.as_deref()).await.map_err(err)
+}
+#[tauri::command]
+pub async fn get_pending_approvals(state:State<'_,AppState>,id:String)->Result<Vec<grok_acp::LiveApproval>,String> {
+    let id=Uuid::parse_str(&id).map_err(err)?;
+    if !state.registry.is_live(id){return Ok(Vec::new());}
+    state.registry.pending_approvals(id).await.map_err(err)
 }
 
 /// Rename a thread (manual override of the smart name). Works for live and
@@ -1390,23 +1329,32 @@ pub async fn rename_thread(
     }
     let label: String = label.chars().take(60).collect();
 
-    if state.registry.set_label(id, &label).is_ok() {
-        persist_session(&state, id).await;
+    if state.registry.is_live(id) {
+        state.registry.set_label(id, &label).map_err(err)?;
+        persist_session(&state, id).await?;
     } else {
         // Saved thread: patch the label inside the persisted metadata.
         let mut rec = state.persistence.get_session(id).map_err(err)?;
-        let mut v: serde_json::Value =
-            serde_json::from_str(&rec.metadata_json).unwrap_or_else(|_| serde_json::json!({}));
-        if !v.get("metadata").map(|m| m.is_object()).unwrap_or(false) {
-            v["metadata"] = serde_json::json!({});
-        }
-        v["metadata"]["label"] = serde_json::json!(label);
-        rec.metadata_json = v.to_string();
+        rec.metadata_json = renamed_saved_metadata(&rec.metadata_json, &label)?;
         rec.updated_at = Utc::now();
-        state.persistence.upsert_session(&rec).map_err(err)?;
+        state.event_bus.emit_checked(ControlEvent::SessionMetadataUpdated {session_id:id,metadata_json:serde_json::to_string(&rec).map_err(err)?,at:Utc::now()}).map_err(err)?;
     }
-    emit_thread_label(&state, id, &label);
+    emit_thread_label(&state, id, &label)?;
     Ok(())
+}
+
+fn renamed_saved_metadata(source: &str, label: &str) -> Result<String, String> {
+    let mut value: serde_json::Value = serde_json::from_str(source)
+        .map_err(|error| format!("saved metadata is invalid; original preserved: {error}"))?;
+    let root = value.as_object_mut().ok_or("saved metadata must be an object; original preserved")?;
+    match root.get_mut("metadata") {
+        Some(metadata) => {
+            metadata.as_object_mut().ok_or("saved metadata envelope is invalid; original preserved")?
+                .insert("label".into(), serde_json::Value::String(label.into()));
+        }
+        None => { root.insert("label".into(), serde_json::Value::String(label.into())); }
+    }
+    serde_json::to_string(&value).map_err(err)
 }
 
 // ── Projects (persisted folder list for the sidebar) ─────────────────────
@@ -1529,19 +1477,16 @@ pub async fn land_thread(
     }
     let target_branch = state.worktrees.current_branch(&root).await.map_err(err)?;
 
-    match state
-        .worktrees
-        .merge_clean(&root, &branch, &format!("land thread: {title}"), &[&root, &worktree])
-        .await
-        .map_err(err)?
-    {
+    let target=serde_json::json!({"session_id":id,"repository":root,"worktree":worktree,"source_branch":branch,"target_branch":target_branch}).to_string();
+    let outcome=crate::operations::recorded(&state.event_bus,"land_thread",target,async {
+        let outcome=state.worktrees.merge_clean(&root,&branch,&format!("land thread: {title}"),&[&root,&worktree]).await.map_err(err)?;
+        if matches!(outcome,grok_worktree::MergeOutcome::Conflicts{..}) {state.worktrees.merge_abort(&root).await;}
+        Ok(outcome)
+    }).await?;
+    match outcome {
         grok_worktree::MergeOutcome::Merged => {
             let msg = format!("⬆ landed into {target_branch} ✓");
-            let _ = state.persistence.append_message(id, "system", &msg, Utc::now());
-            state.event_bus.emit(grok_events::ControlEvent::Raw {
-                session_id: Some(id),
-                payload: serde_json::json!({ "channel": "term", "stream": "worktree", "line": msg }),
-            });
+            thread_note(&state,id,"worktree",&msg)?;
             Ok(ThreadMergeResult {
                 status: "landed".into(),
                 files: vec![],
@@ -1551,16 +1496,11 @@ pub async fn land_thread(
         }
         grok_worktree::MergeOutcome::Conflicts { files } => {
             // Never leave the user's main checkout mid-merge.
-            state.worktrees.merge_abort(&root).await;
             let msg = format!(
                 "⚠ landing hit conflicts in {} — run Sync so this thread's agent can resolve them, then land again",
                 files.join(", ")
             );
-            let _ = state.persistence.append_message(id, "system", &msg, Utc::now());
-            state.event_bus.emit(grok_events::ControlEvent::Raw {
-                session_id: Some(id),
-                payload: serde_json::json!({ "channel": "term", "stream": "worktree", "line": msg }),
-            });
+            thread_note(&state,id,"worktree",&msg)?;
             Ok(ThreadMergeResult {
                 status: "needs_sync".into(),
                 files,
@@ -1583,24 +1523,14 @@ pub async fn sync_thread(
     let _title = if label.is_empty() { branch.clone() } else { label.clone() };
     let target_branch = state.worktrees.current_branch(&root).await.map_err(err)?;
 
-    match state
-        .worktrees
-        .merge_clean(
-            &worktree,
-            &target_branch,
-            &format!("sync from {target_branch}"),
-            &[&root, &worktree],
-        )
-        .await
-        .map_err(err)?
-    {
+    let target=serde_json::json!({"session_id":id,"repository":root,"worktree":worktree,"source_branch":target_branch,"target_branch":branch}).to_string();
+    let outcome=crate::operations::recorded(&state.event_bus,"sync_thread",target,async {
+        state.worktrees.merge_clean(&worktree,&target_branch,&format!("sync from {target_branch}"),&[&root,&worktree]).await.map_err(err)
+    }).await?;
+    match outcome {
         grok_worktree::MergeOutcome::Merged => {
             let msg = format!("⟳ synced from {target_branch} ✓");
-            let _ = state.persistence.append_message(id, "system", &msg, Utc::now());
-            state.event_bus.emit(grok_events::ControlEvent::Raw {
-                session_id: Some(id),
-                payload: serde_json::json!({ "channel": "term", "stream": "worktree", "line": msg }),
-            });
+            thread_note(&state,id,"worktree",&msg)?;
             Ok(ThreadMergeResult {
                 status: "synced".into(),
                 files: vec![],
@@ -1613,11 +1543,7 @@ pub async fn sync_thread(
                 "⚠ merge conflicts from {target_branch} left in this worktree: {} — ask this thread's agent to resolve and commit them",
                 files.join(", ")
             );
-            let _ = state.persistence.append_message(id, "system", &msg, Utc::now());
-            state.event_bus.emit(grok_events::ControlEvent::Raw {
-                session_id: Some(id),
-                payload: serde_json::json!({ "channel": "term", "stream": "worktree", "line": msg }),
-            });
+            thread_note(&state,id,"worktree",&msg)?;
             Ok(ThreadMergeResult {
                 status: "conflicts".into(),
                 files,
@@ -1643,52 +1569,21 @@ pub async fn list_worktrees(
 }
 
 #[tauri::command]
-pub async fn create_worktree(
-    state: State<'_, AppState>,
-    repo: String,
-    name: String,
-    base_ref: Option<String>,
-) -> Result<WorktreeInfo, String> {
-    state
-        .worktrees
-        .create(
-            PathBuf::from(repo).as_path(),
-            CreateWorktreeRequest {
-                name,
-                base_ref,
-                // Pure git, same as thread isolation — one layout for all
-                // managed worktrees (the CLI path used its own location).
-                prefer_grok_cli: false,
-            },
-        )
-        .await
-        .map_err(err)
+pub async fn create_worktree(state:State<'_,AppState>,repo:String,name:String,base_ref:Option<String>)->Result<WorktreeInfo,String> {
+    let target=serde_json::json!({"repository":repo,"name":name,"base_ref":base_ref}).to_string();
+    crate::operations::recorded(&state.event_bus,"create_worktree",target,async {
+        state.worktrees.create(PathBuf::from(repo).as_path(),CreateWorktreeRequest{name,base_ref,prefer_grok_cli:false}).await.map_err(err)
+    }).await
 }
-
 #[tauri::command]
-pub async fn remove_worktree(
-    state: State<'_, AppState>,
-    repo: String,
-    name: String,
-    force: bool,
-) -> Result<(), String> {
-    state
-        .worktrees
-        .remove(PathBuf::from(repo).as_path(), &name, force)
-        .await
-        .map_err(err)
+pub async fn remove_worktree(state:State<'_,AppState>,repo:String,name:String,force:bool)->Result<(),String> {
+    let target=serde_json::json!({"repository":repo,"name":name,"force":force}).to_string();
+    crate::operations::recorded(&state.event_bus,"remove_worktree",target,async {state.worktrees.remove(PathBuf::from(repo).as_path(),&name,force).await.map_err(err)}).await
 }
-
 #[tauri::command]
-pub async fn prune_worktrees(
-    state: State<'_, AppState>,
-    repo: String,
-) -> Result<String, String> {
-    state
-        .worktrees
-        .prune(PathBuf::from(repo).as_path())
-        .await
-        .map_err(err)
+pub async fn prune_worktrees(state:State<'_,AppState>,repo:String)->Result<String,String> {
+    let target=serde_json::json!({"repository":repo}).to_string();
+    crate::operations::recorded(&state.event_bus,"prune_worktrees",target,async {state.worktrees.prune(PathBuf::from(repo).as_path()).await.map_err(err)}).await
 }
 
 #[tauri::command]
@@ -1752,6 +1647,8 @@ pub async fn add_mcp(
     args: Vec<String>,
     enabled: bool,
 ) -> Result<(), String> {
+    let target=serde_json::json!({"name":name}).to_string();
+    crate::operations::recorded(&state.event_bus,"add_mcp",target,async {
     state
         .mcp
         .add(AddMcpRequest {
@@ -1779,11 +1676,15 @@ pub async fn add_mcp(
         .await
         .map_err(err)?;
     Ok(())
+    }).await
 }
 
 #[tauri::command]
 pub async fn remove_mcp(state: State<'_, AppState>, name: String) -> Result<(), String> {
+    let target=serde_json::json!({"name":name}).to_string();
+    crate::operations::recorded(&state.event_bus,"remove_mcp",target,async {
     state.mcp.remove(&name).await.map_err(err)
+    }).await
 }
 
 #[tauri::command]
@@ -1792,7 +1693,10 @@ pub async fn toggle_mcp(
     name: String,
     enabled: bool,
 ) -> Result<(), String> {
+    let target=serde_json::json!({"name":name,"enabled":enabled}).to_string();
+    crate::operations::recorded(&state.event_bus,"toggle_mcp",target,async {
     state.mcp.set_enabled(&name, enabled).await.map_err(err)
+    }).await
 }
 
 // ── Full MCP manager surface ─────────────────────────────────────────────
@@ -1817,7 +1721,10 @@ pub async fn add_mcp_server(
     state: State<'_, AppState>,
     request: AddMcpRequest,
 ) -> Result<McpServerConfigExt, String> {
+    let target=serde_json::json!({"name":request.name}).to_string();
+    crate::operations::recorded(&state.event_bus,"add_mcp_server",target,async {
     state.mcp.add(request).await.map_err(err)
+    }).await
 }
 
 #[tauri::command]
@@ -1825,12 +1732,18 @@ pub async fn update_mcp_server(
     state: State<'_, AppState>,
     request: UpdateMcpRequest,
 ) -> Result<McpServerConfigExt, String> {
+    let target=serde_json::json!({"name":request.name}).to_string();
+    crate::operations::recorded(&state.event_bus,"update_mcp_server",target,async {
     state.mcp.update(request).await.map_err(err)
+    }).await
 }
 
 #[tauri::command]
 pub async fn remove_mcp_server(state: State<'_, AppState>, name: String) -> Result<(), String> {
+    let target=serde_json::json!({"name":name}).to_string();
+    crate::operations::recorded(&state.event_bus,"remove_mcp_server",target,async {
     state.mcp.remove(&name).await.map_err(err)
+    }).await
 }
 
 #[tauri::command]
@@ -1838,11 +1751,14 @@ pub async fn doctor_mcp_server(
     state: State<'_, AppState>,
     name: Option<String>,
 ) -> Result<Vec<DoctorReport>, String> {
+    let target=serde_json::json!({"name":name}).to_string();
+    crate::operations::recorded(&state.event_bus,"doctor_mcp_server",target,async {
     state
         .mcp
         .doctor(name.as_deref())
         .await
         .map_err(err)
+    }).await
 }
 
 #[tauri::command]
@@ -1850,7 +1766,10 @@ pub async fn list_mcp_tools(
     state: State<'_, AppState>,
     name: Option<String>,
 ) -> Result<Vec<McpToolInfo>, String> {
+    let target=serde_json::json!({"name":name}).to_string();
+    crate::operations::recorded(&state.event_bus,"list_mcp_tools",target,async {
     state.mcp.list_tools(name.as_deref()).await.map_err(err)
+    }).await
 }
 
 #[tauri::command]
@@ -1864,7 +1783,10 @@ pub async fn set_mcp_credential(
     key: String,
     value: String,
 ) -> Result<(), String> {
+    let target=serde_json::json!({"credential_key":key}).to_string();
+    crate::operations::recorded(&state.event_bus,"set_mcp_credential",target,async {
     state.mcp.set_credential(&key, &value).await.map_err(err)
+    }).await
 }
 
 #[tauri::command]
@@ -1879,7 +1801,10 @@ pub async fn remove_mcp_credential(
     state: State<'_, AppState>,
     key: String,
 ) -> Result<(), String> {
+    let target=serde_json::json!({"credential_key":key}).to_string();
+    crate::operations::recorded(&state.event_bus,"remove_mcp_credential",target,async {
     state.mcp.credentials().remove(&key).map_err(err)
+    }).await
 }
 
 #[tauri::command]
@@ -1927,21 +1852,30 @@ pub async fn add_skill(
     description: Option<String>,
     enabled: bool,
 ) -> Result<(), String> {
+    let target=serde_json::json!({"name":name,"path":path,"enabled":enabled}).to_string();
+    crate::operations::recorded(&state.event_bus,"add_skill",target,async {
     state
         .extensions
         .add_skill(name, path.map(PathBuf::from), description, enabled)
         .await
         .map_err(err)
+    }).await
 }
 
 #[tauri::command]
 pub async fn remove_skill(state: State<'_, AppState>, name: String) -> Result<(), String> {
+    let target=serde_json::json!({"name":name}).to_string();
+    crate::operations::recorded(&state.event_bus,"remove_skill",target,async {
     state.extensions.remove_skill(&name).await.map_err(err)
+    }).await
 }
 
 #[tauri::command]
 pub async fn extensions_doctor(state: State<'_, AppState>) -> Result<String, String> {
+    let target="extensions".into();
+    crate::operations::recorded(&state.event_bus,"extensions_doctor",target,async {
     state.extensions.doctor().await.map_err(err)
+    }).await
 }
 
 #[tauri::command]
@@ -1959,17 +1893,18 @@ pub async fn memory_add(
     content: String,
     tags: Vec<String>,
 ) -> Result<MemoryEntry, String> {
-    state.memory.add(scope, content, tags).await.map_err(err)
+    let target=serde_json::json!({"scope":scope,"tags":tags}).to_string();
+    crate::operations::recorded(&state.event_bus,"memory_add",target,async {state.memory.add(scope,content,tags).await.map_err(err)}).await
 }
 
 #[tauri::command]
 pub async fn memory_remove(state: State<'_, AppState>, id: String) -> Result<(), String> {
-    state.memory.remove(&id).await.map_err(err)
+    crate::operations::recorded(&state.event_bus,"memory_remove",serde_json::json!({"memory_id":id}).to_string(),async {state.memory.remove(&id).await.map_err(err)}).await
 }
 
 #[tauri::command]
 pub async fn memory_flush(state: State<'_, AppState>, scope: String) -> Result<String, String> {
-    state.memory.flush_markdown(&scope).await.map_err(err)
+    crate::operations::recorded(&state.event_bus,"memory_flush",serde_json::json!({"scope":scope}).to_string(),async {state.memory.flush_markdown(&scope).await.map_err(err)}).await
 }
 
 /// Digest: LLM-summarize a scope's notes into one compact entry (tagged
@@ -1979,6 +1914,8 @@ pub async fn memory_digest(
     state: State<'_, AppState>,
     scope: String,
 ) -> Result<MemoryEntry, String> {
+    let target=serde_json::json!({"scope":scope}).to_string();
+    crate::operations::recorded(&state.event_bus,"memory_digest",target,async {
     let pack = state
         .memory
         .context_pack(&scope, 6000)
@@ -1997,6 +1934,7 @@ pub async fn memory_digest(
         .add(&scope, summary, vec!["digest".into()])
         .await
         .map_err(err)
+    }).await
 }
 
 /// Scope key the given project folder maps to (for the Memory view).
@@ -2015,6 +1953,8 @@ pub async fn remember(
     id: String,
     content: String,
 ) -> Result<MemoryEntry, String> {
+    let target=serde_json::json!({"session_id":id}).to_string();
+    crate::operations::recorded(&state.event_bus,"remember",target,async {
     let id = Uuid::parse_str(&id).map_err(err)?;
     let content = content.trim();
     if content.is_empty() {
@@ -2037,6 +1977,7 @@ pub async fn remember(
         .add(&scope, content, vec!["remembered".into()])
         .await
         .map_err(err)
+    }).await
 }
 
 #[tauri::command]
@@ -2164,47 +2105,63 @@ pub async fn shutdown_all(state: State<'_, AppState>) -> Result<(), String> {
     let scheduler = state.scheduler.stop_all().await;
     let retained=state.scheduler.retained_session_ids().await;
     let registry = state.registry.shutdown_preserving(retained).await;
+    state.persistence.release_all_snapshots();
     let checkpoint = state.persistence.checkpoint();
     let errors = [scheduler.err().map(err),registry.err().map(err),checkpoint.err().map(err)].into_iter().flatten().collect::<Vec<_>>();
     if errors.is_empty() {Ok(())} else {Err(errors.join("; "))}
 }
 
-fn persist_session_checked(state: &AppState, id: Uuid) -> Result<(), String> {
-    let snap = state.registry.get_snapshot(id).map_err(err)?;
-    let rec = SessionRecord {
-        id, cwd:snap.metadata.cwd.clone(), mode:match snap.metadata.mode { grok_control_core::AgentMode::Acp=>"acp", grok_control_core::AgentMode::Headless=>"headless" }.into(),
+fn session_record(snap: &AgentHandleSnapshot) -> Result<SessionRecord, String> {
+    Ok(SessionRecord {
+        id:snap.metadata.id, cwd:snap.metadata.cwd.clone(), mode:match snap.metadata.mode { grok_control_core::AgentMode::Acp=>"acp", grok_control_core::AgentMode::Headless=>"headless" }.into(),
         model:snap.metadata.model.clone(), status:format!("{:?}",snap.metadata.status).to_lowercase(),
         worktree:snap.metadata.worktree.clone(), acp_session_id:snap.metadata.acp_session_id.clone(),
-        metadata_json:serde_json::to_string(&snap).map_err(err)?, created_at:snap.metadata.created_at,
+        metadata_json:serde_json::to_string(snap).map_err(err)?, created_at:snap.metadata.created_at,
         updated_at:Utc::now(), message_count:0,
-    };
-    state.persistence.upsert_session(&rec).map_err(|error|format!("cannot reconnect: stopped session snapshot was not saved — {error}"))
+    })
+}
+fn persist_session_checked(state: &AppState, id: Uuid) -> Result<(), String> {
+    let bus=state.registry.session_event_bus(id).map_err(err)?;
+    let snap=state.registry.get_snapshot(id).map_err(err)?;
+    if bus.runtime_id()!=snap.metadata.runtime_id {return Err("session runtime changed while saving metadata".into());}
+    bus.emit_checked(ControlEvent::SessionMetadataUpdated {session_id:id,metadata_json:serde_json::to_string(&session_record(&snap)?).map_err(err)?,at:Utc::now()}).map_err(err)?;
+    Ok(())
+}
+pub(crate) async fn persist_session(state: &AppState, id: Uuid) -> Result<(), String> {
+    persist_session_checked(state,id)
+}
+fn thread_bus(state:&AppState,id:Uuid)->Result<std::sync::Arc<grok_events::EventBus>,String> {
+    if state.registry.is_live(id) {state.registry.session_event_bus(id).map_err(err)} else {Ok(state.event_bus.clone())}
+}
+fn thread_note(state:&AppState,id:Uuid,stream:&str,line:&str)->Result<(),String> {
+    thread_bus(state,id)?.emit_checked(ControlEvent::Raw {session_id:Some(id),payload:serde_json::json!({"channel":"term","stream":stream,"line":line})}).map_err(err)?;
+    Ok(())
 }
 
-pub(crate) async fn persist_session(state: &AppState, id: Uuid) {
-    if let Ok(snap) = state.registry.get_snapshot(id) {
-        let mode = match snap.metadata.mode {
-            grok_control_core::AgentMode::Acp => "acp",
-            grok_control_core::AgentMode::Headless => "headless",
-        };
-        let status = format!("{:?}", snap.metadata.status).to_lowercase();
-        let metadata_json = serde_json::to_string(&snap).unwrap_or_else(|_| "{}".into());
-        let rec = SessionRecord {
-            id,
-            cwd: snap.metadata.cwd.clone(),
-            mode: mode.into(),
-            model: snap.metadata.model.clone(),
-            status,
-            worktree: snap.metadata.worktree.clone(),
-            acp_session_id: snap.metadata.acp_session_id.clone(),
-            metadata_json,
-            created_at: snap.metadata.created_at,
-            updated_at: Utc::now(),
-            message_count: 0,
-        };
-        let _ = state.persistence.upsert_session(&rec);
-    }
+#[derive(Serialize)]
+pub struct EventSnapshotResponse {
+    #[serde(flatten)] snapshot:grok_persistence::EventSnapshot,
+    health:grok_events::EventHealth,
 }
+#[tauri::command]
+pub async fn get_event_snapshot(state:State<'_,AppState>,cursor:Option<grok_persistence::SnapshotCursor>,session_id:Option<String>,limit:Option<usize>)->Result<EventSnapshotResponse,String> {
+    let id=session_id.map(|id|Uuid::parse_str(&id)).transpose().map_err(err)?;
+    let db=state.persistence.clone();let bus=state.event_bus.clone();
+    tauri::async_runtime::spawn_blocking(move||{
+        bus.with_read_boundary(|health|db.event_snapshot_page(cursor,id,limit.unwrap_or(256)).map(|snapshot|EventSnapshotResponse{snapshot,health})).map_err(err)?.map_err(err)
+    }).await.map_err(err)?
+}
+#[tauri::command]
+pub async fn release_event_snapshot(state:State<'_,AppState>,cursor:grok_persistence::SnapshotCursor)->Result<(),String> {
+    state.persistence.release_snapshot(cursor);Ok(())
+}
+#[tauri::command]
+pub async fn replay_events(state:State<'_,AppState>,cursor:grok_persistence::EventCursor,limit:Option<usize>)->Result<grok_persistence::ReplayPage,String> {
+    let db=state.persistence.clone();
+    tauri::async_runtime::spawn_blocking(move||db.replay_events(cursor,limit.unwrap_or(256))).await.map_err(err)?.map_err(err)
+}
+#[tauri::command]
+pub async fn event_health(state:State<'_,AppState>)->Result<grok_events::EventHealth,String> {Ok(state.event_bus.health())}
 
 fn build_thread_list(state: &AppState) -> Vec<ThreadDto> {
     let live = state.registry.list_sessions();
@@ -2335,173 +2292,6 @@ fn extract_mcp_from_meta(json: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// Called from the event-bus persistence task (best-effort, never panics).
-pub fn persist_control_event(db: &grok_persistence::Persistence, ev: &ControlEvent) {
-    use ControlEvent::*;
-    let res: Result<(), grok_persistence::PersistenceError> = (|| match ev {
-        AgentMessage {
-            session_id,
-            text,
-            at,
-        } => {
-            if text.trim().is_empty() {
-                return Ok(());
-            }
-            let lower = text.to_lowercase();
-            if lower.starts_with("prompt sent") || lower == "turn complete" {
-                return Ok(());
-            }
-            // Keep the chunk's own spacing — these are streaming deltas and
-            // append_message_merged concatenates them into one row.
-            let (kind, body) = match text.strip_prefix('💭') {
-                Some(rest) => ("thought", rest),
-                None => ("agent", text.as_str()),
-            };
-            db.append_message_merged(*session_id, kind, body, *at, 10)
-                .map(|_| ())
-        }
-        ToolCall { session_id, event } => {
-            // Plan-presenting tool calls persist their plan as a plan_doc
-            // row — the raw JSON dump would just duplicate it, hugely.
-            let is_plan_tool = event.tool.to_lowercase().contains("plan")
-                || event.args_summary.contains("\"plan\":");
-            if is_plan_tool {
-                let _ = db.update_session_status(*session_id, "running");
-                return Ok(());
-            }
-            let payload = serde_json::json!({
-                "id": event.id,
-                "tool": event.tool,
-                "status": event.status,
-                "args": event.args_summary,
-                "result": event.result_summary,
-            })
-            .to_string();
-            db.append_message(*session_id, "tool", payload, event.at)
-                .map(|_| ())?;
-            let _ = db.update_session_status(*session_id, "running");
-            Ok(())
-        }
-        PlanUpdate { session_id, event } => {
-            let payload = serde_json::to_string(event).unwrap_or_else(|_| "{}".into());
-            db.append_message(*session_id, "plan", payload, event.at)
-                .map(|_| ())
-        }
-        SessionStatusChanged {
-            session_id, status, ..
-        } => {
-            let s = format!("{status:?}").to_lowercase();
-            db.update_session_status(*session_id, &s)
-        }
-        SessionCancelled { session_id, at } => {
-            let _ = db.update_session_status(*session_id, "cancelled");
-            db.append_message(*session_id, "system", "session cancelled", *at)
-                .map(|_| ())
-        }
-        SessionCompleted { session_id, at } => {
-            let _ = db.update_session_status(*session_id, "completed");
-            db.append_message(*session_id, "system", "session completed", *at)
-                .map(|_| ())
-        }
-        ApprovalRequired {
-            session_id,
-            tool,
-            summary,
-            auto_approved,
-            at,
-            ..
-        } => {
-            if *auto_approved {
-                db.append_message(
-                    *session_id,
-                    "system",
-                    format!("auto-approved (yolo): {tool}"),
-                    *at,
-                )
-                .map(|_| ())
-            } else {
-                let _ = db.update_session_status(*session_id, "waitingapproval");
-                // Durable as an approval row so it renders as a card (inert
-                // after restart — the live request died with the process).
-                db.append_message(
-                    *session_id,
-                    "approval",
-                    format!("{tool} — {summary}"),
-                    *at,
-                )
-                .map(|_| ())
-            }
-        }
-        ApprovalResolved {
-            session_id,
-            option_id,
-            cancelled,
-            at,
-            ..
-        } => {
-            let _ = db.update_session_status(*session_id, "running");
-            let body = if *cancelled {
-                "approval cancelled".to_string()
-            } else {
-                format!(
-                    "approval granted: {}",
-                    option_id.as_deref().unwrap_or("selected")
-                )
-            };
-            db.append_message(*session_id, "system", body, *at).map(|_| ())
-        }
-        // Plan documents lifted out of plan-presenting tool calls
-        // (ExitPlanMode etc.) — durable as real plan rows.
-        Raw {
-            session_id: Some(session_id),
-            payload,
-        } if payload.get("channel").and_then(|v| v.as_str()) == Some("plan_doc") => {
-            let Some(text) = payload.get("text").and_then(|v| v.as_str()) else {
-                return Ok(());
-            };
-            db.append_message(*session_id, "plan", text, Utc::now())
-                .map(|_| ())
-        }
-        // Raw ACP protocol lines: persist (merged into bounded multiline
-        // rows) so the View toggle can reveal history across restarts.
-        // Skip our own side channels (explain/usage/thread label events).
-        Raw {
-            session_id: Some(session_id),
-            payload,
-        } if payload.get("channel").and_then(|v| v.as_str()) == Some("term") => {
-            let Some(line) = payload.get("line").and_then(|v| v.as_str()) else {
-                return Ok(());
-            };
-            if line.trim().is_empty() {
-                return Ok(());
-            }
-            db.append_message_merged(
-                *session_id,
-                "term",
-                &format!("{line}\n"),
-                Utc::now(),
-                10,
-            )
-            .map(|_| ())
-        }
-        Error {
-            session_id: Some(session_id),
-            message,
-            at,
-        } => {
-            // Errors are rows, not verdicts — terminal failures arrive as
-            // SessionStatusChanged(Failed). Flipping the record here made a
-            // recovered thread show a permanent failed badge after reboot.
-            db.append_message(*session_id, "error", message.clone(), *at)
-                .map(|_| ())
-        }
-        _ => Ok(()),
-    })();
-    if let Err(e) = res {
-        tracing::debug!(error = %e, "persist_control_event skipped/failed");
-    }
-}
-
 // ── Dev server / live preview ────────────────────────────────────────────
 
 fn resolve_preview_cwd(state: &AppState, cwd: Option<String>, session_id: Option<String>) -> Result<PathBuf, String> {
@@ -2561,12 +2351,15 @@ pub async fn start_dev_server(
     session_id: Option<String>,
     open_browser: Option<bool>,
 ) -> Result<crate::devserver::DevServerStatus, String> {
+    let target=serde_json::json!({"session_id":session_id,"cwd":cwd,"open_browser":open_browser}).to_string();
+    crate::operations::recorded(&state.event_bus,"start_dev_server",target,async {
     let path = resolve_preview_cwd(&state, cwd, session_id)?;
     let _ = state.persistence.set_kv("last_cwd", &path.display().to_string());
     state
         .dev_server
         .start(&path, open_browser.unwrap_or(true))
         .await
+    }).await
 }
 
 #[tauri::command]
@@ -2585,7 +2378,10 @@ pub async fn dev_server_status(
 
 #[tauri::command]
 pub async fn open_dev_server(state: State<'_, AppState>) -> Result<String, String> {
+    let target="current_preview".into();
+    crate::operations::recorded(&state.event_bus,"open_dev_server",target,async {
     state.dev_server.open_in_browser().await
+    }).await
 }
 
 #[tauri::command]
@@ -2601,6 +2397,23 @@ pub async fn reveal_project(
 #[cfg(test)]
 mod saved_launch_authority_tests {
     use super::*;
+    #[test]
+    fn saved_rename_preserves_authority_shape_and_rejects_corruption() {
+        for source in [
+            r#"{"label":"old","readOnly":true,"permissionDeny":["Write(*)"]}"#,
+            r#"{"metadata":{"label":"old","readOnly":true,"permissionDeny":["Write(*)"]},"status":"idle"}"#,
+        ] {
+            let old: serde_json::Value = serde_json::from_str(source).unwrap();
+            let changed: serde_json::Value = serde_json::from_str(&renamed_saved_metadata(source,"manual").unwrap()).unwrap();
+            let mut expected = old;
+            if expected.get("metadata").is_some() { expected["metadata"]["label"] = serde_json::json!("manual"); }
+            else { expected["label"] = serde_json::json!("manual"); }
+            assert_eq!(changed,expected);
+        }
+        for source in ["corrupt preserved bytes", "[]", r#"{"metadata":null}"#] {
+            assert!(renamed_saved_metadata(source,"manual").is_err());
+        }
+    }
     #[test]
     fn reconnect_preserves_launch_ceiling_and_legacy_imports_default_to_plan() {
         let saved = saved_launch_authority(r#"{"metadata":{"sandboxProfile":"unrestricted","permissionAllow":["Read(*)"],"permissionDeny":["Write(*)"],"rules":["stay read only"],"readOnly":true,"trustRepo":true,"approvalMode":"ask","planMode":false,"alwaysApprove":false,"acpSessionId":"native-kept"}}"#).unwrap();

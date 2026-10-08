@@ -275,6 +275,19 @@ pub(crate) fn auth_required_message(backend: &str, stderr_tail: &str, api_key_se
     }
 }
 
+/// Current live control, distinct from replayed historical approval events.
+#[derive(Debug,Clone,Serialize)]
+#[serde(rename_all="camelCase")]
+pub struct LiveApproval {
+    pub runtime_id:Uuid,
+    pub host_epoch:u64,
+    pub request_id:String,
+    pub tool:String,
+    pub summary:String,
+    pub options:Vec<PermissionOptionInfo>,
+    pub plan_approval:bool,
+}
+
 /// How to shape the JSON-RPC response when the user answers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum PendingPermissionKind {
@@ -339,6 +352,8 @@ pub struct AcpClient {
     stderr_tail: StderrTail,
     event_bus: Option<Arc<EventBus>>,
     control_session_id: Uuid,
+    active_prompt: Arc<std::sync::atomic::AtomicBool>,
+    active_operation: Arc<Mutex<Option<Uuid>>>,
     notification_rx: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<NotificationEvent>>>,
     agent_request_rx: Mutex<Option<tokio::sync::mpsc::UnboundedReceiver<IncomingAgentRequest>>>,
     /// When true, auto-allow tool permission requests (yolo). Atomic so the
@@ -347,7 +362,7 @@ pub struct AcpClient {
     /// Approval stance (live-switchable from the composer pills).
     approval_mode: RwLock<ApprovalMode>,
     /// Permission requests parked until the user answers via respond_approval.
-    pending_permissions: Mutex<HashMap<String, PendingPermission>>,
+    pending_permissions: Arc<Mutex<HashMap<String, PendingPermission>>>,
     /// Set during deliberate shutdown so process death isn't reported as failure.
     shutting_down: std::sync::atomic::AtomicBool,
     /// Native load replay is already in durable conversation history. Keep it
@@ -444,6 +459,12 @@ impl AcpClient {
             )));
         }
 
+        let bus=event_bus.as_ref().ok_or(grok_events::EventError::NotDurable)?;
+        bus.ensure_durable()?;
+        if bus.origin().session_id!=Some(control_session_id) || bus.runtime_id().is_none() {return Err(grok_events::EventError::InvalidOrigin("native producer requires host runtime scope".into()).into());}
+        let native_operation=Uuid::new_v4();
+        bus.emit_checked(ControlEvent::HostOperationIntent {session_id:Some(control_session_id),operation_id:native_operation,kind:"native_spawn".into(),target:config.backend_label.clone(),at:Utc::now()})?;
+
         let mut cmd = Command::new(&config.program);
         cmd.args(&config.args)
             .current_dir(&config.cwd)
@@ -492,7 +513,8 @@ impl AcpClient {
         let (notif_tx, notif_rx) = tokio::sync::mpsc::unbounded_channel();
         let (agent_req_tx, agent_req_rx) = tokio::sync::mpsc::unbounded_channel();
         let (stdout_reporter, stdout_ticket) = DrainTicket::pair();
-        let transport = NdjsonTransport::new_with_drain(stdin, stdout, notif_tx, agent_req_tx, Some(stdout_reporter));
+        let turn_epoch=Arc::new(std::sync::atomic::AtomicU64::new(0));
+        let transport = NdjsonTransport::new_scoped(stdin, stdout, notif_tx, agent_req_tx, Some(stdout_reporter),Some(turn_epoch.clone()));
         let mut external_drains = vec![stdout_ticket];
 
         // Mirror agent stderr into the control bus (center column / terminal view).
@@ -570,11 +592,13 @@ impl AcpClient {
             stderr_tail,
             event_bus,
             control_session_id,
+            active_prompt: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            active_operation: Arc::new(Mutex::new(None)),
             notification_rx: Mutex::new(Some(notif_rx)),
             agent_request_rx: Mutex::new(Some(agent_req_rx)),
             always_approve: std::sync::atomic::AtomicBool::new(opts.always_approve),
             approval_mode: RwLock::new(opts.approval_mode),
-            pending_permissions: Mutex::new(HashMap::new()),
+            pending_permissions: Arc::new(Mutex::new(HashMap::new())),
             shutting_down: std::sync::atomic::AtomicBool::new(false),
             historical_replay: std::sync::atomic::AtomicBool::new(false),
             plan_emulation: std::sync::atomic::AtomicBool::new(false),
@@ -595,7 +619,7 @@ impl AcpClient {
             cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             cancelling: std::sync::atomic::AtomicBool::new(false),
             cancel_transition: Mutex::new(()),
-            turn_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            turn_epoch,
             host_dispatch: Arc::new(Mutex::new(())),
         });
 
@@ -607,7 +631,12 @@ impl AcpClient {
                 .await
         };
         if let Err(e) = startup.await {
-            return Err(client.explain_startup_error(e).await);
+            let explained=client.explain_startup_error(e).await;
+            let _=client.operation_outcome(native_operation,"native_spawn",&client.config.backend_label,"uncertain_startup");
+            return Err(explained);
+        }
+        if let Err(error)=client.operation_outcome(native_operation,"native_spawn",&client.config.backend_label,"completed") {
+            return Err(client.explain_startup_error(error).await);
         }
 
         if let Some(process) = client.process.clone() {
@@ -656,6 +685,11 @@ impl AcpClient {
 
     /// Mock-friendly constructor for tests without a real process.
     pub fn mock_for_tests(session_id: &str, event_bus: Option<Arc<EventBus>>) -> Arc<Self> {
+        let id=event_bus.as_ref().and_then(|bus|bus.origin().session_id).unwrap_or_else(Uuid::new_v4);
+        Self::mock_for_session(id,session_id,event_bus)
+    }
+
+    pub fn mock_for_session(control_session_id:Uuid, session_id:&str,event_bus:Option<Arc<EventBus>>)->Arc<Self> {
         let config = AcpClientConfig::new("/bin/true", "/tmp");
         Arc::new(Self {
             config,
@@ -668,12 +702,14 @@ impl AcpClient {
             auth_methods: RwLock::new(Vec::new()),
             stderr_tail: StderrTail::default(),
             event_bus,
-            control_session_id: Uuid::new_v4(),
+            control_session_id,
+            active_prompt: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            active_operation: Arc::new(Mutex::new(None)),
             notification_rx: Mutex::new(None),
             agent_request_rx: Mutex::new(None),
             always_approve: std::sync::atomic::AtomicBool::new(false),
             approval_mode: RwLock::new(ApprovalMode::Ask),
-            pending_permissions: Mutex::new(HashMap::new()),
+            pending_permissions: Arc::new(Mutex::new(HashMap::new())),
             shutting_down: std::sync::atomic::AtomicBool::new(false),
             historical_replay: std::sync::atomic::AtomicBool::new(false),
             plan_emulation: std::sync::atomic::AtomicBool::new(false),
@@ -712,18 +748,20 @@ impl AcpClient {
     }
 
     async fn request_timeout(&self, method: &str, params: Option<Value>) -> Result<Value> {
+        let operation_id=self.effect_intent(method)?;
         let transport = self.transport().await?;
-        transport
-            .request_with_timeout(method, params, self.config.request_timeout)
-            .await
+        let result=transport.request_with_timeout(method, params, self.config.request_timeout).await;
+        self.operation_outcome(operation_id,method,"native conversation",if result.is_ok(){"completed"}else{"uncertain"})?;
+        result
     }
 
     /// Startup-handshake RPC with the tighter startup timeout.
     async fn request_startup(&self, method: &str, params: Option<Value>) -> Result<Value> {
+        let operation_id=self.effect_intent(method)?;
         let transport = self.transport().await?;
-        transport
-            .request_with_timeout(method, params, self.config.startup_timeout)
-            .await
+        let result=transport.request_with_timeout(method, params, self.config.startup_timeout).await;
+        self.operation_outcome(operation_id,method,"native conversation",if result.is_ok(){"completed"}else{"uncertain"})?;
+        result
     }
 
     async fn initialize(&self) -> Result<()> {
@@ -970,8 +1008,7 @@ impl AcpClient {
                         info!(%sid, prior, "ACP session/load complete (full brain)");
                         self.apply_mode_after_session(opts).await;
                         if let Some(bus) = &self.event_bus {
-                            bus.emit_status(self.control_session_id, SessionStatus::Idle)
-                                .await;
+                            bus.emit_checked(ControlEvent::SessionStatusChanged{session_id:self.control_session_id,status:SessionStatus::Idle,at:Utc::now()})?;
                             bus.emit(ControlEvent::AgentMessage {
                                 session_id: self.control_session_id,
                                 text: "🧠 full brain — agent reloaded prior ACP session".into(),
@@ -995,8 +1032,7 @@ impl AcpClient {
                         info!(%sid, prior, "ACP session/resume complete (full brain)");
                         self.apply_mode_after_session(opts).await;
                         if let Some(bus) = &self.event_bus {
-                            bus.emit_status(self.control_session_id, SessionStatus::Idle)
-                                .await;
+                            bus.emit_checked(ControlEvent::SessionStatusChanged{session_id:self.control_session_id,status:SessionStatus::Idle,at:Utc::now()})?;
                             bus.emit(ControlEvent::AgentMessage {
                                 session_id: self.control_session_id,
                                 text: "🧠 full brain — agent resumed prior ACP session".into(),
@@ -1167,10 +1203,7 @@ impl AcpClient {
 
         self.apply_mode_after_session(opts).await;
 
-        if let Some(bus) = &self.event_bus {
-            bus.emit_status(self.control_session_id, SessionStatus::Idle)
-                .await;
-        }
+        self.checked_event(ControlEvent::SessionStatusChanged{session_id:self.control_session_id,status:SessionStatus::Idle,at:Utc::now()})?;
         Ok(())
     }
 
@@ -1328,7 +1361,31 @@ impl AcpClient {
         self.send_prompt_inner(prompt, false).await
     }
 
+    fn checked_event(&self,event:ControlEvent)->Result<()> {
+        if let Some(bus)=&self.event_bus {bus.emit_checked(event)?;}
+        else if self.native_runner_unconfined {return Err(grok_events::EventError::NotDurable.into());}
+        Ok(())
+    }
+    fn operation_intent(&self,kind:&str,target:&str)->Result<Uuid> {
+        if let Some(bus)=&self.event_bus {
+            if self.native_runner_unconfined {bus.ensure_durable()?;} else {bus.ensure_healthy()?;}
+        } else if self.native_runner_unconfined {return Err(grok_events::EventError::NotDurable.into());}
+        let operation_id=Uuid::new_v4();
+        self.checked_event(ControlEvent::HostOperationIntent{session_id:Some(self.control_session_id),operation_id,kind:kind.into(),target:grok_events::diagnostics::sanitize_diagnostic(target),at:Utc::now()})?;
+        Ok(operation_id)
+    }
+    fn effect_intent(&self,operation:&str)->Result<Uuid> {
+        self.operation_intent(operation,"native conversation")
+    }
+    fn operation_outcome(&self,operation_id:Uuid,kind:&str,target:&str,result:&str)->Result<()> {
+        self.checked_event(ControlEvent::HostOperationOutcome{session_id:Some(self.control_session_id),operation_id,kind:kind.into(),target:grok_events::diagnostics::sanitize_diagnostic(target),result:result.into(),at:Utc::now()})
+    }
+
     async fn send_prompt_inner(&self, prompt: &str, planning_instructions: bool) -> Result<()> {
+        self.send_recorded_prompt(prompt,planning_instructions,Uuid::new_v4(),None).await
+    }
+
+    pub async fn send_recorded_prompt(&self,prompt:&str,planning_instructions:bool,operation_id:Uuid,client_submission_id:Option<Uuid>)->Result<()> {
         let sid = self
             .session_id
             .read()
@@ -1343,6 +1400,8 @@ impl AcpClient {
         // never through the agent's response. A stopped native transport must
         // not fall through the offline/mock path after preparing context.
         let prompt_dispatch = self.host_dispatch.lock().await;
+        if self.native_runner_unconfined && self.transport.read().await.is_none(){return Err(AcpError::Protocol("native transport unavailable; resume the saved conversation before sending a new prompt".into()));}
+        if self.active_prompt.load(std::sync::atomic::Ordering::Acquire) || !self.pending_permissions.lock().await.is_empty() {return Err(AcpError::Protocol("a prompt is already active; preserve the draft until its completion is confirmed".into()));}
         let epoch = {
             if self.runner_stopped.load(std::sync::atomic::Ordering::Acquire)
                 || self.process.as_ref().is_some_and(|process| process.outcome().is_some()) {
@@ -1355,6 +1414,10 @@ impl AcpClient {
             self.cancelled.store(false, std::sync::atomic::Ordering::Release);
             epoch
         };
+        self.checked_event(ControlEvent::UserMessage{session_id:self.control_session_id,operation_id,text:prompt.into(),at:Utc::now()})?;
+        if self.native_runner_unconfined {self.event_bus.as_ref().ok_or(grok_events::EventError::NotDurable)?.ensure_durable()?;}
+        *self.active_operation.lock().await=Some(operation_id);
+        if let Some(correlation)=client_submission_id {self.checked_event(ControlEvent::Raw{session_id:Some(self.control_session_id),payload:json!({"channel":"submission_correlation","operationId":operation_id,"clientSubmissionId":correlation})})?;}
         self.historical_replay.store(false, std::sync::atomic::Ordering::Release);
 
         // History-only: prepend transcript pack once.
@@ -1422,10 +1485,7 @@ impl AcpClient {
             return Err(AcpError::Protocol("native transport unavailable; resume the saved conversation before sending a new prompt".into()));
         }
 
-        if let Some(bus) = &self.event_bus {
-            bus.emit_status(self.control_session_id, SessionStatus::Running)
-                .await;
-        }
+        self.checked_event(ControlEvent::SessionStatusChanged{session_id:self.control_session_id,status:SessionStatus::Running,at:Utc::now()})?;
 
         // Mock clients: no transport — accept and return.
         let Some(transport) = transport else {
@@ -1438,9 +1498,10 @@ impl AcpClient {
                     ),
                     at: Utc::now(),
                 });
-                bus.emit(ControlEvent::PromptFinished { session_id: self.control_session_id, stop_reason: "mock".into(), at: Utc::now() });
-                bus.emit_status(self.control_session_id, SessionStatus::Idle)
-                    .await;
+                self.operation_outcome(operation_id,"submission","conversation","completed_mock")?;
+                *self.active_operation.lock().await=None;
+                bus.emit_checked(ControlEvent::PromptFinished { session_id: self.control_session_id, stop_reason: "mock".into(), at: Utc::now() })?;
+                bus.emit_checked(ControlEvent::SessionStatusChanged{session_id:self.control_session_id,status:SessionStatus::Idle,at:Utc::now()})?;
             }
             return Ok(());
         };
@@ -1455,21 +1516,25 @@ impl AcpClient {
         let params_val = serde_json::to_value(params)?;
 
         if let Some(bus) = &self.event_bus {
-            bus.emit(ControlEvent::Raw {
+            bus.emit_checked(ControlEvent::Raw {
                 session_id: Some(self.control_session_id),
                 payload: json!({
                     "channel": "term",
                     "stream": "acp",
                     "line": format!("→ session/prompt ({} chars) — waiting for stream…", prompt.len()),
                 }),
-            });
+            })?;
         }
 
         // Fire the RPC immediately; do not block the UI on the full agent turn.
         // Grok streams work via notifications while session/prompt stays open.
+        self.active_prompt.store(true,std::sync::atomic::Ordering::Release);
         let rx = match transport.send_request("session/prompt", Some(params_val)).await {
             Ok(rx) => rx,
             Err(error) => {
+                self.active_prompt.store(false,std::sync::atomic::Ordering::Release);
+                self.operation_outcome(operation_id,"submission","conversation","uncertain_dispatch")?;
+                *self.active_operation.lock().await=None;
                 if let Some(bus) = &self.event_bus {
                     bus.emit_error(Some(self.control_session_id), format!("prompt dispatch failed; completion remains unconfirmed: {error}"));
                     bus.emit_status(self.control_session_id, SessionStatus::Failed).await;
@@ -1479,6 +1544,9 @@ impl AcpClient {
         };
         drop(prompt_dispatch);
 
+        let active_operation=self.active_operation.clone();
+        let pending_permissions=self.pending_permissions.clone();
+        let active_prompt=self.active_prompt.clone();
         let bus = self.event_bus.clone();
         let control_id = self.control_session_id;
         let prompt_timeout = self.config.prompt_timeout;
@@ -1497,6 +1565,13 @@ impl AcpClient {
             let _dispatch = dispatch.lock().await;
             if turn_epoch.load(std::sync::atomic::Ordering::Acquire) != epoch
                 || cancelled.load(std::sync::atomic::Ordering::Acquire) { return; }
+            active_prompt.store(false,std::sync::atomic::Ordering::Release);
+            *active_operation.lock().await=None;
+            let observed=if matches!(&completion,Ok(Ok(response)) if response.error.is_none()) && drained && pending_permissions.lock().await.is_empty(){"completed"}else{"uncertain"};
+            if let Some(bus)=&bus {
+                if bus.emit_checked(ControlEvent::HostOperationOutcome{session_id:Some(control_id),operation_id,kind:"submission".into(),target:"conversation".into(),result:observed.into(),at:Utc::now()}).is_err(){return;}
+            }
+            turn_epoch.fetch_add(1,std::sync::atomic::Ordering::AcqRel);
             match completion {
                 Ok(Ok(resp)) => match NdjsonTransport::unwrap_response(resp) {
                     Ok(result) => {
@@ -1509,6 +1584,11 @@ impl AcpClient {
                                 bus.emit_error(Some(control_id), "acp error: final output drain failed");
                                 bus.emit_status(control_id, SessionStatus::Failed).await;
                             }
+                            return;
+                        }
+                        if !pending_permissions.lock().await.is_empty() {
+                            cancelled.store(true,std::sync::atomic::Ordering::Release);
+                            if let Some(bus)=&bus {bus.emit_error(Some(control_id),"prompt ended with unresolved controls; completion remains unconfirmed, Stop before resuming");bus.emit_status(control_id,SessionStatus::Failed).await;}
                             return;
                         }
                         info!("session/prompt completed");
@@ -1526,8 +1606,8 @@ impl AcpClient {
                                     "line": format!("← session/prompt complete · stopReason={stop}"),
                                 }),
                             });
-                            bus.emit(ControlEvent::PromptFinished { session_id: control_id, stop_reason: stop.into(), at: Utc::now() });
-                            bus.emit_status(control_id, SessionStatus::Idle).await;
+                            if bus.emit_checked(ControlEvent::PromptFinished { session_id: control_id, stop_reason: stop.into(), at: Utc::now() }).is_err() {return;}
+                            let _=bus.emit_checked(ControlEvent::SessionStatusChanged{session_id:control_id,status:SessionStatus::Idle,at:Utc::now()});
                         }
                     }
                     Err(e) => {
@@ -1571,7 +1651,10 @@ impl AcpClient {
         Ok(())
     }
 
-    pub async fn cancel(&self) -> Result<()> {
+    pub async fn cancel(&self)->Result<()> {self.cancel_inner(true).await}
+    /// Registry owns the aggregate outcome when another retained process also exists.
+    pub async fn cancel_without_status(&self)->Result<()> {self.cancel_inner(false).await}
+    async fn cancel_inner(&self,publish_status:bool) -> Result<()> {
         let _cancel = self.cancel_transition.lock().await;
         self.cancelling.store(true, std::sync::atomic::Ordering::Release);
         self.cancelled.store(true, std::sync::atomic::Ordering::Release);
@@ -1599,17 +1682,20 @@ impl AcpClient {
         let terminal_failure = self.terminals.kill_all().await.err();
         if self.process.is_some() { self.shutting_down.store(true, std::sync::atomic::Ordering::Release); }
         let native_failure = self.stop_owned_process().await.err();
+        let submission=*self.active_operation.lock().await;
+        if let Some(operation_id)=submission {
+            let _=self.operation_outcome(operation_id,"submission","conversation","uncertain_stopped");
+            *self.active_operation.lock().await=None;
+        }
         if terminal_failure.is_some() || native_failure.is_some() {
             return Err(AcpError::Protocol(format!("session cleanup unresolved; terminals: {}; native runner: {}",
                 terminal_failure.map(|error| error.to_string()).unwrap_or_else(|| "complete".into()),
                 native_failure.map(|error| error.to_string()).unwrap_or_else(|| "complete".into()))));
         }
         if self.process.is_some() { *self.transport.write().await = None; }
-        if let Some(bus) = &self.event_bus {
-            bus.emit_status(self.control_session_id, SessionStatus::Cancelled)
-                .await;
-        }
+        self.active_prompt.store(false,std::sync::atomic::Ordering::Release);
         self.cancelling.store(false, std::sync::atomic::Ordering::Release);
+        if publish_status {self.checked_event(ControlEvent::SessionStatusChanged{session_id:self.control_session_id,status:SessionStatus::Cancelled,at:Utc::now()})?;} else if let Some(bus)=&self.event_bus {bus.ensure_healthy()?;}
         Ok(())
     }
 
@@ -1625,12 +1711,21 @@ impl AcpClient {
             return Err(AcpError::Protocol("Plan capability unavailable: native internal runner confinement is not verified".into()));
         }
         let mode = if self.read_only { ApprovalMode::Plan } else { mode };
-        *self.approval_mode.write().await = mode;
+        let operation_id=self.operation_intent("approval_mode_change",&format!("approval:{mode:?}"))?;
+        let mut current=self.approval_mode.write().await;
+        let previous=*current;
+        let previous_always=self.always_approve.load(std::sync::atomic::Ordering::Relaxed);
+        *current = mode;
         // Keep the legacy flag in step for anything still reading it.
         self.always_approve.store(
             mode == ApprovalMode::Yolo,
             std::sync::atomic::Ordering::Relaxed,
         );
+        if let Err(error)=self.operation_outcome(operation_id,"approval_mode_change",&format!("approval:{mode:?}"),"completed") {
+            *current=previous;
+            self.always_approve.store(previous_always,std::sync::atomic::Ordering::Relaxed);
+            return Err(error);
+        }
         Ok(())
     }
 
@@ -1640,12 +1735,17 @@ impl AcpClient {
 
     /// "Always allow this" from an approval card — auto-approves matching
     /// requests for the rest of this session (deny rules still win).
-    pub async fn add_session_allow_rule(&self, pattern: String) {
+    pub async fn add_session_allow_rule(&self, pattern: String) -> Result<()> {
+        let _dispatch = self.host_dispatch.lock().await;
+        let operation_id=self.operation_intent("session_allow_rule",&pattern)?;
         let mut rules = self.session_allow.write().await;
-        if !rules.contains(&pattern) {
-            info!(%pattern, "session allow rule added");
-            rules.push(pattern);
+        let added=!rules.contains(&pattern);
+        if added {rules.push(pattern.clone());}
+        if let Err(error)=self.operation_outcome(operation_id,"session_allow_rule",&pattern,"completed") {
+            if added {rules.pop();}
+            return Err(error);
         }
+        Ok(())
     }
 
     pub async fn session_allow_rules(&self) -> Vec<String> {
@@ -1722,23 +1822,35 @@ impl AcpClient {
 
     async fn execute_host_action(&self, action: &HostAction, approved: bool) -> Result<Value> {
         let _dispatch = self.host_dispatch.lock().await;
+        self.execute_host_action_under_dispatch(action, approved).await
+    }
+
+    /// Caller holds host_dispatch through control claim, effect and bounded reply.
+    async fn execute_host_action_under_dispatch(&self, action: &HostAction, approved: bool) -> Result<Value> {
         let decision = self.host_decision(action).await?;
         if decision == grok_permissions::PermissionDecision::Deny
             || (!approved && decision != grok_permissions::PermissionDecision::Allow) {
             return Err(AcpError::Protocol("host operation denied by session policy".into()));
         }
-        self.emit_native_host_tool(action, ToolCallStatus::Running);
+        let target=format!("request:{} {}",id_key(&action.rpc_id),self.host_description(action)?.1);
+        let operation_id=self.operation_intent(&action.method,&target)?;
+        self.emit_native_host_tool(action, ToolCallStatus::Running)?;
+        if let Some(bus)=&self.event_bus {bus.ensure_healthy()?;}
+        if action.epoch!=self.turn_epoch.load(std::sync::atomic::Ordering::Acquire)
+            || self.cancelled.load(std::sync::atomic::Ordering::Acquire)
+            || self.cancelling.load(std::sync::atomic::Ordering::Acquire) {return Err(AcpError::Cancelled);}
         let result = match action.method.as_str() {
             "fs/read_text_file" | "fs/readTextFile" => self.fs_read_text(&action.params).await.map(|content| json!({"content":content})),
             "fs/write_text_file" | "fs/writeTextFile" => self.fs_write_text(&action.params).await.map(|_| json!({})),
             "terminal/create" => self.terminals.handle("terminal/create", &action.params).await,
             _ => Err(AcpError::Protocol("unknown host operation".into())),
         };
-        self.emit_native_host_tool(action, if result.is_ok() { ToolCallStatus::Completed } else { ToolCallStatus::Failed });
+        self.operation_outcome(operation_id,&action.method,&target,if result.is_ok(){"completed"}else{"uncertain"})?;
+        self.emit_native_host_tool(action, if result.is_ok() { ToolCallStatus::Completed } else { ToolCallStatus::Failed })?;
         result
     }
 
-    fn emit_native_host_tool(&self, action: &HostAction, status: ToolCallStatus) {
+    fn emit_native_host_tool(&self, action: &HostAction, status: ToolCallStatus) -> Result<()> {
         if let Some(bus) = &self.event_bus {
             let summary = self.host_description(action).map(|(_, detail, _, _)| detail)
                 .unwrap_or_else(|_| action.method.clone());
@@ -1747,14 +1859,16 @@ impl AcpClient {
                 "fs/write_text_file" | "fs/writeTextFile" => "fs/write",
                 method => method,
             };
-            bus.emit_tool_call(self.control_session_id, ToolCallEvent {
+            bus.emit_checked(ControlEvent::ToolCall{session_id:self.control_session_id,event:ToolCallEvent {
                 id: id_key(&action.rpc_id), tool:tool.into(), args_summary:byte_prefix(&summary, 800).into(),
                 status, result_summary:None, at:Utc::now(),
-            });
+            }})?;
         }
+        Ok(())
     }
 
     async fn handle_host_request(&self, req: IncomingAgentRequest, epoch: u64) -> Result<()> {
+        if let Some(bus)=&self.event_bus {bus.ensure_healthy()?;}
         let transport = self.transport().await?;
         let action = HostAction { method: req.method, params: req.params, rpc_id: req.id.clone(),
             epoch };
@@ -1782,9 +1896,9 @@ impl AcpClient {
                     kind: PendingPermissionKind::HostAction, ask: None, host: Some(action) });
                 drop(pending);
                 if let Some(bus) = &self.event_bus {
-                    bus.emit(ControlEvent::ApprovalRequired { session_id:self.control_session_id,
+                    bus.emit_checked(ControlEvent::ApprovalRequired { session_id:self.control_session_id,
                         request_id, tool, summary, options, auto_approved:false,
-                        selected_option:None, plan_approval:false, at:Utc::now() });
+                        selected_option:None, plan_approval:false, at:Utc::now() })?;
                     bus.emit_status(self.control_session_id, SessionStatus::WaitingApproval).await;
                 }
                 Ok(())
@@ -1805,11 +1919,22 @@ impl AcpClient {
         if matches!(mode.to_ascii_lowercase().replace(['-', '_'], "").as_str(), "plan" | "planning" | "readonly") {
             self.set_approval_mode(ApprovalMode::Plan).await?;
         }
+        let _dispatch=self.host_dispatch.lock().await;
         if self.transport.read().await.is_none() {
+            if self.native_runner_unconfined {return Err(AcpError::SessionNotReady);}
+            let operation_id=self.operation_intent("native_mode_projection",mode)?;
             debug!(%mode, "set_mode (mock/local)");
+            let previous_plan=self.plan_emulation.load(std::sync::atomic::Ordering::Relaxed);
+            let mut current=self.current_mode.write().await;
+            let previous=current.clone();
             self.plan_emulation
                 .store(mode == "plan", std::sync::atomic::Ordering::Relaxed);
-            *self.current_mode.write().await = Some(mode.to_string());
+            *current = Some(mode.to_string());
+            if let Err(error)=self.operation_outcome(operation_id,"native_mode_projection",mode,"completed_mock") {
+                *current=previous;
+                self.plan_emulation.store(previous_plan,std::sync::atomic::Ordering::Relaxed);
+                return Err(error);
+            }
             return Ok(());
         }
         let sid = self
@@ -1865,7 +1990,45 @@ impl AcpClient {
     ///
     /// The `HashMap::remove` is the duplicate-response guard: a second call for
     /// the same request errors without touching the wire.
+    pub async fn pending_approvals(&self)->Result<Vec<LiveApproval>> {
+        let _gate=self.host_dispatch.lock().await;
+        if self.cancelled.load(std::sync::atomic::Ordering::Acquire) || self.runner_stopped(){return Ok(Vec::new());}
+        let Some(bus)=&self.event_bus else{return Ok(Vec::new());};bus.ensure_healthy()?;
+        let runtime_id=bus.runtime_id().ok_or(grok_events::EventError::StaleRuntime)?;
+        let epoch=self.turn_epoch.load(std::sync::atomic::Ordering::Acquire);
+        let pending=self.pending_permissions.lock().await;
+        if pending.len()>128{return Err(AcpError::Protocol("live approval coverage exceeds bounded query; Stop and reconcile".into()));}
+        let mut cards=Vec::new();
+        for(request_id,permission)in pending.iter(){
+            let Some(action)=&permission.host else{continue;};if action.epoch!=epoch{continue;}
+            let(tool,summary)=match permission.kind {
+                PendingPermissionKind::HostAction=>{let(tool,detail,..)=self.host_description(action)?;(tool,detail)},
+                PendingPermissionKind::SessionPermission=>{let tool=permission_tool(&action.params);let summary=permission_summary(&action.params,&tool);(tool,summary)},
+                PendingPermissionKind::ExitPlanMode=>("exit_plan_mode".into(),"Approve the plan above?".into()),
+                PendingPermissionKind::AskUserQuestion=>("ask_user_question".into(),permission.ask.as_ref().and_then(|ask|ask.questions.get(ask.current_q)).map(|question|question.text.clone()).unwrap_or_default()),
+            };
+            if permission.options.len()>128 || permission.options.iter().any(|option|option.id.len()>4000 || option.label.len()>4000 || option.kind.len()>128){return Err(AcpError::Protocol("live approval exceeds bounded query coverage".into()));}
+            cards.push(LiveApproval{runtime_id,host_epoch:epoch,request_id:request_id.clone(),tool,summary:byte_prefix(&summary,4000).into(),options:permission.options.clone(),plan_approval:permission.kind==PendingPermissionKind::ExitPlanMode});
+        }
+        cards.sort_by(|a,b|a.request_id.cmp(&b.request_id));
+        if serde_json::to_vec(&cards)?.len()>512*1024 {return Err(AcpError::Protocol("live approval snapshot exceeds bounded byte coverage".into()));}
+        Ok(cards)
+    }
+    pub async fn respond_approval_scoped(&self,runtime_id:Uuid,host_epoch:u64,request_id:&str,option_id:Option<&str>)->Result<()> {
+        if self.event_bus.as_ref().and_then(|bus|bus.runtime_id())!=Some(runtime_id){return Err(grok_events::EventError::StaleRuntime.into());}
+        self.respond_approval_inner(request_id,option_id,Some(host_epoch)).await
+    }
     pub async fn respond_approval(&self, request_id: &str, option_id: Option<&str>) -> Result<()> {
+        self.respond_approval_inner(request_id,option_id,None).await
+    }
+    async fn respond_approval_inner(&self,request_id:&str,option_id:Option<&str>,expected_epoch:Option<u64>)->Result<()> {
+        // A pending control remains visible until its complete authority operation owns the gate.
+        let _dispatch=self.host_dispatch.lock().await;
+        if let Some(expected)=expected_epoch {
+            let pending=self.pending_permissions.lock().await;
+            if expected!=self.turn_epoch.load(std::sync::atomic::Ordering::Acquire) || pending.get(request_id).and_then(|permission|permission.host.as_ref()).is_none_or(|action|action.epoch!=expected){return Err(AcpError::Protocol("approval control belongs to a retired turn".into()));}
+        }
+
         let pending = self
             .pending_permissions
             .lock()
@@ -1875,6 +2038,10 @@ impl AcpClient {
                 AcpError::Protocol(format!("no pending permission request: {request_id}"))
             })?;
 
+        if expected_epoch.is_some_and(|expected|pending.host.as_ref().is_none_or(|action|action.epoch!=expected)) {
+            self.pending_permissions.lock().await.insert(request_id.into(),pending);
+            return Err(AcpError::Protocol("approval control belongs to a retired turn".into()));
+        }
         if !pending.options.is_empty() {
             if let Some(oid) = option_id {
                 if !pending.options.iter().any(|o| o.id == oid) {
@@ -1898,12 +2065,19 @@ impl AcpClient {
             let action = pending.host.as_ref().ok_or_else(|| AcpError::Protocol("missing native host request".into()))?;
             let allowing = pending.options.iter().any(|o| Some(o.id.as_str()) == option_id
                 && o.kind.to_ascii_lowercase().starts_with("allow"));
-            let result = if allowing { self.execute_host_action(action, true).await }
+            let result = if allowing { self.execute_host_action_under_dispatch(action, true).await }
                 else { Err(AcpError::Cancelled) };
             if result.is_ok() && option_id == Some("allow_always") {
                 let (tool, detail, _, _) = self.host_description(action)?;
                 let key = self.host_grant_key(action, &tool, &detail);
-                self.host_exact_allow.write().await.insert(key);
+                let target=format!("request:{} {tool} {detail}",id_key(&action.rpc_id));
+                let operation_id=self.operation_intent("host_exact_allow",&target)?;
+                let mut rules=self.host_exact_allow.write().await;
+                let added=rules.insert(key.clone());
+                if let Err(error)=self.operation_outcome(operation_id,"host_exact_allow",&target,"completed") {
+                    if added {rules.remove(&key);}
+                    return Err(error);
+                }
             }
             // Never put an executed host request back into the map on a wire
             // error: replaying it could repeat a write or process spawn.
@@ -1925,8 +2099,6 @@ impl AcpClient {
                 .respond_ask_user_question(request_id, option_id, pending)
                 .await;
         }
-
-        let _dispatch = self.host_dispatch.lock().await;
 
         // Re-check a parked native permission immediately before granting it.
         // A mode change or cancel must not revive a previously authorized tool.
@@ -1981,6 +2153,8 @@ impl AcpClient {
             PendingPermissionKind::HostAction => unreachable!("handled above"),
         };
 
+        let grant_target=format!("request:{} option:{}",id_key(&pending.rpc_id),option_id.unwrap_or("cancelled"));
+        let grant_operation=self.operation_intent("permission_response",&grant_target)?;
         if let Some(transport) = self.transport.read().await.clone() {
             if let Err(e) = transport.send_response(pending.rpc_id.clone(), outcome.clone()).await {
                 // D-046: keep the card retryable if the wire blips mid-plan-exit.
@@ -1994,6 +2168,7 @@ impl AcpClient {
             debug!(%request_id, ?option_id, "respond_approval (mock/local)");
         }
 
+        self.operation_outcome(grant_operation,"permission_response",&grant_target,"dispatched")?;
         if let Some(bus) = &self.event_bus {
             bus.emit(ControlEvent::ApprovalResolved {
                 session_id: self.control_session_id,
@@ -2090,6 +2265,10 @@ impl AcpClient {
             };
             match event {
                 NotificationEvent::Notification(notif) => self.handle_notification(notif).await,
+                NotificationEvent::ScopedNotification(epoch,notif)=> {
+                    let _gate=self.host_dispatch.lock().await;
+                    if epoch==self.turn_epoch.load(std::sync::atomic::Ordering::Acquire) {self.handle_notification(notif).await;}
+                }
                 NotificationEvent::Fence(ack) => { let _ = ack.send(()); }
             }
         }
@@ -2114,7 +2293,7 @@ impl AcpClient {
                 request = rx.recv() => match request { Some(request) => request, None => break },
             };
             let this = self.clone();
-            let epoch = self.turn_epoch.load(std::sync::atomic::Ordering::Acquire);
+            let epoch = req.host_epoch.unwrap_or_else(||self.turn_epoch.load(std::sync::atomic::Ordering::Acquire));
             tokio::spawn(async move {
                 if let Err(e) = this.handle_agent_request(req, epoch).await {
                     warn!(error = %e, "failed handling agent request");
@@ -2125,12 +2304,17 @@ impl AcpClient {
     }
 
     async fn handle_agent_request(&self, req: IncomingAgentRequest, epoch: u64) -> Result<()> {
+        let protective=matches!(req.method.as_str(),"terminal/kill"|"terminal/kill_command"|"terminal/release");
+        if !protective {if let Some(bus)=&self.event_bus {bus.ensure_healthy()?;}}
         if matches!(req.method.as_str(), "fs/read_text_file" | "fs/readTextFile"
             | "fs/write_text_file" | "fs/writeTextFile" | "terminal/create") {
             return self.handle_host_request(req, epoch).await;
         }
         let transport = self.transport().await?;
         let method = req.method.as_str();
+        if !protective && epoch != self.turn_epoch.load(std::sync::atomic::Ordering::Acquire) && !matches!(method,"session/request_permission"|"session/requestPermission"|"x.ai/exit_plan_mode"|"_x.ai/exit_plan_mode"|"x.ai/ask_user_question"|"_x.ai/ask_user_question") {
+            transport.send_error_response(req.id,-32000,"retired turn request").await?;return Ok(());
+        }
         info!(%method, "ACP agent→client request");
 
         match method {
@@ -2205,6 +2389,8 @@ impl AcpClient {
                     }
                     match pick_auto_approve_option(&options) {
                         Some(picked) => {
+                            let target=format!("request:{} tool:{} option:{}",id_key(&req.id),tool,picked);
+                            let grant_operation=self.operation_intent("permission_auto_grant",&target)?;
                             transport
                                 .send_response(
                                     req.id,
@@ -2213,8 +2399,9 @@ impl AcpClient {
                                     }),
                                 )
                                 .await?;
+                            self.operation_outcome(grant_operation,"permission_auto_grant",&target,"dispatched")?;
                             if let Some(bus) = &self.event_bus {
-                                bus.emit(ControlEvent::ApprovalRequired {
+                                bus.emit_checked(ControlEvent::ApprovalRequired {
                                     session_id: self.control_session_id,
                                     request_id,
                                     tool,
@@ -2224,7 +2411,7 @@ impl AcpClient {
                                     selected_option: Some(picked),
                                     plan_approval: false,
                                     at: Utc::now(),
-                                });
+                                })?;
                             }
                         }
                         None => {
@@ -2271,7 +2458,7 @@ impl AcpClient {
                     );
                     drop(pending);
                     if let Some(bus) = &self.event_bus {
-                        bus.emit(ControlEvent::ApprovalRequired {
+                        bus.emit_checked(ControlEvent::ApprovalRequired {
                             session_id: self.control_session_id,
                             request_id,
                             tool,
@@ -2281,7 +2468,7 @@ impl AcpClient {
                             selected_option: None,
                             plan_approval: plan_extracted.is_some() || exit_plan_tool,
                             at: Utc::now(),
-                        });
+                        })?;
                         bus.emit_status(self.control_session_id, SessionStatus::WaitingApproval)
                             .await;
                     }
@@ -2471,7 +2658,7 @@ impl AcpClient {
         drop(pending);
 
         if let Some(bus) = &self.event_bus {
-            bus.emit(ControlEvent::ApprovalRequired {
+            bus.emit_checked(ControlEvent::ApprovalRequired {
                 session_id: self.control_session_id,
                 request_id,
                 tool: "exit_plan_mode".into(),
@@ -2481,7 +2668,7 @@ impl AcpClient {
                 selected_option: None,
                 plan_approval: true,
                 at: Utc::now(),
-            });
+            })?;
             bus.emit_status(self.control_session_id, SessionStatus::WaitingApproval)
                 .await;
         }
@@ -2535,7 +2722,7 @@ impl AcpClient {
         );
 
         if let Some(bus) = &self.event_bus {
-            bus.emit(ControlEvent::ApprovalRequired {
+            bus.emit_checked(ControlEvent::ApprovalRequired {
                 session_id: self.control_session_id,
                 request_id,
                 tool: "ask_user_question".into(),
@@ -2545,7 +2732,7 @@ impl AcpClient {
                 selected_option: None,
                 plan_approval: false,
                 at: Utc::now(),
-            });
+            })?;
             bus.emit_status(self.control_session_id, SessionStatus::WaitingApproval)
                 .await;
         }
@@ -2559,7 +2746,7 @@ impl AcpClient {
         option_id: Option<&str>,
         mut pending: PendingPermission,
     ) -> Result<()> {
-        let _dispatch = self.host_dispatch.lock().await;
+        // respond_approval_inner retains host_dispatch across this interview card.
         let stale = pending.host.as_ref().is_some_and(|action|
             action.epoch != self.turn_epoch.load(std::sync::atomic::Ordering::Acquire))
             || self.cancelled.load(std::sync::atomic::Ordering::Acquire);
@@ -2604,6 +2791,8 @@ impl AcpClient {
             return Ok(());
         }
 
+        let answer_target=format!("request:{} option:{}",request_id,option_id.unwrap_or("skip"));
+        let answer_operation=self.operation_intent("interview_answer",&answer_target)?;
         let oid = option_id.unwrap();
         let mut ask = pending.ask.take().ok_or_else(|| {
             AcpError::Protocol("ask_user_question pending missing ask state".into())
@@ -2622,6 +2811,7 @@ impl AcpClient {
             .unwrap_or_else(|| oid.to_string());
         ask.answers
             .insert(q.text.clone(), Value::String(label));
+        self.operation_outcome(answer_operation,"interview_answer",&answer_target,"answer_recorded")?;
 
         // Resolve this card in the UI.
         if let Some(bus) = &self.event_bus {
@@ -2647,7 +2837,7 @@ impl AcpClient {
                 .await
                 .insert(request_id.to_string(), pending);
             if let Some(bus) = &self.event_bus {
-                bus.emit(ControlEvent::ApprovalRequired {
+                bus.emit_checked(ControlEvent::ApprovalRequired {
                     session_id: self.control_session_id,
                     request_id: request_id.to_string(),
                     tool: "ask_user_question".into(),
@@ -2657,7 +2847,7 @@ impl AcpClient {
                     selected_option: None,
                     plan_approval: false,
                     at: Utc::now(),
-                });
+                })?;
                 bus.emit_status(self.control_session_id, SessionStatus::WaitingApproval)
                     .await;
             }
@@ -2806,33 +2996,12 @@ impl AcpClient {
             .and_then(|v| v.as_str())
             .ok_or_else(|| AcpError::Protocol("fs/read missing path".into()))?;
         let abs = self.resolve_sandbox_path(path)?;
-        use tokio::io::AsyncReadExt;
         let root = self.config.cwd.canonicalize()?;
         let mut file = tokio::fs::File::from_std(crate::workspace_fs::open(&root, &abs, false)?);
-        let mut content = String::new();
-        file.read_to_string(&mut content).await?;
-
-        // Optional line/limit (1-based line)
-        if let Some(line) = p.get("line").and_then(|v| v.as_u64()) {
-            let start = line.saturating_sub(1) as usize;
-            let lines: Vec<&str> = content.lines().collect();
-            let end = if let Some(limit) = p.get("limit").and_then(|v| v.as_u64()) {
-                (start + limit as usize).min(lines.len())
-            } else {
-                lines.len()
-            };
-            content = lines
-                .get(start..end)
-                .map(|s| s.join("\n"))
-                .unwrap_or_default();
-        }
-        // Cap huge files so we don't blow the agent context
-        const MAX: usize = 400_000;
-        if content.len() > MAX {
-            content.truncate(byte_prefix(&content, MAX).len());
-            content.push_str("\n…[truncated]");
-        }
-        Ok(content)
+        let line=p.get("line").and_then(Value::as_u64);
+        let limit=p.get("limit").and_then(Value::as_u64);
+        tokio::time::timeout(Duration::from_secs(3),read_bounded_text(&mut file,line,limit)).await
+            .map_err(|_|AcpError::Protocol("host text read exceeded its deadline; output coverage is unconfirmed".into()))?
     }
 
     async fn fs_write_text(&self, params: &Option<Value>) -> Result<()> {
@@ -2869,6 +3038,9 @@ impl AcpClient {
         let Some(bus) = &self.event_bus else {
             return;
         };
+        if bus.ensure_healthy().is_err() || self.cancelled.load(std::sync::atomic::Ordering::Acquire) {return;}
+        if self.native_runner_unconfined && !self.active_prompt.load(std::sync::atomic::Ordering::Acquire) && matches!(notif.method.as_str(),"session/update"|"session/updateNotification") {return;}
+        let bus=&NativePublication(bus);
         let sid = self.control_session_id;
         let params = notif.params.unwrap_or(Value::Null);
 
@@ -2997,6 +3169,7 @@ impl AcpClient {
     }
 
     async fn map_session_update(&self, bus: &EventBus, sid: Uuid, params: &Value) {
+        let bus=&NativePublication(bus);
         // ACP SessionNotification: { sessionId, update: SessionUpdate }
         // Some agents also flatten update fields onto params.
         let update = params.get("update").unwrap_or(params);
@@ -3546,6 +3719,85 @@ clarifying questions before planning; then produce a clear, step-by-step impleme
 (files to touch, order of changes, risks, how to verify). Do NOT modify files, run mutating \
 commands, or start implementing — end your turn after presenting the plan and wait for approval.";
 
+/// Accepted native output may not disappear behind an input-budget rejection.
+/// This facade uses the original pipeline; stale producers cannot poison its successor.
+struct NativePublication<'a>(&'a EventBus);
+impl std::ops::Deref for NativePublication<'_> {type Target=EventBus;fn deref(&self)->&EventBus {self.0}}
+impl NativePublication<'_> {
+    fn emit(&self,event:ControlEvent) {
+        if let Err(error)=self.0.emit_checked(event) {
+            if !matches!(error,grok_events::EventError::StaleRuntime|grok_events::EventError::Tombstoned) {
+                let _=self.0.mark_coverage_failed(format!("accepted native output could not be committed; completion coverage unconfirmed: {error}"));
+            }
+        }
+    }
+    fn emit_tool_call(&self,sid:Uuid,event:ToolCallEvent) {self.emit(ControlEvent::ToolCall{session_id:sid,event});}
+    fn emit_plan_update(&self,sid:Uuid,event:PlanUpdateEvent) {self.emit(ControlEvent::PlanUpdate{session_id:sid,event});}
+}
+
+const TEXT_RESPONSE_BYTES:usize=400_000;
+const TEXT_SCAN_BYTES:usize=4*1024*1024;
+const TEXT_LINE_BYTES:usize=512*1024;
+const TEXT_SCAN_LINES:u64=100_000;
+const TEXT_TRUNCATED:&str="\n…[truncated: response byte budget; later content was not scanned]";
+
+/// Fixed byte/line budgets; offsets never rely on an incompletely scanned prefix.
+async fn read_bounded_text(file:&mut (impl tokio::io::AsyncRead+Unpin),line:Option<u64>,limit:Option<u64>)->Result<String> {
+    use tokio::io::AsyncReadExt;
+    if line.is_none() {
+        let mut bytes=Vec::with_capacity(TEXT_RESPONSE_BYTES+5);
+        file.take((TEXT_RESPONSE_BYTES+5) as u64).read_to_end(&mut bytes).await?;
+        let truncated=bytes.len()>TEXT_RESPONSE_BYTES;
+        let valid=match std::str::from_utf8(&bytes) {
+            Ok(text)=>text,
+            Err(error) if truncated && error.error_len().is_none()=>std::str::from_utf8(&bytes[..error.valid_up_to()]).map_err(|e|AcpError::Protocol(format!("invalid UTF-8 text: {e}")))?,
+            Err(error)=>return Err(AcpError::Protocol(format!("invalid UTF-8 text: {error}"))),
+        };
+        let mut text=byte_prefix(valid,TEXT_RESPONSE_BYTES).to_string();
+        if truncated {text.truncate(byte_prefix(&text,TEXT_RESPONSE_BYTES-TEXT_TRUNCATED.len()).len());text.push_str(TEXT_TRUNCATED);}
+        return Ok(text);
+    }
+    let start=line.unwrap_or(1).max(1);
+    if start>TEXT_SCAN_LINES {return Err(AcpError::Protocol("requested line exceeds the 100000-line scan budget".into()));}
+    if limit==Some(0) {return Ok(String::new());}
+    let mut output=String::new();let mut pending=Vec::new();let mut chunk=[0u8;8192];
+    let mut scanned=0usize;let mut current=1u64;let mut selected=0u64;
+    loop {
+        let count=file.read(&mut chunk).await?;
+        if count==0 {
+            if !pending.is_empty() && current>=start {append_text_line(&mut output,&pending,&mut selected)?;}
+            return Ok(output);
+        }
+        scanned=scanned.saturating_add(count);
+        if scanned>TEXT_SCAN_BYTES {return Err(AcpError::Protocol("text read exceeded the 4MiB scan budget; requested line coverage is unconfirmed".into()));}
+        for part in chunk[..count].split_inclusive(|byte|*byte==b'\n') {
+            if current>TEXT_SCAN_LINES {return Err(AcpError::Protocol("text read exceeded the 100000-line scan budget; requested coverage is unconfirmed".into()));}
+            if pending.len().saturating_add(part.len())>TEXT_LINE_BYTES {return Err(AcpError::Protocol("text line exceeds the 512KiB line budget; requested line coverage is unconfirmed".into()));}
+            pending.extend_from_slice(part);
+            if part.last()==Some(&b'\n') {
+                pending.pop();if pending.last()==Some(&b'\r') {pending.pop();}
+                if current>=start {
+                    if append_text_line(&mut output,&pending,&mut selected)? {return Ok(output);}
+                    if limit.is_some_and(|limit|selected>=limit) {return Ok(output);}
+                }
+                pending.clear();current+=1;
+            }
+        }
+    }
+}
+fn append_text_line(output:&mut String,line:&[u8],selected:&mut u64)->Result<bool> {
+    let text=std::str::from_utf8(line).map_err(|e|AcpError::Protocol(format!("invalid UTF-8 text line: {e}")))?;
+    if *selected>0 {output.push('\n');}
+    let room=TEXT_RESPONSE_BYTES.saturating_sub(output.len());
+    output.push_str(byte_prefix(text,room));*selected+=1;
+    if text.len()>room || output.len()>TEXT_RESPONSE_BYTES {
+        output.truncate(byte_prefix(output,TEXT_RESPONSE_BYTES-TEXT_TRUNCATED.len()).len());
+        output.push_str(TEXT_TRUNCATED);
+        return Ok(true);
+    }
+    Ok(false)
+}
+
 /// Resolve `.` and `..` components lexically (no filesystem access).
 fn lexical_normalize(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
@@ -3791,6 +4043,293 @@ impl AcpClient {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn valid_native_tool_frame_with_oversized_projection_fails_output_coverage_before_completion() {
+        let fixture=tempfile::tempdir().unwrap();let store=Arc::new(grok_persistence::Persistence::open(fixture.path().join("events.sqlite")).unwrap());
+        let root=grok_events::shared_bus();root.install_sink(store.clone()).unwrap();let id=Uuid::new_v4();let scope=root.register_runtime(id).unwrap();let mut observed=root.subscribe_committed();
+        let client=AcpClient::mock_for_session(id,"generated",Some(scope.clone()));
+        let notification=JsonRpcNotification{jsonrpc:"2.0".into(),method:"session/update".into(),params:Some(json!({"update":{"sessionUpdate":"tool_call","toolCallId":"generated-tool","title":"generated fixture","rawInput":"\"".repeat(490000)}}))};
+        assert!(serde_json::to_vec(&notification).unwrap().len()<crate::transport::MAX_FRAME_BYTES);
+        client.handle_notification(notification).await;
+        assert!(!root.health().healthy);assert!(root.health().error.unwrap().contains("coverage unconfirmed"));
+        assert!(client.send_prompt("must preserve draft").await.is_err());
+        assert!(scope.emit_checked(ControlEvent::PromptFinished{session_id:id,stop_reason:"end_turn".into(),at:Utc::now()}).is_err());
+        let committed:Vec<_>=std::iter::from_fn(||observed.try_recv().ok()).collect();
+        assert!(!committed.iter().any(|envelope|matches!(envelope.event,ControlEvent::ToolCall{..}|ControlEvent::PromptFinished{..})));
+        assert!(!store.transcript_entries(id).unwrap().iter().any(|entry|entry.role=="tool"));
+    }
+
+    #[tokio::test]
+    async fn bounded_text_read_preserves_offsets_crlf_unicode_and_explicit_truncation() {
+        let fixture=tempfile::tempdir().unwrap();let path=fixture.path().join("text");
+        std::fs::write(&path,"first\r\n第二 😀\r\nthird\n").unwrap();
+        let client=AcpClient::mock_for_tests("generated",None);let mut config=client.config.clone();config.cwd=fixture.path().into();
+        let mut owned=client;Arc::get_mut(&mut owned).unwrap().config=config;
+        assert_eq!(owned.fs_read_text(&Some(json!({"path":"text","line":2,"limit":1}))).await.unwrap(),"第二 😀");
+        assert_eq!(owned.fs_read_text(&Some(json!({"path":"text","line":2}))).await.unwrap(),"第二 😀\nthird");
+        assert!(owned.fs_read_text(&Some(json!({"path":"text","line":8,"limit":1}))).await.unwrap().is_empty());
+        std::fs::write(&path,"😀".repeat(TEXT_RESPONSE_BYTES/4+10)).unwrap();
+        let text=owned.fs_read_text(&Some(json!({"path":"text"}))).await.unwrap();
+        assert!(text.len()<=TEXT_RESPONSE_BYTES);assert!(text.ends_with(TEXT_TRUNCATED));assert!(text.starts_with("😀"));
+    }
+
+    #[tokio::test]
+    async fn sparse_huge_files_and_oversized_lines_cannot_allocate_whole_file_or_fake_offset_coverage() {
+        let fixture=tempfile::tempdir().unwrap();let client=AcpClient::mock_for_tests("generated",None);let mut owned=client;
+        Arc::get_mut(&mut owned).unwrap().config.cwd=fixture.path().into();
+        let sparse=std::fs::File::create(fixture.path().join("sparse")).unwrap();sparse.set_len(512*1024*1024).unwrap();
+        let before=std::time::Instant::now();let prefix=owned.fs_read_text(&Some(json!({"path":"sparse"}))).await.unwrap();
+        assert_eq!(prefix.len(),TEXT_RESPONSE_BYTES);assert!(prefix.ends_with(TEXT_TRUNCATED));assert!(before.elapsed()<Duration::from_secs(2));
+        assert!(owned.fs_read_text(&Some(json!({"path":"sparse","line":2,"limit":1}))).await.unwrap_err().to_string().contains("line budget"));
+        assert!(owned.fs_read_text(&Some(json!({"path":"sparse","line":100001}))).await.unwrap_err().to_string().contains("line scan budget"));
+        std::fs::write(fixture.path().join("many-lines"),"x\n".repeat(TEXT_SCAN_LINES as usize+1)).unwrap();
+        assert!(owned.fs_read_text(&Some(json!({"path":"many-lines","line":1}))).await.unwrap_err().to_string().contains("scan budget"));
+    }
+
+    struct InjectedFailureSink {store:Arc<grok_persistence::Persistence>,fail:Arc<std::sync::atomic::AtomicBool>}
+    impl grok_events::EventSink for InjectedFailureSink {
+        fn identity(&self)->grok_events::StoreIdentity {grok_events::EventSink::identity(self.store.as_ref())}
+        fn commit(&self,origin:&grok_events::EventOrigin,event:&ControlEvent)->grok_events::Result<grok_events::CommittedEvent> {
+            if self.fail.load(std::sync::atomic::Ordering::Acquire) {return Err(grok_events::EventError::Sink("generated commit failure".into()));}
+            grok_events::EventSink::commit(self.store.as_ref(),origin,event)
+        }
+    }
+
+    struct RejectPreEffectTelemetry {store:Arc<grok_persistence::Persistence>,prompt:bool}
+    impl grok_events::EventSink for RejectPreEffectTelemetry {
+        fn identity(&self)->grok_events::StoreIdentity {grok_events::EventSink::identity(self.store.as_ref())}
+        fn commit(&self,origin:&grok_events::EventOrigin,event:&ControlEvent)->grok_events::Result<grok_events::CommittedEvent> {
+            let rejected=if self.prompt {matches!(event,ControlEvent::Raw{payload,..} if payload.get("line").and_then(Value::as_str).is_some_and(|line|line.starts_with("→ session/prompt")))}
+                else {matches!(event,ControlEvent::ToolCall{event,..} if event.status==ToolCallStatus::Running)};
+            if rejected {return Err(grok_events::EventError::Sink("generated telemetry commit failure before effect".into()));}
+            grok_events::EventSink::commit(self.store.as_ref(),origin,event)
+        }
+    }
+
+    struct RejectPolicyPublication {store:Arc<grok_persistence::Persistence>,outcome:bool}
+    impl grok_events::EventSink for RejectPolicyPublication {
+        fn identity(&self)->grok_events::StoreIdentity {grok_events::EventSink::identity(self.store.as_ref())}
+        fn commit(&self,origin:&grok_events::EventOrigin,event:&ControlEvent)->grok_events::Result<grok_events::CommittedEvent> {
+            let rejected=match event {
+                ControlEvent::HostOperationIntent{kind,..}=>!self.outcome && matches!(kind.as_str(),"session_allow_rule"|"approval_mode_change"|"native_mode_projection"|"host_exact_allow"),
+                ControlEvent::HostOperationOutcome{kind,..}=>self.outcome && matches!(kind.as_str(),"session_allow_rule"|"approval_mode_change"|"native_mode_projection"|"host_exact_allow"),
+                _=>false,
+            };
+            if rejected {return Err(grok_events::EventError::Sink("generated policy publication failure".into()));}
+            grok_events::EventSink::commit(self.store.as_ref(),origin,event)
+        }
+    }
+
+    #[tokio::test]
+    async fn policy_publication_failure_keeps_rules_and_approval_mode_unchanged() {
+        for outcome in [false,true] {
+            for action in ["allow","mode","native_mode"] {
+                let fixture=tempfile::tempdir().unwrap();let store=Arc::new(grok_persistence::Persistence::open(fixture.path().join("policy.sqlite")).unwrap());
+                let root=grok_events::shared_bus();root.install_sink(Arc::new(RejectPolicyPublication{store:store.clone(),outcome})).unwrap();
+                let id=Uuid::new_v4();let scope=root.register_runtime(id).unwrap();let client=AcpClient::mock_for_session(id,"generated",Some(scope));
+                let result=match action {"allow"=>client.add_session_allow_rule("Write(*)".into()).await,"mode"=>client.set_approval_mode(ApprovalMode::Yolo).await,_=>client.set_mode("default").await};
+                assert!(result.is_err());assert!(!root.health().healthy);
+                assert!(client.session_allow_rules().await.is_empty());assert_eq!(client.approval_mode().await,ApprovalMode::Ask);
+                assert!(!client.always_approve.load(std::sync::atomic::Ordering::Relaxed));assert!(client.current_mode.read().await.is_none());
+                assert!(!store.event_snapshot(Some(id),128).unwrap().operations.iter().any(|record|record.outcome_seq.is_some()));
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_always_allow_publication_never_retains_a_future_host_grant() {
+        for outcome in [false,true] {
+            let fixture=tempfile::tempdir().unwrap();let store=Arc::new(grok_persistence::Persistence::open(fixture.path().join("policy.sqlite")).unwrap());
+            let root=grok_events::shared_bus();root.install_sink(Arc::new(RejectPolicyPublication{store,outcome})).unwrap();
+            let(mut client,_wire,mut peer)=fake_policy_client(fixture.path(),ApprovalMode::Ask,false).await;
+            let id=client.control_session_id;Arc::get_mut(&mut client).unwrap().event_bus=Some(root.register_runtime(id).unwrap());
+            client.handle_agent_request(host_write(json!("generated"),"reviewed-once","generated fixture"),0).await.unwrap();
+            assert!(client.respond_approval(&id_key(&json!("generated")),Some("allow_always")).await.is_err());
+            // The individually reviewed effect happened; failure cannot authorize future ones.
+            assert_eq!(std::fs::read_to_string(fixture.path().join("reviewed-once")).unwrap(),"generated fixture");
+            assert!(client.host_exact_allow.read().await.is_empty());assert!(!root.health().healthy);
+            peer.kill().await.unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_pre_effect_telemetry_never_dispatches_prompt_or_writes_file() {
+        for prompt in [false,true] {
+            let fixture=tempfile::tempdir().unwrap();
+            let store=Arc::new(grok_persistence::Persistence::open(fixture.path().join("events.sqlite")).unwrap());
+            let root=grok_events::shared_bus();root.install_sink(Arc::new(RejectPreEffectTelemetry{store,prompt})).unwrap();
+            let (mut client,mut wire,mut peer)=fake_policy_client(fixture.path(),ApprovalMode::Yolo,false).await;
+            let id=client.control_session_id;Arc::get_mut(&mut client).unwrap().event_bus=Some(root.register_runtime(id).unwrap());
+            if prompt {
+                assert!(client.send_prompt("generated fixture prompt").await.is_err());
+                assert!(tokio::time::timeout(Duration::from_millis(60),wire.recv()).await.is_err());
+            } else {
+                client.handle_agent_request(host_write(json!("write"),"never-created","fixture"),0).await.unwrap();
+                assert!(wire_response(&mut wire).await.get("error").is_some());
+                assert!(!fixture.path().join("never-created").exists());
+            }
+            assert!(!root.health().healthy);peer.kill().await.unwrap();
+        }
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn approval_claim_remains_pending_until_dispatch_and_fences_completion_and_next_prompt() {
+        let fixture=tempfile::tempdir().unwrap();let(client,mut wire,mut peer)=fake_policy_client(fixture.path(),ApprovalMode::Ask,false).await;
+        let request=id_key(&json!("reused-native-id"));
+        client.handle_agent_request(host_write(json!("reused-native-id"),"first","first only"),0).await.unwrap();
+        let gate=client.host_dispatch.lock().await;
+        let (ready,sent)=tokio::sync::oneshot::channel();let answer_client=client.clone();let answered=request.clone();
+        let answer=tokio::spawn(async move {ready.send(()).unwrap();answer_client.respond_approval(&answered,Some("allow_once")).await});
+        sent.await.unwrap();tokio::task::yield_now().await;
+        // Completion and new-prompt admission inspect this same map under the gate.
+        assert!(client.pending_permissions.lock().await.contains_key(&request));
+        assert!(!answer.is_finished());assert!(!fixture.path().join("first").exists());
+        assert_eq!(client.turn_epoch.load(std::sync::atomic::Ordering::Acquire),0);
+        drop(gate);answer.await.unwrap().unwrap();
+        assert_eq!(wire_response(&mut wire).await["id"],json!("reused-native-id"));
+        assert_eq!(std::fs::read_to_string(fixture.path().join("first")).unwrap(),"first only");
+        client.turn_epoch.store(1,std::sync::atomic::Ordering::Release);
+        client.handle_agent_request(host_write(json!("reused-native-id"),"second","second draft"),1).await.unwrap();
+        assert!(client.pending_permissions.lock().await.contains_key(&request));
+        assert!(!fixture.path().join("second").exists());
+        assert!(tokio::time::timeout(Duration::from_millis(60),wire.recv()).await.is_err());
+        peer.kill().await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn scoped_commit_failure_prevents_prompt_wire_grant_and_host_effect() {
+        let fixture=tempfile::tempdir().unwrap();
+        let store=Arc::new(grok_persistence::Persistence::open(fixture.path().join("events.sqlite")).unwrap());
+        let failed=Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let root=grok_events::shared_bus();root.install_sink(Arc::new(InjectedFailureSink{store,fail:failed.clone()})).unwrap();
+        let (mut client,mut wire,mut peer)=fake_policy_client(fixture.path(),ApprovalMode::Ask,false).await;
+        let id=client.control_session_id;let bus=root.register_runtime(id).unwrap();
+        Arc::get_mut(&mut client).unwrap().event_bus=Some(bus);
+        client.handle_agent_request(host_write(json!("parked"),"written","never"),0).await.unwrap();
+        assert!(client.pending_permissions.lock().await.contains_key(&id_key(&json!("parked"))));
+        failed.store(true,std::sync::atomic::Ordering::Release);
+        assert!(client.respond_approval(&id_key(&json!("parked")),Some("allow_once")).await.is_err());
+        assert!(!fixture.path().join("written").exists());
+        assert!(client.send_prompt("generated private-free prompt").await.is_err());
+        assert!(!root.health().healthy);
+        // A host error response is allowed; no grant or prompt may be on wire.
+        let response=wire_response(&mut wire).await;
+        assert!(response.get("error").is_some());
+        assert!(tokio::time::timeout(Duration::from_millis(60),wire.recv()).await.is_err());
+        // Unhealthy durability cannot suppress protective cancellation/terminal cleanup.
+        assert!(client.cancel().await.is_err());
+        assert!(client.cancelled.load(std::sync::atomic::Ordering::Acquire));
+        peer.kill().await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prompt_is_busy_through_notification_barrier_and_late_cancelled_completion_is_inert() {
+        let fixture=tempfile::tempdir().unwrap();
+        let root=grok_events::shared_bus();let mut events=root.subscribe_committed();
+        let (mut client,mut wire,mut peer)=fake_policy_client(fixture.path(),ApprovalMode::Ask,false).await;
+        let id=client.control_session_id;let scope=root.register_runtime(id).unwrap();
+        Arc::get_mut(&mut client).unwrap().event_bus=Some(scope.clone());
+        client.send_prompt("first generated turn").await.unwrap();
+        assert_eq!(wire_response(&mut wire).await["method"],"session/prompt");
+        assert!(client.send_prompt("second draft").await.is_err());
+        assert!(tokio::time::timeout(Duration::from_millis(60),wire.recv()).await.is_err());
+        client.cancel().await.unwrap();
+        scope.retire_runtime(scope.runtime_id().unwrap()).unwrap();
+        client.handle_notification(JsonRpcNotification{jsonrpc:"2.0".into(),method:"session/update".into(),params:Some(json!({"update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"late retired output"}}}))}).await;
+        peer.kill().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        let committed:Vec<_>=std::iter::from_fn(||events.try_recv().ok()).collect();
+        assert_eq!(committed.iter().filter(|event|matches!(event.event,ControlEvent::UserMessage{..})).count(),1);
+        assert!(!committed.iter().any(|event|matches!(event.event,ControlEvent::PromptFinished{..})));
+        assert!(!committed.iter().any(|event|matches!(&event.event,ControlEvent::AgentMessage{text,..} if text.contains("late retired"))));
+    }
+
+    struct FailSecondOutcome {store:Arc<grok_persistence::Persistence>}
+    impl grok_events::EventSink for FailSecondOutcome {
+        fn identity(&self)->grok_events::StoreIdentity {grok_events::EventSink::identity(self.store.as_ref())}
+        fn commit(&self,origin:&grok_events::EventOrigin,event:&ControlEvent)->grok_events::Result<grok_events::CommittedEvent> {
+            if matches!(event,ControlEvent::HostOperationOutcome{target,..} if target.contains("second-file")) {return Err(grok_events::EventError::Sink("generated failure after actual second effect".into()));}
+            grok_events::EventSink::commit(self.store.as_ref(),origin,event)
+        }
+    }
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn recovery_distinguishes_same_kind_completed_effect_and_unrecorded_outcome() {
+        let fixture=tempfile::tempdir().unwrap();let path=fixture.path().join("events.sqlite");
+        let store=Arc::new(grok_persistence::Persistence::open(&path).unwrap());
+        let root=grok_events::shared_bus();root.install_sink(Arc::new(FailSecondOutcome{store:store.clone()})).unwrap();
+        let(mut client,mut wire,mut peer)=fake_policy_client(fixture.path(),ApprovalMode::Yolo,false).await;
+        let id=client.control_session_id;Arc::get_mut(&mut client).unwrap().event_bus=Some(root.register_runtime(id).unwrap());
+        client.handle_agent_request(host_write(json!("first"),"first-file","first effect"),0).await.unwrap();
+        assert!(wire_response(&mut wire).await.get("result").is_some());
+        client.handle_agent_request(host_write(json!("second"),"second-file","second effect"),0).await.unwrap();
+        assert!(wire_response(&mut wire).await.get("error").is_some());
+        assert_eq!(std::fs::read_to_string(fixture.path().join("second-file")).unwrap(),"second effect");
+        assert!(!root.health().healthy);
+        let reopened=grok_persistence::Persistence::open(&path).unwrap();let snapshot=reopened.event_snapshot(Some(id),128).unwrap();
+        let writes:Vec<_>=snapshot.operations.iter().filter(|operation|operation.kind=="fs/write_text_file").collect();assert_eq!(writes.len(),2);
+        let first=writes.iter().find(|operation|operation.target.contains("first-file")).unwrap();let second=writes.iter().find(|operation|operation.target.contains("second-file")).unwrap();
+        assert_ne!(first.operation_id,second.operation_id);assert_eq!(first.result.as_deref(),Some("completed"));assert!(first.outcome_seq.is_some());
+        assert!(second.outcome_seq.is_none() && second.result.is_none());
+        assert!(client.send_prompt("must remain blocked").await.is_err());peer.kill().await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn prompt_completion_waits_ordered_output_before_admitting_another_turn() {
+        let root=grok_events::shared_bus();let mut committed=root.subscribe_committed();
+        let id=Uuid::new_v4();let scope=root.register_runtime(id).unwrap();
+        let mut peer=Command::new("/usr/bin/python3").args(["-u","-c",r#"import sys,json
+for line in sys.stdin:
+ r=json.loads(line)
+ if r.get('method')=='session/prompt':
+  print(json.dumps({'jsonrpc':'2.0','method':'session/update','params':{'update':{'sessionUpdate':'agent_message_chunk','content':{'type':'text','text':'ordered generated output'}}}}),flush=True)
+  print(json.dumps({'jsonrpc':'2.0','id':r['id'],'result':{'stopReason':'end_turn'}}),flush=True)
+"#]).stdin(Stdio::piped()).stdout(Stdio::piped()).kill_on_drop(true).spawn().unwrap();
+        let(tx,rx)=tokio::sync::mpsc::unbounded_channel();let(requests,_)=tokio::sync::mpsc::unbounded_channel();
+        let mut client=AcpClient::mock_for_session(id,"generated-barrier",Some(scope));
+        let transport=NdjsonTransport::new_scoped(peer.stdin.take().unwrap(),peer.stdout.take().unwrap(),tx,requests,None,Some(client.turn_epoch.clone()));
+        Arc::get_mut(&mut client).unwrap().notification_rx=Mutex::new(Some(rx));*client.transport.write().await=Some(transport);
+        client.send_prompt("first generated turn").await.unwrap();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        assert!(client.active_prompt.load(std::sync::atomic::Ordering::Acquire));assert!(client.send_prompt("second draft").await.is_err());
+        let handling=client.clone();let event_loop=tokio::spawn(async move{handling.run_event_loop().await});
+        tokio::time::timeout(Duration::from_secs(3),async{while client.active_prompt.load(std::sync::atomic::Ordering::Acquire){tokio::task::yield_now().await;}}).await.unwrap();
+        let events:Vec<_>=std::iter::from_fn(||committed.try_recv().ok()).collect();
+        let output=events.iter().position(|event|matches!(&event.event,ControlEvent::AgentMessage{text,..} if text=="ordered generated output")).unwrap();
+        let finish=events.iter().position(|event|matches!(event.event,ControlEvent::PromptFinished{..})).unwrap();assert!(output<finish);
+        assert_eq!(events.iter().filter(|event|matches!(event.event,ControlEvent::UserMessage{..})).count(),1);
+        client.cancel().await.unwrap();event_loop.abort();peer.kill().await.unwrap();
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn live_controls_bind_runtime_and_turn_and_old_card_cannot_consume_reused_request_id() {
+        let fixture=tempfile::tempdir().unwrap();let root=grok_events::shared_bus();
+        let(mut client,mut wire,mut peer)=fake_policy_client(fixture.path(),ApprovalMode::Ask,false).await;
+        let id=client.control_session_id;let scope=root.register_runtime(id).unwrap();let runtime=scope.runtime_id().unwrap();
+        Arc::get_mut(&mut client).unwrap().event_bus=Some(scope);
+        client.handle_agent_request(host_write(json!("same-id"),"first-file","first"),0).await.unwrap();
+        let cards=client.pending_approvals().await.unwrap();assert_eq!(cards.len(),1);let old=&cards[0];
+        assert!(client.respond_approval_scoped(Uuid::new_v4(),old.host_epoch,&old.request_id,Some("allow_once")).await.is_err());
+        assert_eq!(client.pending_approvals().await.unwrap().len(),1);
+        client.cancel().await.unwrap();assert!(wire_response(&mut wire).await.get("error").is_some());
+        assert!(client.pending_approvals().await.unwrap().is_empty());
+        client.send_prompt("new generated turn").await.unwrap();assert_eq!(wire_response(&mut wire).await["method"],"session/prompt");
+        let epoch=client.turn_epoch.load(std::sync::atomic::Ordering::Acquire);
+        client.handle_agent_request(host_write(json!("same-id"),"second-file","second"),epoch).await.unwrap();
+        assert!(client.respond_approval_scoped(runtime,old.host_epoch,&old.request_id,Some("allow_once")).await.is_err());
+        let current=client.pending_approvals().await.unwrap();assert_eq!(current.len(),1);assert_eq!(current[0].host_epoch,epoch);
+        client.respond_approval_scoped(runtime,epoch,&current[0].request_id,Some("allow_once")).await.unwrap();
+        assert!(wire_response(&mut wire).await.get("result").is_some());assert!(!fixture.path().join("first-file").exists());assert_eq!(std::fs::read_to_string(fixture.path().join("second-file")).unwrap(),"second");
+        client.cancel().await.unwrap();peer.kill().await.unwrap();
+    }
+
     #[cfg(unix)]
     async fn fake_policy_client(cwd: &Path, mode: ApprovalMode, readonly: bool) ->
         (Arc<AcpClient>, tokio::sync::mpsc::UnboundedReceiver<NotificationEvent>, Child) {
@@ -3825,7 +4364,7 @@ mod tests {
 
     #[cfg(unix)]
     fn host_write(id: Value, path: &str, content: &str) -> IncomingAgentRequest {
-        IncomingAgentRequest { id, method:"fs/write_text_file".into(),
+        IncomingAgentRequest { host_epoch:None, id, method:"fs/write_text_file".into(),
             params:Some(json!({"path":path,"content":content})) }
     }
 
@@ -3836,16 +4375,16 @@ mod tests {
             let fixture = tempfile::tempdir().unwrap();
             std::fs::write(fixture.path().join("read.txt"), "fixture").unwrap();
             let (client, mut wire, _peer) = fake_policy_client(fixture.path(), mode, readonly).await;
-            client.add_session_allow_rule("*".into()).await;
+            client.add_session_allow_rule("*".into()).await.unwrap();
             client.handle_agent_request(host_write(json!(7), "new.txt", "mutated"), 0).await.unwrap();
             let response = wire_response(&mut wire).await;
             assert_eq!(response["id"], 7);
             assert!(response.get("error").is_some());
             assert!(!fixture.path().join("new.txt").exists());
-            client.handle_agent_request(IncomingAgentRequest { id:json!("terminal"), method:"terminal/create".into(),
+            client.handle_agent_request(IncomingAgentRequest { host_epoch:None, id:json!("terminal"), method:"terminal/create".into(),
                 params:Some(json!({"command":"touch new.txt"})) }, 0).await.unwrap();
             assert!(wire_response(&mut wire).await.get("error").is_some());
-            client.handle_agent_request(IncomingAgentRequest { id:json!("read"), method:"fs/read_text_file".into(),
+            client.handle_agent_request(IncomingAgentRequest { host_epoch:None, id:json!("read"), method:"fs/read_text_file".into(),
                 params:Some(json!({"path":"read.txt"})) }, 0).await.unwrap();
             assert_eq!(wire_response(&mut wire).await["result"]["content"], "fixture");
         }
@@ -3944,14 +4483,14 @@ mod tests {
         let (client, mut wire, _peer) = fake_policy_client(fixture.path(), ApprovalMode::Ask, false).await;
         let params = json!({"toolCall":{"toolName":"Write", "rawInput":{"path":"file"}},
             "options":[{"optionId":"once","kind":"allow_once","name":"Allow"}]});
-        client.handle_agent_request(IncomingAgentRequest { id:json!("native"), method:"session/request_permission".into(), params:Some(params) }, 0).await.unwrap();
+        client.handle_agent_request(IncomingAgentRequest { host_epoch:None, id:json!("native"), method:"session/request_permission".into(), params:Some(params) }, 0).await.unwrap();
         let gate = client.host_dispatch.lock().await;
-        let answering = client.clone();
-        let answer = tokio::spawn(async move { answering.respond_approval(&id_key(&json!("native")), Some("once")).await });
-        // The response has left the pending map but cannot grant on the wire.
-        tokio::time::timeout(Duration::from_secs(2), async {
-            while !client.pending_permissions.lock().await.is_empty() { tokio::task::yield_now().await; }
-        }).await.unwrap();
+        let answering = client.clone();let (ready,started)=tokio::sync::oneshot::channel();
+        let answer = tokio::spawn(async move {ready.send(()).unwrap();answering.respond_approval(&id_key(&json!("native")), Some("once")).await });
+        started.await.unwrap();tokio::task::yield_now().await;
+        // Claim remains parked until the response owns the authority gate.
+        assert!(client.pending_permissions.lock().await.contains_key(&id_key(&json!("native"))));
+        assert!(!answer.is_finished());
         let cancelling = client.clone();
         let cancel = tokio::spawn(async move { cancelling.cancel().await });
         tokio::time::timeout(Duration::from_secs(2), async {
@@ -4007,7 +4546,7 @@ mod tests {
         let (client, mut wire, _peer) = fake_policy_client(fixture.path(), ApprovalMode::Yolo, true).await;
         let params = json!({"toolCall":{"toolName":"ExitPlanMode", "rawInput":{"plan":"## Steps\nInspect generated source"}},
             "options":[{"optionId":"native-once","kind":"allow_once","name":"Approve"}]});
-        client.handle_agent_request(IncomingAgentRequest { id:json!("proposal"), method:"session/request_permission".into(), params:Some(params) }, 0).await.unwrap();
+        client.handle_agent_request(IncomingAgentRequest { host_epoch:None, id:json!("proposal"), method:"session/request_permission".into(), params:Some(params) }, 0).await.unwrap();
         assert!(client.pending_permissions.lock().await.contains_key(&id_key(&json!("proposal"))));
         client.respond_approval(&id_key(&json!("proposal")), Some("native-once")).await.unwrap();
         assert_eq!(wire_response(&mut wire).await["result"]["outcome"]["optionId"], "native-once");
@@ -4049,7 +4588,7 @@ mod tests {
     async fn native_plan_extension_cannot_bypass_deny_epoch_or_cancellation() {
         let fixture = tempfile::tempdir().unwrap();
         let (client, mut wire, _peer) = fake_policy_client(fixture.path(), ApprovalMode::Plan, true).await;
-        let request = |id:&str| IncomingAgentRequest { id:json!(id), method:"_x.ai/exit_plan_mode".into(),
+        let request = |id:&str| IncomingAgentRequest { host_epoch:None, id:json!(id), method:"_x.ai/exit_plan_mode".into(),
             params:Some(json!({"plan":"Review generated fixture"})) };
         client.handle_agent_request(request("approve"), 0).await.unwrap();
         assert!(client.pending_permissions.lock().await.contains_key(&id_key(&json!("approve"))));
@@ -4116,6 +4655,8 @@ mod tests {
         client.handle_agent_request(host_write(json!("forged-memory-authority"), "file", "no"), 1).await.unwrap();
         assert!(wire_response(&mut wire).await.get("error").is_some());
         assert!(!fixture.path().join("file").exists());
+        assert!(client.send_prompt("Continue inspecting.").await.is_err());
+        client.cancel().await.unwrap();
         client.send_prompt("Continue inspecting.").await.unwrap();
         let request = wire_response(&mut wire).await;
         assert_eq!(request["params"]["prompt"][0]["text"], "Continue inspecting.");
@@ -4251,7 +4792,7 @@ mod tests {
         let fence = tokio::time::timeout(Duration::from_secs(3), wire.recv()).await.unwrap().unwrap();
         match fence {
             NotificationEvent::Fence(ack) => ack.send(()).unwrap(),
-            NotificationEvent::Notification(_) => panic!("unexpected fake notification"),
+            NotificationEvent::Notification(_) | NotificationEvent::ScopedNotification(..) => panic!("unexpected fake notification"),
         }
         while let Ok(event) = events.try_recv() {
             assert!(!matches!(event, ControlEvent::PromptFinished { .. }
