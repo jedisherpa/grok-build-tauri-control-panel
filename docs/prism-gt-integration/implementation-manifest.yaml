@@ -1,0 +1,82 @@
+repository: jedisherpa/grok-build-tauri-control-panel
+production_branch: main
+baseline_commit: 994e1e39f39119998bb9a4a3c047128375eb7067
+target_role: desktop_control_panel
+workstreams:
+- name: documentation-parity
+  status: active
+  owner: jedisherpa
+- name: telemetry-integration
+  status: proposed
+  owner: jedisherpa
+milestones:
+- name: generate-canonical-package
+  status: completed
+- name: independent-audit
+  status: pending
+- name: draft-pull-request
+  status: pending
+dependencies:
+- name: grok-build-cli
+  type: external-binary
+  required: true
+contracts:
+- name: agent-client-protocol
+  type: observed
+  protocol: not_evidenced_from_frozen_source
+  owner: not_evidenced_from_frozen_source
+  producer:
+  - not_evidenced_from_frozen_source
+  consumer:
+  - not_evidenced_from_frozen_source
+  protocol_or_payload: not_evidenced_from_frozen_source
+  security: not_evidenced_from_frozen_source
+  errors: not_evidenced_from_frozen_source
+  versioning: not_evidenced_from_frozen_source
+  approval_boundary: owner_decision_required
+- name: prism-gt-telemetry
+  type: proposed
+  protocol: not_evidenced_from_frozen_source
+  owner_decision_gate: pending
+  owner: pending
+  producer:
+  - not_evidenced_from_frozen_source
+  consumer:
+  - not_evidenced_from_frozen_source
+  protocol_or_payload: not_evidenced_from_frozen_source
+  security: not_evidenced_from_frozen_source
+  errors: not_evidenced_from_frozen_source
+  versioning: not_evidenced_from_frozen_source
+  approval_boundary: pending
+test_gates:
+- command: cargo check --workspace
+  status: required
+- command: cargo test --workspace
+  status: required
+- command: cargo clippy --workspace --all-targets -- -D warnings
+  status: required
+approval_gates:
+- role: independent-auditor
+  status: pending
+- role: repository-owner
+  status: pending
+central_integration_repository: https://github.com/jedisherpa/Prism-GT-Broadcast-Integration/tree/7accbf747151db8412dcec325336ef64b53d93f9
+evidence_profile:
+  role: desktop-control-panel
+  canonical_repository_state: repository-docs/jedisherpa__grok-build-tauri-control-panel
+  branch: main
+  commit: 994e1e39f39119998bb9a4a3c047128375eb7067
+  package_files:
+  - docs/prism-gt-integration/README.md
+  - docs/prism-gt-integration/CURRENT_STATE.md
+  - docs/prism-gt-integration/ROLE_IN_ECOSYSTEM.md
+  - docs/prism-gt-integration/TARGET_ARCHITECTURE.md
+  - docs/prism-gt-integration/INTEGRATION_CONTRACTS.md
+  - docs/prism-gt-integration/IMPLEMENTATION_PLAN.md
+  - docs/prism-gt-integration/TEST_AND_ACCEPTANCE_PLAN.md
+  - docs/prism-gt-integration/RISKS_AND_OPEN_QUESTIONS.md
+  - docs/prism-gt-integration/AGENT_HANDOFF.md
+  - docs/prism-gt-integration/implementation-manifest.yaml
+  - docs/prism-gt-integration/generation-metadata.json
+  production_branch: main
+  baseline_commit: 994e1e39f39119998bb9a4a3c047128375eb7067

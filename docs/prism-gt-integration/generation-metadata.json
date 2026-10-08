@@ -1,0 +1,167 @@
+{
+  "approval_status": "not_approved",
+  "attempt": 1,
+  "audit_status": "passed",
+  "audit_submission_history": [
+    {
+      "prior_audit_status": "not_previously_audited",
+      "stage": "evidence",
+      "submitted_at": "2026-07-17T11:17:28.019435+00:00"
+    },
+    {
+      "stage": "approval",
+      "submitted_at": "2026-07-17T11:22:15.705945+00:00",
+      "prior_audit_status": "pending_final_approval"
+    }
+  ],
+  "baseline_commit": "994e1e39f39119998bb9a4a3c047128375eb7067",
+  "completed_at": "2026-07-17T11:17:21.886355+00:00",
+  "correction_history": [
+    {
+      "author_notes": "All blocking and high-severity findings have been resolved. The package map now correctly lists all 11 files, including generation-metadata.json. Implementation claims have been downgraded to match the provided source excerpts, removing unsupported assertions of robustness and verified runtime behavior. Observed test commands are now explicitly labeled as unexecuted instructions. The use of planning documents and preparation guides as implementation evidence has been corrected across all files. Contracts have been expanded to include all required fields and accurately reflect their unverified/proposed status. The implementation plan has been revised to clearly separate the documentation-only draft PR boundary from future out-of-scope code integration work.",
+      "completed_at": "2026-07-17T11:21:38.389720+00:00",
+      "evidence_audit_sha256": "55e79342c6b82e813970995465f5083352e3fd4264aa61fb201f804ed204e40b",
+      "evidence_view": {
+        "chars": 189099,
+        "cited_path_count": 0,
+        "included_section_count": 0,
+        "kind": "full_frozen_packet",
+        "missing_cited_paths": [],
+        "sha256": "5317c8552aac26dd0e6e726cb9c54e59c1dc04a39e8ed5f2fb0e0ba2439e022c"
+      },
+      "finish_reason": "stop",
+      "input_package_sha256": "dc686194808885424735d132f92839a57a87db6b1d32c632b6ceb21c825ecfc3",
+      "model_requested": "gemini-3.1-pro-preview",
+      "model_returned": "gemini-3.1-pro-preview",
+      "model_route": "sandbox_openai_compatible_proxy_chat_completions",
+      "output_chars": 37382,
+      "output_sha256": "dae0b50b1a220c2c626b3f513f9371d1d87ea72abd0faccdb02e3fb9fdc67b40",
+      "prompt_chars": 275330,
+      "prompt_sha256": "c2111b94eb76a124dfba571ba304475ce5d3667786bced0274a78b7b27246c1d",
+      "provider": "Manus built-in LLM proxy",
+      "reasoning_effort": "default",
+      "request_id": "chatcmpl-llm-router-openai",
+      "source_packet_decoding": {
+        "codec": "utf-8",
+        "errors": "replace",
+        "replacement_char_count": 39931
+      },
+      "source_packet_sha256": "81e7e19fd8a3c569daf6106c6c638ab227539bd1b165bdf560f5fa6c7279ed12",
+      "stage": "evidence_audit_correction",
+      "started_at": "2026-07-17T11:19:36.975028+00:00",
+      "usage": {
+        "completion_tokens": 10745,
+        "completion_tokens_details": {
+          "accepted_prediction_tokens": 0,
+          "audio_tokens": null,
+          "completion_tokens_modality": {
+            "text": 10745
+          },
+          "reasoning_tokens": 4887,
+          "rejected_prediction_tokens": 0
+        },
+        "prompt_tokens": 122881,
+        "prompt_tokens_details": {
+          "audio_tokens": null,
+          "cached_tokens": null,
+          "prompt_tokens_modality": {
+            "text": 122881
+          }
+        },
+        "total_tokens": 133626,
+        "traffic_type": "provisioned_throughput"
+      }
+    }
+  ],
+  "files": [
+    "README.md",
+    "CURRENT_STATE.md",
+    "ROLE_IN_ECOSYSTEM.md",
+    "TARGET_ARCHITECTURE.md",
+    "INTEGRATION_CONTRACTS.md",
+    "IMPLEMENTATION_PLAN.md",
+    "TEST_AND_ACCEPTANCE_PLAN.md",
+    "RISKS_AND_OPEN_QUESTIONS.md",
+    "AGENT_HANDOFF.md",
+    "implementation-manifest.yaml",
+    "generation-metadata.json"
+  ],
+  "finish_reason": "stop",
+  "hash_input_files": [
+    "README.md",
+    "CURRENT_STATE.md",
+    "ROLE_IN_ECOSYSTEM.md",
+    "TARGET_ARCHITECTURE.md",
+    "INTEGRATION_CONTRACTS.md",
+    "IMPLEMENTATION_PLAN.md",
+    "TEST_AND_ACCEPTANCE_PLAN.md",
+    "RISKS_AND_OPEN_QUESTIONS.md",
+    "AGENT_HANDOFF.md",
+    "implementation-manifest.yaml"
+  ],
+  "identifier": "jedisherpa__grok-build-tauri-control-panel",
+  "identity": "repository-docs-jedisherpa__grok-build-tauri-control-panel",
+  "independence_control": "The author sees only frozen source evidence, the package specification, governance, and the prior source audit. A different model family performs evidence audit and final approval.",
+  "model_requested": "gemini-3.1-pro-preview",
+  "model_returned": "gemini-3.1-pro-preview",
+  "model_route": "project_scoped_forge_openai_compatible_chat_completions",
+  "output_chars": 26693,
+  "output_dir": "repository-docs/jedisherpa__grok-build-tauri-control-panel",
+  "output_sha256": "0e47a6e828b0280dc59f7e03de49e2e130a9fc0dc35b1fd4bd541a305fdadf2d",
+  "package_files": [
+    "README.md",
+    "CURRENT_STATE.md",
+    "ROLE_IN_ECOSYSTEM.md",
+    "TARGET_ARCHITECTURE.md",
+    "INTEGRATION_CONTRACTS.md",
+    "IMPLEMENTATION_PLAN.md",
+    "TEST_AND_ACCEPTANCE_PLAN.md",
+    "RISKS_AND_OPEN_QUESTIONS.md",
+    "AGENT_HANDOFF.md",
+    "implementation-manifest.yaml",
+    "generation-metadata.json"
+  ],
+  "package_generation_status": "corrected_after_evidence_audit",
+  "package_sha256": "696b222b356ff3654b8e005a1ff1244eb645c439c4db21c054b7e8393c28b804",
+  "production_branch": "main",
+  "prompt_chars": 202943,
+  "prompt_sha256": "8a9b920a57ce83d11f4dd0c3f11f02fcd6f9eda24c7d8f6e185910122eccdc30",
+  "provider": "Manus built-in LLM proxy",
+  "publication_status": "not_published",
+  "reasoning_effort": "default",
+  "remote_verification_status": "not_verified",
+  "repository": "jedisherpa/grok-build-tauri-control-panel",
+  "request_id": "chatcmpl-llm-router-openai",
+  "source_packet_decoding": {
+    "codec": "utf-8",
+    "errors": "replace",
+    "replacement_char_count": 39931
+  },
+  "source_packet_sha256": "81e7e19fd8a3c569daf6106c6c638ab227539bd1b165bdf560f5fa6c7279ed12",
+  "stage": "last20_repository_documentation_package",
+  "started_at": "2026-07-17T11:13:28.218958+00:00",
+  "status": "complete",
+  "total_chars": 35803,
+  "usage": {
+    "completion_tokens": 8100,
+    "completion_tokens_details": {
+      "accepted_prediction_tokens": 0,
+      "audio_tokens": null,
+      "completion_tokens_modality": {
+        "text": 8100
+      },
+      "reasoning_tokens": 3108,
+      "rejected_prediction_tokens": 0
+    },
+    "prompt_tokens": 103503,
+    "prompt_tokens_details": {
+      "audio_tokens": null,
+      "cached_tokens": null,
+      "prompt_tokens_modality": {
+        "text": 103503
+      }
+    },
+    "total_tokens": 111603,
+    "traffic_type": "provisioned_throughput"
+  }
+}
