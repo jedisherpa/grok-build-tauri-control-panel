@@ -11,6 +11,7 @@ anyhow.workspace = true
 async-trait.workspace = true
 chrono.workspace = true
 futures.workspace = true
+grok_cli_wrapper = { path = "../grok_cli_wrapper" }
 grok_events = { path = "../grok_events" }
 grok_permissions = { path = "../grok_permissions" }
 serde.workspace = true

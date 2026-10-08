@@ -1,8 +1,8 @@
-// Scheduler surface — list / create / pause / resume / delete agent routines.
+// Scheduler surface — list / create / pause / resume / stop agent routines.
 // Jobs require an absolute cwd. New jobs default to paused unless Enable now
 // is checked (and confirmed). Firing a job still needs a working LLM/agent.
 (() => {
-  const S = { jobs: [], selected: null, busy: false, loading: false };
+  const S = { jobs: [], selected: null, busy: false, confirming: false, loading: false };
 
   const statusLabel = {
     scheduled: 'Scheduled',
@@ -11,6 +11,9 @@
     completed: 'Completed',
     failed: 'Failed',
     cancelled: 'Cancelled',
+    cancelling: 'Stopping',
+    interrupted: 'Interrupted — review required',
+    uncertain: 'Uncertain — review required',
   };
 
   const esc = typeof escapeHtml === 'function' ? escapeHtml : (s) => String(s)
@@ -113,7 +116,7 @@
       return `<button type="button" class="scheduler-row${selected}" data-id="${esc(job.id)}">
         <span class="scheduler-row-title">${esc(job.name || '(unnamed)')}</span>
         <span class="scheduler-row-status">${esc(statusText(job.status))} · ${esc(scheduleText(job.schedule))}</span>
-        <span class="scheduler-row-meta">next ${esc(formatWhen(job.next_run))} · runs ${esc(String(job.run_count ?? 0))}${job.max_runs != null ? `/${esc(String(job.max_runs))}` : ''}</span>
+        <span class="scheduler-row-meta">next ${esc(formatWhen(job.next_run))} · attempts ${esc(String(job.run_count ?? 0))}${job.max_runs != null ? `/${esc(String(job.max_runs))}` : ''}</span>
         <span class="scheduler-row-cwd">${esc(job.cwd || '(no cwd)')}</span>
       </button>`;
     }).join('');
@@ -132,8 +135,15 @@
     }
     const st = String(job.status || '').toLowerCase();
     const canPause = st === 'scheduled' || st === 'running';
-    const canResume = st === 'paused';
-    const canDelete = st !== 'cancelled';
+    const last = job.active_run || job.runs?.at(-1);
+    const outcome = last?.outcome;
+    const unconfirmed = outcome?.cleanup_complete === false;
+    const active = st === 'running' || st === 'cancelling' || (st === 'paused' && !!job.active_run);
+    const canResume = !active && !unconfirmed && ['paused', 'failed', 'cancelled', 'interrupted', 'uncertain'].includes(st);
+    const canDelete = st !== 'cancelled' || unconfirmed;
+    const process = outcome?.process;
+    const disabled = S.busy || S.confirming;
+    const result = outcome ? (process?.end || 'No successful process completion observed') : 'No observed terminal result';
     panel.innerHTML = `
       <h2>${esc(job.name || '(unnamed)')}</h2>
       <div class="scheduler-current">${esc(statusText(job.status))} · ${esc(scheduleText(job.schedule))}</div>
@@ -144,13 +154,18 @@
         <dt>Created</dt><dd>${esc(formatWhen(job.created_at))}</dd>
         <dt>Last run</dt><dd>${esc(formatWhen(job.last_run))}</dd>
         <dt>Next run</dt><dd>${esc(formatWhen(job.next_run))}</dd>
-        <dt>Run count</dt><dd>${esc(String(job.run_count ?? 0))}${job.max_runs != null ? ` / ${esc(String(job.max_runs))}` : ''}</dd>
+        <dt>Admitted attempts</dt><dd>${esc(String(job.run_count ?? 0))}${job.max_runs != null ? ` / ${esc(String(job.max_runs))}` : ''}</dd>
+        <dt>Last run ID</dt><dd><code>${esc(last?.run_id || '—')}</code></dd>
+        <dt>Session ID</dt><dd><code>${esc(last?.session_id || '—')}</code></dd>
+        <dt>Observed result</dt><dd>${esc(result)}${process?.exit_code != null ? ` · exit ${esc(process.exit_code)}` : ''}</dd>
+        <dt>Cleanup</dt><dd>${outcome ? (outcome.cleanup_complete ? 'Confirmed for recorded scope' : 'Unconfirmed — retry cleanup before enabling') : 'No terminal cleanup observation'}${process?.cleanup_scope ? ` · ${esc(process.cleanup_scope)}` : ''}</dd>
+        <dt>Error</dt><dd>${esc(job.error || outcome?.error || process?.error || '—')}</dd>
       </dl>
-      <p class="scheduler-help">Enabled jobs spawn a headless Plan-mode agent in the working directory when they fire. Missing API keys or agent binaries surface as last-run errors in persistence — create and list still work without them.</p>
+      <p class="scheduler-help">An admitted attempt is not a successful completion. Pausing prevents future attempts; Stop also requests cleanup of the current attempt and retains its history. Interrupted or uncertain work may already have produced effects: inspect the recorded session before retrying. Cleanup covers the recorded process scope; detached descendants remain outside that scope. Required native policy capabilities must be available before an enabled job can start.</p>
       <div class="scheduler-actions">
-        ${canPause ? `<button type="button" class="btn ghost" id="scheduler-pause" ${S.busy ? 'disabled' : ''}>Pause</button>` : ''}
-        ${canResume ? `<button type="button" class="btn primary" id="scheduler-resume" ${S.busy ? 'disabled' : ''}>Resume / enable</button>` : ''}
-        ${canDelete ? `<button type="button" class="btn ghost danger" id="scheduler-delete" ${S.busy ? 'disabled' : ''}>Delete</button>` : ''}
+        ${canPause ? `<button type="button" class="btn ghost" id="scheduler-pause" ${disabled ? 'disabled' : ''}>Pause</button>` : ''}
+        ${canResume ? `<button type="button" class="btn primary" id="scheduler-resume" ${disabled ? 'disabled' : ''}>Review / enable</button>` : ''}
+        ${canDelete ? `<button type="button" class="btn ghost danger" id="scheduler-delete" ${disabled ? 'disabled' : ''}>${unconfirmed ? 'Retry cleanup' : 'Stop routine'}</button>` : ''}
       </div>`;
     if ($('scheduler-pause')) $('scheduler-pause').onclick = () => action('scheduler_pause', { id: job.id }, 'Job paused.');
     if ($('scheduler-resume')) $('scheduler-resume').onclick = () => confirmResume(job);
@@ -158,24 +173,34 @@
   }
 
   async function confirmResume(job) {
-    const ok = typeof askConfirm === 'function'
-      ? await askConfirm(`Enable “${job.name}”? It will run according to its schedule and may spawn an agent in ${job.cwd || 'its cwd'}.`, { title: 'Enable scheduled job', kind: 'warning' })
-      : window.confirm(`Enable “${job.name}?`);
-    if (!ok) return;
-    await action('scheduler_resume', { id: job.id }, 'Job enabled.');
+    const message = `Enable “${job.name}”? Inspect previous effects and the recorded session first. This admits a new attempt when due; the prior attempt stays in history. Its external effects may already have happened. It may spawn an agent in ${job.cwd || 'its cwd'}.`;
+    await confirmedAction(job, message, 'Enable scheduled job', 'scheduler_resume', 'Job enabled.');
   }
 
   async function confirmDelete(job) {
-    const ok = typeof askConfirm === 'function'
-      ? await askConfirm(`Delete scheduled job “${job.name}”? This cannot be undone.`, { title: 'Delete scheduled job', kind: 'warning' })
-      : window.confirm(`Delete “${job.name}?`);
-    if (!ok) return;
-    await action('scheduler_cancel', { id: job.id }, 'Job deleted.');
-    if (S.selected === job.id) S.selected = null;
+    await confirmedAction(job, `Stop scheduled job “${job.name}”? Active work will be asked to stop and cleanup will be checked. Its run history will be retained.`, 'Stop scheduled job', 'scheduler_cancel', 'Job stopped; history retained.');
+  }
+
+  async function confirmedAction(job, message, title, command, success) {
+    if (S.busy || S.confirming) return;
+    S.confirming = true;
+    renderDetail();
+    let ok = false;
+    try {
+      ok = typeof askConfirm === 'function'
+        ? await askConfirm(message, { title, kind: 'warning' })
+        : window.confirm(message);
+    } catch (e) {
+      notice(String(e?.message || e), true);
+    } finally {
+      S.confirming = false;
+      renderDetail();
+    }
+    if (ok && S.selected === job.id) await action(command, { id: job.id }, success);
   }
 
   async function action(command, args, okMessage) {
-    if (S.busy) return;
+    if (S.busy || S.confirming) return;
     S.busy = true;
     renderDetail();
     try {
@@ -183,6 +208,9 @@
       await refresh();
       notice(okMessage || 'Done.');
     } catch (e) {
+      // Protective cleanup can happen even if recording it failed. Refresh the
+      // host state, keeping that error visible instead of claiming success.
+      await refresh();
       notice(String(e?.message || e), true);
       if (typeof toastError === 'function') toastError(e);
     } finally {
@@ -215,7 +243,7 @@
 
   async function createJob(event) {
     event?.preventDefault?.();
-    if (S.busy) return;
+    if (S.busy || S.confirming) return;
     let request;
     try {
       request = collectRequest();
@@ -224,9 +252,22 @@
       return;
     }
     if (request.enable) {
-      const ok = typeof askConfirm === 'function'
-        ? await askConfirm(`Create and enable “${request.name}”? It may spawn an agent in ${request.cwd} on the schedule you chose.`, { title: 'Enable scheduled job', kind: 'warning' })
-        : window.confirm(`Create and enable “${request.name}?`);
+      S.confirming = true;
+      if ($('scheduler-create')) $('scheduler-create').disabled = true;
+      renderDetail();
+      let ok = false;
+      try {
+        const message = `Create and enable “${request.name}”? It may spawn an agent in ${request.cwd} on the schedule you chose.`;
+        ok = typeof askConfirm === 'function'
+          ? await askConfirm(message, { title: 'Enable scheduled job', kind: 'warning' })
+          : window.confirm(message);
+      } catch (e) {
+        notice(String(e?.message || e), true);
+      } finally {
+        S.confirming = false;
+        if ($('scheduler-create')) $('scheduler-create').disabled = false;
+        renderDetail();
+      }
       if (!ok) return;
     }
     S.busy = true;
@@ -235,8 +276,8 @@
     try {
       const job = await invoke('scheduler_add', { request });
       S.selected = job?.id || S.selected;
-      if ($('scheduler-name')) $('scheduler-name').value = '';
-      if ($('scheduler-prompt')) $('scheduler-prompt').value = '';
+      if ($('scheduler-name')?.value.trim() === request.name) $('scheduler-name').value = '';
+      if ($('scheduler-prompt')?.value.trim() === request.prompt) $('scheduler-prompt').value = '';
       if ($('scheduler-enable')) $('scheduler-enable').checked = false;
       await refresh();
       notice(request.enable

@@ -44,7 +44,7 @@ Rust failures during implementation (format placeholder and duplicate Clone deri
 
 ## Open release gates
 
-The authority remediation below addresses host policy parity/direct ACP authorization and managed repository reservations/isolation fallback. Whole native adapter enforcement, actual scheduler/headless completion/recovery, durable event ingestion, diff correctness and worker/resource caps remain release gates. Review the audit reports and staged backlog; unit-suite passes do not override reproduced defects.
+The authority remediation below addresses host policy parity/direct ACP authorization and managed repository reservations/isolation fallback. The process checkpoint below adds observed scheduler/headless outcomes and retained cleanup ownership. Whole native adapter enforcement, packaged scheduler/process recovery, durable event ingestion, diff correctness and aggregate worker/resource caps remain release gates. Review the audit reports and staged backlog; source-suite passes do not override unrun packaged stories.
 
 The cached baseline Rust SQLite amalgamation is 3.46.0; Persistence uses WAL/NORMAL. It needs a verified patched runtime and checkpoint/ownership/durability qualification. The system Python SQLite reports 3.43.2, and Python/runtime/reference installation and licenses also need a separate distribution check. No installed app SQLite query or corruption incident is asserted here. Current official SQLite guidance fixes its rare multi-connection WAL-reset race in 3.51.3+, with 3.44.6/3.50.7 backports: https://www.sqlite.org/wal.html#walresetbug.
 
@@ -102,3 +102,51 @@ evidence and confer no tool or policy authority.
 PACKAGED_CANDIDATE_MATRIX.md records the required
 workflow, recovery, accessibility and performance observations on the final
 signed candidate. No new candidate was installed, signed, submitted or published.
+
+## Process completion and recovery source checkpoint
+
+One shared supervisor owns the native ACP, hosted terminal and headless worker
+lifecycle. Outcomes require observed exit, actual pipe settlement and cleanup of
+the recorded scope. Typed results distinguish successful/nonzero exit, signal,
+timeout, cancellation, interrupted descendants, I/O failure and unresolved
+cleanup. Failed cleanup retains its owner and workspace reservation. Retrying
+cleanup preserves the original terminal cause. A one-use host launch proof and
+non-reaping child observation handle the fast-exit group-lookup race; an
+unidentified, mismatched or reaped child does not become a verified group.
+
+Scheduler snapshots record run/session identities before effects and retain the
+observed result/history. Generic handler failure stays uncertain; interruption
+never causes automatic replay. Pause affects future attempts, while Stop requests
+active cleanup. Cleanup retries cannot remove or overwrite a newer run. Quit
+fences admission, reconciles the scheduler before removing session owners, and
+retains unresolved bindings and the native window for another recovery attempt.
+The user Stop-all operation remains separate from the app-exit lifetime fence.
+
+The final locked/offline workspace suite passes **319 tests, zero failures and
+six existing prerequisite-dependent ignored fixtures**. ACP passes73, wrapper21
+(13 supervisor), core14, scheduler12 and panel71. Workspace check and strict
+all-target Clippy pass. Frontend passes208, including nine tests executing the
+actual scheduler controller. Python passes158, including22 generated candidate
+evidence-validator tests. Both independent review lanes accept this scoped
+checkpoint. Generated auth tests now use temporary files instead of reading the
+normal auth store.
+
+Earlier failed receipts remain outside Git. Independent reruns exposed the
+fast-exit adoption defect; the corrected implementation passes64 delayed-adoption
+and64 production-terminal quick exits. The external-drain fixture's observation
+deadline now derives from its explicit cleanup budget. The initial sandboxed
+workspace run could not signal its generated process group; the same bounded
+Quit fixture and final full suite pass outside that inherited sandbox.
+
+These are macOS source results. Dedicated process-group cleanup explicitly
+excludes detached descendants; other targets refuse launch until their process
+semantics are verified. Restricted native Plan/reviewed roles remain unavailable
+pending complete runtime/broker enforcement. Aggregate ACP queue/task admission,
+growing scheduler snapshots and the remaining process-owning utilities still
+require their resource/lifecycle qualification. No result here establishes
+provider Stop/resume continuity, final packaged recovery or production readiness.
+
+The candidate evidence validator enforces pinned receipt consistency, current
+story contracts, independent repeat passes and raw matched native performance
+evidence. Its generated tests use mock candidates. It neither independently
+verifies observations nor asserts human approval, signs, submits or publishes.

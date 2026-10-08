@@ -6,75 +6,36 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
 
 use serde_json::{json, Value};
-use tokio::io::{AsyncReadExt, BufReader};
-use tokio::process::{Child, Command};
-use tokio::sync::{Mutex, watch};
-use tracing::{debug, warn};
+use tokio::process::Command;
+use tokio::sync::Mutex;
+use tracing::debug;
 use uuid::Uuid;
 
 use crate::error::{AcpError, Result};
+use grok_cli_wrapper::process::{ProcessHandle, ProcessConfig, ProcessOutcome, ProcessEnd};
 
 const DEFAULT_OUTPUT_LIMIT: usize = 1_048_576; // 1 MiB
 
-#[derive(Debug)]
-struct TerminalState {
-    output: String,
-    truncated: bool,
-    output_limit: usize,
-    exit_code: Option<i32>,
-    signal: Option<String>,
-    finished: bool,
-}
-
-impl TerminalState {
-    fn push_bytes(&mut self, chunk: &[u8]) {
-        if chunk.is_empty() {
-            return;
-        }
-        let s = String::from_utf8_lossy(chunk);
-        self.output.push_str(&s);
-        if self.output.len() > self.output_limit {
-            // Truncate from the beginning at a char boundary.
-            let excess = self.output.len() - self.output_limit;
-            let mut cut = excess.min(self.output.len());
-            while cut < self.output.len() && !self.output.is_char_boundary(cut) {
-                cut += 1;
-            }
-            self.output = self.output[cut..].to_string();
-            self.truncated = true;
-        }
-    }
-
-    fn to_output_result(&self) -> Value {
-        let mut out = json!({
-            "output": self.output,
-            "truncated": self.truncated,
-        });
-        if self.finished {
-            out["exitStatus"] = json!({
-                "exitCode": self.exit_code,
-                "signal": self.signal,
-            });
-        }
-        out
-    }
-
-    fn to_wait_result(&self) -> Value {
-        json!({
-            "exitCode": self.exit_code,
-            "signal": self.signal,
-        })
-    }
-}
-
 struct ManagedTerminal {
-    state: Arc<Mutex<TerminalState>>,
-    /// `true` once the process has exited (watch avoids lost-wakeup races).
-    finished_rx: watch::Receiver<bool>,
-    child: Arc<Mutex<Option<Child>>>,
+    process: ProcessHandle,
+    output_limit: usize,
+}
+
+fn cleanup_result(outcome: &ProcessOutcome) -> Result<()> {
+    if !outcome.cleanup_complete {
+        return Err(AcpError::Protocol(format!("terminal cleanup unresolved: {}",
+            outcome.error.as_deref().unwrap_or("owned process or pipes still active"))));
+    }
+    Ok(())
+}
+
+fn wait_result(outcome: &ProcessOutcome) -> Value {
+    json!({"exitCode":outcome.exit_code, "signal":outcome.signal.map(|value| value.to_string()),
+        "cleanupComplete":outcome.cleanup_complete, "cleanupScope":outcome.cleanup_scope,
+        "pipesComplete":outcome.pipes_complete,
+        "end":outcome.end, "error":outcome.error})
 }
 
 /// In-memory terminal registry for one ACP client connection.
@@ -95,6 +56,12 @@ impl TerminalRegistry {
             default_cwd,
             unrestricted,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn retain_fixture_process(&self, process: ProcessHandle) {
+        self.terminals.lock().await.insert("generated-partial-cleanup".into(),
+            ManagedTerminal { process, output_limit:DEFAULT_OUTPUT_LIMIT });
     }
 
     pub async fn handle(&self, method: &str, params: &Option<Value>) -> Result<Value> {
@@ -157,7 +124,7 @@ impl TerminalRegistry {
             .and_then(|v| v.as_u64())
             .map(|n| n as usize)
             .unwrap_or(DEFAULT_OUTPUT_LIMIT)
-            .max(1024);
+            .clamp(1024, DEFAULT_OUTPUT_LIMIT);
 
         let env_pairs: Vec<(String, String)> = p
             .get("env")
@@ -184,195 +151,80 @@ impl TerminalRegistry {
 
         debug!(%command, cwd = %cwd.display(), "terminal/create spawn");
 
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| AcpError::Protocol(format!("terminal/create spawn failed: {e}")))?;
-
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
-
+        ProcessConfig::ensure_supported()?;
+        let (child, group_proof) = grok_cli_wrapper::process::spawn_group(&mut cmd)
+            .map_err(|error| AcpError::Protocol(format!("terminal/create spawn failed: {error}")))?;
+        let process = ProcessHandle::adopt_attested(child, group_proof, ProcessConfig {
+            timeout:None, output_limit, ..ProcessConfig::default()
+        }, Vec::new())?;
         let terminal_id = format!("term_{}", Uuid::new_v4().simple());
-        let state = Arc::new(Mutex::new(TerminalState {
-            output: String::new(),
-            truncated: false,
-            output_limit,
-            exit_code: None,
-            signal: None,
-            finished: false,
-        }));
-        let (finished_tx, finished_rx) = watch::channel(false);
-        let child_slot = Arc::new(Mutex::new(Some(child)));
-
-        // Pump stdout
-        if let Some(out) = stdout {
-            let st = state.clone();
-            tokio::spawn(async move {
-                let mut reader = BufReader::new(out);
-                let mut buf = [0u8; 8192];
-                loop {
-                    match reader.read(&mut buf).await {
-                        Ok(0) => break,
-                        Ok(n) => st.lock().await.push_bytes(&buf[..n]),
-                        Err(e) => {
-                            warn!(error = %e, "terminal stdout read error");
-                            break;
-                        }
-                    }
-                }
-            });
-        }
-
-        // Pump stderr into the same output buffer (matches shell UX).
-        if let Some(err) = stderr {
-            let st = state.clone();
-            tokio::spawn(async move {
-                let mut reader = BufReader::new(err);
-                let mut buf = [0u8; 8192];
-                loop {
-                    match reader.read(&mut buf).await {
-                        Ok(0) => break,
-                        Ok(n) => st.lock().await.push_bytes(&buf[..n]),
-                        Err(e) => {
-                            warn!(error = %e, "terminal stderr read error");
-                            break;
-                        }
-                    }
-                }
-            });
-        }
-
-        // Wait for process exit
-        {
-            let st = state.clone();
-            let child_slot = child_slot.clone();
-            tokio::spawn(async move {
-                let status = {
-                    let mut guard = child_slot.lock().await;
-                    if let Some(mut child) = guard.take() {
-                        match child.wait().await {
-                            Ok(s) => Some(s),
-                            Err(e) => {
-                                warn!(error = %e, "terminal wait failed");
-                                None
-                            }
-                        }
-                    } else {
-                        None
-                    }
-                };
-                {
-                    let mut s = st.lock().await;
-                    if let Some(status) = status {
-                        s.exit_code = status.code();
-                        #[cfg(unix)]
-                        {
-                            use std::os::unix::process::ExitStatusExt;
-                            if status.code().is_none() {
-                                if let Some(sig) = status.signal() {
-                                    s.signal = Some(sig.to_string());
-                                }
-                            }
-                        }
-                    } else {
-                        s.exit_code = Some(-1);
-                    }
-                    s.finished = true;
-                }
-                let _ = finished_tx.send(true);
-            });
-        }
-
-        self.terminals.lock().await.insert(
-            terminal_id.clone(),
-            ManagedTerminal {
-                state,
-                finished_rx,
-                child: child_slot,
-            },
-        );
+        self.terminals.lock().await.insert(terminal_id.clone(), ManagedTerminal { process, output_limit });
 
         Ok(json!({ "terminalId": terminal_id }))
     }
 
+    async fn process(&self, id: &str) -> Result<ProcessHandle> {
+        self.terminals.lock().await.get(id).map(|term| term.process.clone())
+            .ok_or_else(|| AcpError::Protocol(format!("unknown terminalId: {id}")))
+    }
+
     async fn output(&self, params: &Option<Value>) -> Result<Value> {
         let id = terminal_id(params)?;
-        let map = self.terminals.lock().await;
-        let term = map
-            .get(&id)
-            .ok_or_else(|| AcpError::Protocol(format!("unknown terminalId: {id}")))?;
-        let state = term.state.lock().await;
-        Ok(state.to_output_result())
+        let (process, limit) = {
+            let terminals = self.terminals.lock().await;
+            let terminal = terminals.get(&id).ok_or_else(|| AcpError::Protocol(format!("unknown terminalId: {id}")))?;
+            (terminal.process.clone(), terminal.output_limit)
+        };
+        let output = process.output();
+        let text = output.text();
+        let mut cut = text.len().saturating_sub(limit);
+        while !text.is_char_boundary(cut) { cut += 1; }
+        let mut result = json!({"output":&text[cut..], "truncated":output.truncated || cut > 0});
+        if let Some(outcome) = process.outcome() {
+            result["exitStatus"] = json!({"exitCode":outcome.exit_code,
+                "signal":outcome.signal.map(|value| value.to_string())});
+            result["cleanupComplete"] = json!(outcome.cleanup_complete);
+            result["cleanupScope"] = json!(outcome.cleanup_scope);
+            result["pipesComplete"] = json!(outcome.pipes_complete);
+            result["error"] = json!(outcome.error);
+        }
+        Ok(result)
     }
 
     async fn wait_for_exit(&self, params: &Option<Value>) -> Result<Value> {
-        let id = terminal_id(params)?;
-        let (mut finished_rx, state) = {
-            let map = self.terminals.lock().await;
-            let term = map
-                .get(&id)
-                .ok_or_else(|| AcpError::Protocol(format!("unknown terminalId: {id}")))?;
-            (term.finished_rx.clone(), term.state.clone())
-        };
-
-        // watch::Receiver already holds current value — no lost-wakeup race.
-        if !*finished_rx.borrow() {
-            while !*finished_rx.borrow() {
-                if finished_rx.changed().await.is_err() {
-                    break;
-                }
-            }
+        let process = self.process(&terminal_id(params)?).await?;
+        let outcome = process.wait_outcome().await;
+        cleanup_result(&outcome)?;
+        if !outcome.pipes_complete || matches!(outcome.end, ProcessEnd::IoFailure | ProcessEnd::CleanupFailure | ProcessEnd::Interrupted) {
+            return Err(AcpError::Protocol(format!("terminal completion unconfirmed ({:?}): {}", outcome.end,
+                outcome.error.as_deref().unwrap_or("pipe drain not observed"))));
         }
-
-        let s = state.lock().await;
-        Ok(s.to_wait_result())
+        Ok(wait_result(&outcome))
     }
 
     async fn kill(&self, params: &Option<Value>) -> Result<Value> {
-        let id = terminal_id(params)?;
-        // Clone the child handle out so a wedged kill doesn't stall every
-        // other terminal RPC behind the map mutex.
-        let child = {
-            let map = self.terminals.lock().await;
-            map.get(&id)
-                .ok_or_else(|| AcpError::Protocol(format!("unknown terminalId: {id}")))?
-                .child
-                .clone()
-        };
-        let mut child_guard = child.lock().await;
-        if let Some(c) = child_guard.as_mut() {
-            crate::process::terminate(c).await?;
-        }
+        let process = self.process(&terminal_id(params)?).await?;
+        cleanup_result(&process.cancel().await)?;
         Ok(json!({}))
     }
 
-    /// Kill every live terminal child (turn cancel) — best-effort; entries
-    /// stay in the map so the agent's later output/release calls still work.
+    /// Retain terminal history and unresolved process owners after Stop.
     pub async fn kill_all(&self) -> Result<()> {
-        let children: Vec<_> = {
-            let map = self.terminals.lock().await;
-            map.values().map(|t| t.child.clone()).collect()
-        };
-        for child in children {
-            let mut guard = child.lock().await;
-            if let Some(c) = guard.as_mut() {
-                crate::process::terminate(c).await?;
-            }
-        }
+        let processes:Vec<_> = self.terminals.lock().await.values().map(|terminal| terminal.process.clone()).collect();
+        let outcomes = futures::future::join_all(processes.iter().map(ProcessHandle::cancel)).await;
+        for outcome in outcomes { cleanup_result(&outcome)?; }
         Ok(())
     }
 
     async fn release(&self, params: &Option<Value>) -> Result<Value> {
         let id = terminal_id(params)?;
-        let term = {
-            let mut map = self.terminals.lock().await;
-            map.remove(&id)
+        let process = match self.process(&id).await {
+            Ok(process) => process,
+            Err(_) => return Ok(json!({})),
         };
-        if let Some(term) = term {
-            let mut child_guard = term.child.lock().await;
-            if let Some(mut child) = child_guard.take() {
-                crate::process::terminate(&mut child).await?;
-            }
-        }
+        cleanup_result(&process.cancel().await)?;
+        // A failed cleanup never removes the retry handle or its output.
+        self.terminals.lock().await.remove(&id);
         Ok(json!({}))
     }
 
@@ -402,7 +254,9 @@ impl TerminalRegistry {
                     format!("{cmd} {args}")
                 };
                 let short = if full.len() > 100 {
-                    format!("{}…", &full[..100])
+                    let mut end = 100;
+                    while !full.is_char_boundary(end) { end -= 1; }
+                    format!("{}…", &full[..end])
                 } else {
                     full
                 };
@@ -579,6 +433,73 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn stop_interrupts_active_wait_and_preserves_settled_output_until_release() {
+        let fixture = tempfile::tempdir().unwrap();
+        let registry = std::sync::Arc::new(TerminalRegistry::with_policy(fixture.path().to_path_buf(), true));
+        let created = registry.handle("terminal/create", &Some(json!({"command":"/bin/sh", "args":["-c","printf READY; sleep 30 & wait"]}))).await.unwrap();
+        let id = created["terminalId"].as_str().unwrap().to_string();
+        tokio::time::timeout(std::time::Duration::from_secs(3), async {
+            loop {
+                let out = registry.handle("terminal/output", &Some(json!({"terminalId":id}))).await.unwrap();
+                if out["output"].as_str().unwrap().contains("READY") { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        let waiting = registry.clone(); let wait_id = id.clone();
+        let wait = tokio::spawn(async move { waiting.handle("terminal/wait_for_exit", &Some(json!({"terminalId":wait_id}))).await });
+        tokio::time::timeout(std::time::Duration::from_secs(8), registry.handle("terminal/kill", &Some(json!({"terminalId":id})))).await.unwrap().unwrap();
+        let settled = tokio::time::timeout(std::time::Duration::from_secs(2), wait).await.unwrap().unwrap().unwrap();
+        assert_eq!(settled["cleanupComplete"], true);
+        assert_eq!(settled["pipesComplete"], true);
+        assert_eq!(settled["signal"], "9");
+        let out = registry.handle("terminal/output", &Some(json!({"terminalId":id}))).await.unwrap();
+        assert!(out["output"].as_str().unwrap().contains("READY"));
+        registry.handle("terminal/release", &Some(json!({"terminalId":id}))).await.unwrap();
+        assert!(registry.handle("terminal/output", &Some(json!({"terminalId":id}))).await.is_err());
+    }
+
+    #[tokio::test]
+    async fn terminal_exit_settles_both_pipes_and_clamps_combined_output() {
+        let fixture = tempfile::tempdir().unwrap();
+        std::fs::write(fixture.path().join("payload"), "é".repeat(8192)).unwrap();
+        let registry = TerminalRegistry::with_policy(fixture.path().to_path_buf(), true);
+        let created = registry.handle("terminal/create", &Some(json!({"command":"/bin/sh",
+            "args":["-c","cat payload; printf FINAL-OUT; cat payload >&2; printf FINAL-ERR >&2"], "outputByteLimit":1024}))).await.unwrap();
+        let id = created["terminalId"].as_str().unwrap();
+        let settled = registry.handle("terminal/wait_for_exit", &Some(json!({"terminalId":id}))).await.unwrap();
+        assert_eq!(settled["exitCode"], 0);
+        assert_eq!(settled["pipesComplete"], true);
+        let out = registry.handle("terminal/output", &Some(json!({"terminalId":id}))).await.unwrap();
+        let text = out["output"].as_str().unwrap();
+        assert!(text.len() <= 1024);
+        assert!(text.ends_with("FINAL-ERR"));
+        assert!(!text.contains('�'));
+        assert_eq!(out["truncated"], true);
+    }
+
+    #[tokio::test]
+    async fn fast_terminal_exits_preserve_attested_group_and_observed_pipes() {
+        let fixture = tempfile::tempdir().unwrap();
+        let registry = TerminalRegistry::with_policy(fixture.path().to_path_buf(), true);
+        for iteration in 0..64 {
+            let created = registry.handle("terminal/create", &Some(json!({
+                "command":"/bin/echo", "args":[format!("fast-fixture-{iteration}")]
+            }))).await.unwrap();
+            let id = created["terminalId"].as_str().unwrap();
+            let settled = tokio::time::timeout(std::time::Duration::from_secs(12),
+                registry.handle("terminal/wait_for_exit", &Some(json!({"terminalId":id}))))
+                .await.unwrap().unwrap();
+            assert_eq!(settled["exitCode"], 0, "iteration {iteration}: {settled}");
+            assert_eq!(settled["cleanupComplete"], true);
+            assert_eq!(settled["pipesComplete"], true);
+            let output = registry.handle("terminal/output", &Some(json!({"terminalId":id}))).await.unwrap();
+            assert_eq!(output["cleanupScope"], "dedicated_process_group");
+            assert!(output["output"].as_str().unwrap().contains(&format!("fast-fixture-{iteration}")));
+            registry.handle("terminal/release", &Some(json!({"terminalId":id}))).await.unwrap();
+        }
+    }
+
+    #[tokio::test]
     async fn create_wait_output_echo() {
         // This tests terminal transport/output, not confinement (below).
         let reg = TerminalRegistry::with_policy(std::env::temp_dir(), true);
@@ -649,6 +570,20 @@ mod tests {
         let text = out["output"].as_str().unwrap_or("");
         assert!(text.contains("hi"), "{text:?}");
         assert!(text.contains("there"), "{text:?}");
+    }
+
+    #[tokio::test]
+    async fn actual_terminal_summary_handles_unicode_across_the_clip_boundary() {
+        let fixture = tempfile::tempdir().unwrap();
+        let registry = TerminalRegistry::with_policy(fixture.path().to_path_buf(), true);
+        let params = Some(json!({"command":"echo", "args":["é".repeat(100)]}));
+        let created = registry.handle("terminal/create", &params).await;
+        let summary = TerminalRegistry::summary_line("terminal/create", &params, &created);
+        assert!(summary.contains('…'));
+        assert!(!summary.contains('�'));
+        let id = created.unwrap()["terminalId"].as_str().unwrap().to_string();
+        registry.handle("terminal/wait_for_exit", &Some(json!({"terminalId":id}))).await.unwrap();
+        registry.handle("terminal/release", &Some(json!({"terminalId":id}))).await.unwrap();
     }
 
     #[test]

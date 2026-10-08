@@ -15,7 +15,7 @@ use grok_extensions::ExtensionsService;
 use grok_mcp::McpManager;
 use grok_memory::MemoryService;
 use grok_persistence::Persistence;
-use grok_scheduler::{JobHandler, ScheduledJob, Scheduler};
+use grok_scheduler::{JobCleanupHandler, JobHandler, JobOutcome, JobRunContext, ScheduledJob, Scheduler, SchedulerSnapshot};
 use grok_worktree::WorktreeManager;
 
 use crate::devserver::DevServerManager;
@@ -66,6 +66,14 @@ fn load_startup_config(paths: &GrokPaths, resolved_binary: Option<PathBuf>) -> R
 }
 
 impl AppState {
+    /// Only app exit uses the lifetime admission fence. User Stop-all keeps the
+    /// running app usable through the separate scheduler stop_all operation.
+    pub async fn shutdown_for_exit(&self) -> Result<()> {
+        let cleanup=shutdown_owned_runtime(&self.scheduler,&self.registry).await;
+        let checkpoint=self.persistence.checkpoint();
+        let errors=[cleanup.err().map(|e|e.to_string()),checkpoint.err().map(|e|e.to_string())].into_iter().flatten().collect::<Vec<_>>();
+        if errors.is_empty() {Ok(())} else {Err(anyhow::anyhow!(errors.join("; ")))}
+    }
     pub async fn initialize() -> Result<Self> {
         // Critical for macOS .app launches from Finder/Dock.
         grok_config::bootstrap_process_env();
@@ -145,64 +153,57 @@ impl AppState {
 
         let scheduler = Scheduler::new(event_bus.clone());
         let registry_for_jobs = registry.clone();
-        let persistence_for_jobs = persistence.clone();
-        scheduler
-            .set_handler(JobHandler::new(move |job: ScheduledJob| {
-                let registry = registry_for_jobs.clone();
-                let persistence = persistence_for_jobs.clone();
-                async move {
-                    info!(job_id = %job.id, name = %job.name, "scheduler firing job");
-                    // A Finder-launched app's current_dir is `/` — running an
-                    // agent from filesystem root is never what anyone wants.
-                    let Some(cwd) = job.cwd.clone().filter(|c| !c.trim().is_empty()) else {
-                        warn!(job_id = %job.id, "scheduled job has no cwd; skipping run");
-                        let _ = persistence.set_kv(
-                            &format!("last_job_error_{}", job.id),
-                            "job has no cwd configured",
-                        );
-                        return;
-                    };
-
-                    // Prefer headless one-shot for scheduled routines
-                    let opts = grok_control_core::SpawnOptions {
-                        mode: grok_control_core::AgentMode::Headless,
-                        prompt: Some(job.prompt.clone()),
-                        plan_mode: true,
-                        always_approve: false,
-                        ..Default::default()
-                    };
-
-                    match registry.spawn_agent(&cwd, opts).await {
-                        Ok(id) => {
-                            let _ = persistence
-                                .set_kv(&format!("last_job_{}", job.id), &id.to_string());
-                        }
-                        Err(e) => {
-                            // Offline / no binary: record intent only
-                            warn!(error = %e, "scheduler could not spawn agent");
-                            let _ = persistence
-                                .set_kv(&format!("last_job_error_{}", job.id), &e.to_string());
-                        }
-                    }
+        scheduler.set_handler(JobHandler::new(move |run: JobRunContext| {
+            let registry = registry_for_jobs.clone();
+            async move {
+                let Some(cwd) = run.job.cwd.as_ref().filter(|cwd| !cwd.trim().is_empty()) else {
+                    return Ok(JobOutcome::failed("scheduled job has no cwd configured; no worker launched"));
+                };
+                if run.cancel.requested() { return Ok(JobOutcome::failed("run cancelled before launch")); }
+                let opts = grok_control_core::SpawnOptions {
+                    mode: grok_control_core::AgentMode::Headless,
+                    prompt: Some(run.job.prompt.clone()), plan_mode:true, always_approve:false,
+                    ..Default::default()
+                };
+                // The snapshot already durably binds this run and session ID.
+                // Unsupported native Plan capability is a visible failed run.
+                if let Err(error) = registry.spawn_agent_preallocated(run.session_id, cwd, opts, Default::default()).await {
+                    return Ok(JobOutcome {process:None,error:Some(error.to_string()),cleanup_complete:!registry.is_live(run.session_id)});
                 }
-            }))
-            .await;
-
-        // Durable routines: persist the job list on every change and reload
-        // it at startup (jobs previously lived only in memory).
+                let outcome = tokio::select! {
+                    result = registry.wait_headless(run.session_id) => result.map_err(|error| error.to_string())?,
+                    _ = run.cancel.cancelled() => {
+                        if let Err(error) = registry.cancel_session(run.session_id).await {
+                            return Ok(JobOutcome { process:None, error:Some(error.to_string()), cleanup_complete:false });
+                        }
+                        registry.wait_headless(run.session_id).await.map_err(|error| error.to_string())?
+                    }
+                };
+                Ok(JobOutcome::from_process(outcome))
+            }
+        })).await;
+        let registry_for_cleanup=registry.clone();
+        scheduler.set_cleanup_handler(JobCleanupHandler::new(move |id| {
+            let registry=registry_for_cleanup.clone();async move {
+                registry.cancel_session(id).await.map_err(|error|error.to_string())?;
+                let outcome=registry.wait_headless(id).await.map_err(|error|error.to_string())?;
+                Ok(JobOutcome::from_process(outcome))
+            }
+        })).await;
         {
             let persistence_for_sched = persistence.clone();
-            scheduler
-                .set_change_hook(move |jobs| {
-                    if let Ok(json) = serde_json::to_string(&jobs) {
-                        let _ = persistence_for_sched.set_kv("scheduler_jobs", &json);
-                    }
-                })
-                .await;
-            if let Ok(Some(json)) = persistence.get_kv("scheduler_jobs") {
-                if let Ok(jobs) = serde_json::from_str::<Vec<ScheduledJob>>(&json) {
-                    scheduler.restore_jobs(jobs).await;
-                }
+            scheduler.set_change_hook(move |snapshot| {
+                let json = serde_json::to_string(&snapshot).map_err(|error|error.to_string())?;
+                persistence_for_sched.set_kv("scheduler_jobs_v2", &json).map_err(|error|error.to_string())
+            }).await;
+            if let Some(json) = persistence.get_kv("scheduler_jobs_v2")? {
+                let snapshot: SchedulerSnapshot = serde_json::from_str(&json)
+                    .context("saved scheduler snapshot is corrupt; original bytes preserved")?;
+                scheduler.restore_snapshot(snapshot).await?;
+            } else if let Some(json) = persistence.get_kv("scheduler_jobs")? {
+                let jobs: Vec<ScheduledJob> = serde_json::from_str(&json)
+                    .context("saved legacy scheduler jobs are corrupt; original bytes preserved")?;
+                scheduler.restore_jobs(jobs).await?;
             }
         }
 
@@ -271,6 +272,16 @@ impl AppState {
     }
 }
 
+async fn shutdown_owned_runtime(scheduler:&Arc<Scheduler>,registry:&Arc<SessionRegistry>) -> Result<()> {
+    scheduler.fence_admission();registry.fence_admission()?;
+    // The scheduler must save its typed result before its session can be removed.
+    let scheduled=scheduler.shutdown().await;
+    let retained=scheduler.retained_session_ids().await;
+    let registered=registry.shutdown_preserving(retained).await;
+    let errors=[scheduled.err().map(|e|e.to_string()),registered.err().map(|e|e.to_string())].into_iter().flatten().collect::<Vec<_>>();
+    if errors.is_empty() {Ok(())} else {Err(anyhow::anyhow!(errors.join("; ")))}
+}
+
 #[cfg(test)]
 mod release_tests {
     use super::*;
@@ -313,4 +324,35 @@ mod release_tests {
         assert_eq!(std::fs::read_to_string(&paths.config_file).unwrap(), valid);
         std::fs::remove_dir_all(&dir).unwrap();
     }
+    #[cfg(target_os="macos")]
+    #[tokio::test]
+    async fn exit_preserves_scheduler_binding_on_failed_save_and_retries_verified_cleanup() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::atomic::{AtomicBool,Ordering};
+        let cwd=tempfile::tempdir().unwrap();let script=cwd.path().join("worker");
+        std::fs::write(&script,"#!/bin/sh\nsleep 120 & wait\n").unwrap();std::fs::set_permissions(&script,std::fs::Permissions::from_mode(0o700)).unwrap();
+        let bus=grok_events::shared_bus();let config=Arc::new(tokio::sync::RwLock::new(GrokConfig::default()));config.write().await.permissions.deny.clear();
+        let registry=SessionRegistry::new(bus.clone(),config,Arc::new(GrokCli::new(script)));
+        let scheduler=Scheduler::new(bus);let fail=Arc::new(AtomicBool::new(false));let failing=fail.clone();
+        scheduler.set_change_hook(move |_|{if failing.load(Ordering::SeqCst){Err("injected full disk".into())}else{Ok(())}}).await;
+        let runtime=registry.clone();scheduler.set_handler(JobHandler::new(move |run|{let runtime=runtime.clone();async move {
+            let opts=grok_control_core::SpawnOptions{mode:grok_control_core::AgentMode::Headless,prompt:Some("offline generated".into()),approval_mode:Some(grok_acp::ApprovalMode::Ask),plan_mode:false,sandbox_profile:Some("unrestricted".into()),..Default::default()};
+            runtime.spawn_agent_preallocated(run.session_id,run.job.cwd.as_deref().unwrap(),opts,Default::default()).await.map_err(|e|e.to_string())?;
+            run.cancel.cancelled().await;runtime.cancel_session(run.session_id).await.map_err(|e|e.to_string())?;
+            Ok(JobOutcome::from_process(runtime.wait_headless(run.session_id).await.map_err(|e|e.to_string())?))
+        }})).await;
+        let runtime=registry.clone();scheduler.set_cleanup_handler(JobCleanupHandler::new(move |id|{let runtime=runtime.clone();async move {runtime.cancel_session(id).await.map_err(|e|e.to_string())?;Ok(JobOutcome::from_process(runtime.wait_headless(id).await.map_err(|e|e.to_string())?))}})).await;
+        let job=scheduler.add("quit".into(),"prompt".into(),grok_scheduler::ScheduleKind::Once{delay_secs:0},Some(cwd.path().to_str().unwrap().into()),None).await.unwrap();
+        let session=tokio::time::timeout(std::time::Duration::from_secs(2),async {loop{if let Some(run)=scheduler.list().await[0].active_run.clone(){if registry.is_live(run.session_id){break run.session_id;}}tokio::task::yield_now().await;}}).await.unwrap();
+        fail.store(true,Ordering::SeqCst);
+        assert!(shutdown_owned_runtime(&scheduler,&registry).await.is_err());
+        assert!(registry.is_live(session));assert!(scheduler.retained_session_ids().await.contains(&session));
+        fail.store(false,Ordering::SeqCst);
+        shutdown_owned_runtime(&scheduler,&registry).await.unwrap();
+        assert!(!registry.is_live(session));
+        let saved=scheduler.list().await;
+        assert_eq!(saved[0].id,job.id);assert_eq!(saved[0].run_count,1);assert_eq!(saved[0].runs[0].session_id,session);
+        assert!(saved[0].runs[0].outcome.as_ref().unwrap().cleanup_complete);
+    }
+
 }

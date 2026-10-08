@@ -7,6 +7,8 @@ description = "Typed async wrapper around the Grok Build CLI"
 
 [dependencies]
 anyhow.workspace = true
+chrono.workspace = true
+libc = "0.2"
 directories.workspace = true
 grok_config = { path = "../grok_config" }
 serde.workspace = true

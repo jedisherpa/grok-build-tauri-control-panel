@@ -2,7 +2,6 @@
 //!
 //! Preferred path for interactive long-lived sessions (vs headless `-p`).
 
-mod process;
 mod workspace_fs;
 mod client;
 mod error;

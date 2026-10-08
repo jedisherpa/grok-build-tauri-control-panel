@@ -395,7 +395,10 @@ impl GrokCli {
     }
 
     pub fn auth_status() -> AuthStatus {
-        let path = Self::auth_file_path();
+        Self::auth_status_from_path(Self::auth_file_path())
+    }
+
+    fn auth_status_from_path(path: PathBuf) -> AuthStatus {
         let auth_file = path.display().to_string();
         if !path.exists() {
             return AuthStatus {
@@ -654,7 +657,18 @@ mod tests {
 
     #[test]
     fn auth_status_reads_file_or_empty() {
-        let s = GrokCli::auth_status();
-        assert!(!s.auth_file.is_empty());
+        let fixture = tempfile::tempdir().unwrap();
+        let path = fixture.path().join("auth.json");
+        let missing = GrokCli::auth_status_from_path(path.clone());
+        assert!(!missing.logged_in);
+        assert_eq!(missing.auth_file, path.display().to_string());
+        std::fs::write(&path, r#"{"fixture":{"email":"generated@example.invalid","auth_mode":"test"}}"#).unwrap();
+        let present = GrokCli::auth_status_from_path(path.clone());
+        assert!(present.logged_in);
+        assert_eq!(present.email.as_deref(), Some("generated@example.invalid"));
+        std::fs::write(&path, "{malformed").unwrap();
+        let invalid = GrokCli::auth_status_from_path(path);
+        assert!(!invalid.logged_in);
+        assert_eq!(invalid.message, "Auth file is not valid JSON.");
     }
 }

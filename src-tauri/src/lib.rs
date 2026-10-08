@@ -17,6 +17,17 @@ mod word_shapes;
 
 use tauri::{Emitter, Manager};
 use tracing::{info, warn};
+use std::sync::{Arc, atomic::{AtomicU8, Ordering}};
+
+/// Quit waits for observed cleanup; failed cleanup keeps the native window and
+/// its recovery controls available. A repeated quit can retry the retained owner.
+#[derive(Default)]
+struct ExitGate(AtomicU8);
+impl ExitGate {
+    fn begin(&self) -> bool { self.0.compare_exchange(0, 1, Ordering::SeqCst, Ordering::SeqCst).is_ok() }
+    fn completed(&self) -> bool { self.0.load(Ordering::SeqCst) == 2 }
+    fn finish(&self, success: bool) { self.0.store(if success { 2 } else { 0 }, Ordering::SeqCst); }
+}
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -27,6 +38,7 @@ pub fn run() {
         )
         .init();
 
+    let exit_gate = Arc::new(ExitGate::default());
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_dialog::init())
@@ -219,8 +231,50 @@ pub fn run() {
             commands::haven_remove_job,
             commands::haven_list_files,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(move |handle, event| match event {
+            tauri::RunEvent::WindowEvent { label, event: tauri::WindowEvent::CloseRequested { api, .. }, .. }
+                if label == "main" && !exit_gate.completed() => {
+                api.prevent_close();
+                handle.exit(0);
+            }
+            tauri::RunEvent::ExitRequested { api, code, .. } if !exit_gate.completed() => {
+                api.prevent_exit();
+                if !exit_gate.begin() { return; }
+                let handle = handle.clone();
+                let gate = exit_gate.clone();
+                tauri::async_runtime::spawn(async move {
+                    let state = handle.state::<AppState>();
+                    match state.shutdown_for_exit().await {
+                        Ok(()) => { gate.finish(true); handle.exit(code.unwrap_or(0)); }
+                        Err(error) => {
+                            gate.finish(false);
+                            warn!(error = %error, "quit cleanup unresolved; application retained");
+                            state.event_bus.emit_error(None, format!("Quit could not verify cleanup. The application and recovery controls remain open. Retry Stop or Quit after inspecting the unresolved session. {error}"));
+                        }
+                    }
+                });
+            }
+            _ => {}
+        });
 }
 
 pub use state::AppState;
+
+#[cfg(test)]
+mod exit_tests {
+    use super::ExitGate;
+    #[test]
+    fn duplicate_quit_does_not_duplicate_cleanup_and_failure_can_retry() {
+        let gate = ExitGate::default();
+        assert!(gate.begin());
+        assert!(!gate.begin());
+        assert!(!gate.completed());
+        gate.finish(false);
+        assert!(gate.begin());
+        gate.finish(true);
+        assert!(gate.completed());
+        assert!(!gate.begin());
+    }
+}

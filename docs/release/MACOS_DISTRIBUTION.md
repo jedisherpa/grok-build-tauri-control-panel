@@ -50,6 +50,31 @@ Preserve the build log, compiler/Xcode/Tauri versions, target, lockfile digest a
 
 Only submit after the signed candidate's required stories pass. Reuse the existing iCloud Keychain profile `fisheye-research-feed-notary`: its read-only history query authenticated successfully on 2026-10-07 and returned 100 accepted submissions. The older `prismai-notary` profile returned HTTP 401 and must not be selected without a separately authorized credential refresh. Recheck authentication at release time with `xcrun notarytool history --keychain-profile 'fisheye-research-feed-notary' --output-format json`. No new profile is needed for this release. Never put passwords or exported private keys in Git, scripts, command-line history or QA output.
 
+Before submission, run the separate evidence consistency gate:
+
+```sh
+python3 -B scripts/candidate_evidence.py \
+  --repo "$PWD" --app '/absolute/Bomb Code.app' \
+  --evidence-root '/absolute/private-evidence' \
+  --ledger '/absolute/private-evidence/candidate-ledger.json' \
+  --team-id X8BVJAF8W5
+```
+
+The ledger binds current source/story revisions, dependency lock, build log,
+signed artifact and intended team to the source gates and packaged observations.
+It requires repeated workflow, recovery, accessibility and measured performance
+scenarios, actual provider coverage and clean-account/service evidence where
+the stories require it. Missing, stale, failed or altered receipts refuse the
+gate. Retain failures; two later independent passes are needed after the latest
+failure. Performance budgets precede measurement and native traces retain
+matched baseline, conditions, workloads and process attribution.
+
+This validator checks declared evidence consistency. It cannot establish the
+truth of a tester's observation or Paul's release approval, and does not sign,
+submit or publish. The generated validator fixtures exercise rejection rules;
+they are never candidate qualification evidence. Stories C3-043 and C3-044 still
+need the upgrade, notarization and downloaded-distribution receipts below.
+
 Create a new private distribution directory, ZIP the signed app with Apple's `ditto` method, and submit that archive:
 
 ```sh

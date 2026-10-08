@@ -9,7 +9,9 @@ use std::time::Duration;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::process::{Child, Command};
+use tokio::process::Command;
+#[cfg(test)]
+use tokio::process::Child;
 use tokio::sync::{Mutex, RwLock};
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -20,6 +22,7 @@ use grok_events::{
 };
 
 use crate::error::{AcpError, Result};
+use grok_cli_wrapper::process::{ProcessHandle, ProcessConfig, DrainTicket};
 use crate::messages::{
     id_key, AuthenticateParams, ClientCapabilities, ClientInfo, FsCapabilities,
     IncomingAgentRequest, InitializeParams, JsonRpcNotification, PromptContent,
@@ -326,7 +329,9 @@ struct PendingPermission {
 
 pub struct AcpClient {
     config: AcpClientConfig,
-    child: Mutex<Option<Child>>,
+    process: Option<ProcessHandle>,
+    runner_stopped: std::sync::atomic::AtomicBool,
+    stopped: tokio_util::sync::CancellationToken,
     transport: RwLock<Option<Arc<NdjsonTransport>>>,
     session_id: RwLock<Option<String>>,
     agent_capabilities: RwLock<Option<Value>>,
@@ -372,11 +377,11 @@ pub struct AcpClient {
     terminals: TerminalRegistry,
     read_only: bool,
     native_runner_unconfined: bool,
-    cancelled: std::sync::atomic::AtomicBool,
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
     cancelling: std::sync::atomic::AtomicBool,
     cancel_transition: Mutex<()>,
-    turn_epoch: std::sync::atomic::AtomicU64,
-    host_dispatch: Mutex<()>,
+    turn_epoch: Arc<std::sync::atomic::AtomicU64>,
+    host_dispatch: Arc<Mutex<()>>,
 }
 
 /// Native adapters and CLI may execute internal tools without host callbacks.
@@ -465,7 +470,8 @@ impl AcpClient {
             cmd.env(k, v);
         }
 
-        let mut child = cmd.spawn().map_err(|e| {
+        ProcessConfig::ensure_supported()?;
+        let (mut child, group_proof) = grok_cli_wrapper::process::spawn_group(&mut cmd).map_err(|e| {
             AcpError::Spawn(format!(
                 "failed to spawn {} ACP agent ({}): {e}",
                 config.backend_label,
@@ -485,20 +491,42 @@ impl AcpClient {
 
         let (notif_tx, notif_rx) = tokio::sync::mpsc::unbounded_channel();
         let (agent_req_tx, agent_req_rx) = tokio::sync::mpsc::unbounded_channel();
-        let transport = NdjsonTransport::new(stdin, stdout, notif_tx, agent_req_tx);
+        let (stdout_reporter, stdout_ticket) = DrainTicket::pair();
+        let transport = NdjsonTransport::new_with_drain(stdin, stdout, notif_tx, agent_req_tx, Some(stdout_reporter));
+        let mut external_drains = vec![stdout_ticket];
 
         // Mirror agent stderr into the control bus (center column / terminal view).
         // Lines are sanitized (ANSI, team IDs, key fragments) before they are
         // kept or shown, and a bounded tail explains startup failures.
         let stderr_tail = StderrTail::default();
         if let Some(stderr) = stderr {
+            let (stderr_reporter, stderr_ticket) = DrainTicket::pair();
+            external_drains.push(stderr_ticket);
             let bus = event_bus.clone();
             let sid = control_session_id;
             let tail = stderr_tail.clone();
             tokio::spawn(async move {
-                use tokio::io::{AsyncBufReadExt, BufReader};
-                let mut lines = BufReader::new(stderr).lines();
-                while let Ok(Some(line)) = lines.next_line().await {
+                use tokio::io::BufReader;
+                let mut reader = BufReader::new(stderr);
+                let mut bytes = Vec::new();
+                loop {
+                    match crate::transport::bounded_line(&mut reader, &mut bytes).await {
+                        Ok(0) => { stderr_reporter.complete(Ok(())); break; }
+                        Ok(_) => {},
+                        Err(error) => {
+                            stderr_reporter.fail(error.to_string());
+                            stderr_reporter.complete(crate::transport::discard_to_eof(&mut reader).await.map_err(|error| error.to_string()));
+                            break;
+                        }
+                    }
+                    let line = match std::str::from_utf8(&bytes) {
+                        Ok(line) => line,
+                        Err(error) => {
+                            stderr_reporter.fail(error.to_string());
+                            stderr_reporter.complete(crate::transport::discard_to_eof(&mut reader).await.map_err(|error| error.to_string()));
+                            break;
+                        }
+                    };
                     let line = grok_events::diagnostics::sanitize_diagnostic(line.trim_end());
                     if line.trim().is_empty() {
                         continue;
@@ -518,6 +546,9 @@ impl AcpClient {
             });
         }
 
+        let process = ProcessHandle::adopt_attested(child, group_proof, ProcessConfig {
+            timeout: None, ..ProcessConfig::default()
+        }, external_drains)?;
         let pending_context = connect_opts
             .transcript_context
             .filter(|s| !s.trim().is_empty());
@@ -529,7 +560,9 @@ impl AcpClient {
         let default_cwd = config.cwd.clone();
         let client = Arc::new(Self {
             config,
-            child: Mutex::new(Some(child)),
+            process: Some(process),
+            runner_stopped: std::sync::atomic::AtomicBool::new(false),
+            stopped: tokio_util::sync::CancellationToken::new(),
             transport: RwLock::new(Some(transport)),
             session_id: RwLock::new(None),
             agent_capabilities: RwLock::new(None),
@@ -559,11 +592,11 @@ impl AcpClient {
             terminals: TerminalRegistry::with_policy(default_cwd, matches!(profile.as_str(), "unrestricted" | "none" | "off")),
             read_only,
             native_runner_unconfined: true,
-            cancelled: std::sync::atomic::AtomicBool::new(false),
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             cancelling: std::sync::atomic::AtomicBool::new(false),
             cancel_transition: Mutex::new(()),
-            turn_epoch: std::sync::atomic::AtomicU64::new(0),
-            host_dispatch: Mutex::new(()),
+            turn_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            host_dispatch: Arc::new(Mutex::new(())),
         });
 
         let startup = async {
@@ -575,6 +608,29 @@ impl AcpClient {
         };
         if let Err(e) = startup.await {
             return Err(client.explain_startup_error(e).await);
+        }
+
+        if let Some(process) = client.process.clone() {
+            let observed = client.clone();
+            tokio::spawn(async move {
+                let outcome = process.wait_outcome().await;
+                if observed.shutting_down.load(std::sync::atomic::Ordering::Acquire)
+                    || observed.cancelled.load(std::sync::atomic::Ordering::Acquire) { return; }
+                {
+                    let _gate = observed.host_dispatch.lock().await;
+                    observed.cancelled.store(true, std::sync::atomic::Ordering::Release);
+                    observed.turn_epoch.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                    observed.runner_stopped.store(outcome.cleanup_complete, std::sync::atomic::Ordering::Release);
+                    if let Some(bus) = &observed.event_bus {
+                        bus.emit_error(Some(observed.control_session_id), format!(
+                            "native runner exited unexpectedly ({:?}); cleanup complete: {}. Resume the saved conversation after cleanup.",
+                            outcome.end, outcome.cleanup_complete));
+                        bus.emit_status(observed.control_session_id, SessionStatus::Failed).await;
+                    }
+                    observed.shutting_down.store(true, std::sync::atomic::Ordering::Release);
+                    observed.stopped.cancel();
+                }
+            });
         }
 
         // Background event loop for notifications
@@ -603,7 +659,9 @@ impl AcpClient {
         let config = AcpClientConfig::new("/bin/true", "/tmp");
         Arc::new(Self {
             config,
-            child: Mutex::new(None),
+            process: None,
+            runner_stopped: std::sync::atomic::AtomicBool::new(false),
+            stopped: tokio_util::sync::CancellationToken::new(),
             transport: RwLock::new(None),
             session_id: RwLock::new(Some(session_id.to_string())),
             agent_capabilities: RwLock::new(None),
@@ -633,11 +691,11 @@ impl AcpClient {
             terminals: TerminalRegistry::new(PathBuf::from("/tmp")),
             read_only: false,
             native_runner_unconfined: false,
-            cancelled: std::sync::atomic::AtomicBool::new(false),
+            cancelled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             cancelling: std::sync::atomic::AtomicBool::new(false),
             cancel_transition: Mutex::new(()),
-            turn_epoch: std::sync::atomic::AtomicU64::new(0),
-            host_dispatch: Mutex::new(()),
+            turn_epoch: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+            host_dispatch: Arc::new(Mutex::new(())),
         })
     }
 
@@ -729,7 +787,11 @@ impl AcpClient {
     /// Turn a raw startup failure into something a person can act on, using
     /// the agent's own stderr when it says why (auth refused, key disabled).
     async fn explain_startup_error(&self, e: AcpError) -> AcpError {
-        let _ = self.shutdown_quiet().await;
+        if let Err(cleanup) = self.shutdown_quiet().await {
+            if let Some(process) = &self.process {
+                return AcpError::StartupCleanup { reason: format!("{e}; cleanup incomplete: {cleanup}"), process: process.clone() };
+            }
+        }
         match e {
             AcpError::AuthRequired(_) => e,
             AcpError::Timeout(_) | AcpError::ProcessExited | AcpError::ChannelClosed | AcpError::Rpc { .. } => {
@@ -747,11 +809,7 @@ impl AcpClient {
     async fn shutdown_quiet(&self) -> Result<()> {
         self.shutting_down
             .store(true, std::sync::atomic::Ordering::SeqCst);
-        let mut child_guard = self.child.lock().await;
-        if let Some(child) = child_guard.as_mut() {
-            let _ = crate::process::terminate(child).await;
-        }
-        child_guard.take();
+        self.stop_owned_process().await?;
         *self.transport.write().await = None;
         Ok(())
     }
@@ -1281,14 +1339,22 @@ impl AcpClient {
         if prompt.trim().is_empty() {
             return Err(AcpError::Protocol("empty prompt".into()));
         }
-        {
-            let _dispatch = self.host_dispatch.lock().await;
+        // Keep admission serialized with Stop through the bounded wire write,
+        // never through the agent's response. A stopped native transport must
+        // not fall through the offline/mock path after preparing context.
+        let prompt_dispatch = self.host_dispatch.lock().await;
+        let epoch = {
+            if self.runner_stopped.load(std::sync::atomic::Ordering::Acquire)
+                || self.process.as_ref().is_some_and(|process| process.outcome().is_some()) {
+                return Err(AcpError::Protocol("native runner stopped; resume the saved conversation before sending a new prompt".into()));
+            }
             if self.cancelling.load(std::sync::atomic::Ordering::Acquire) {
                 return Err(AcpError::Protocol("session cancellation must finish before a new prompt".into()));
             }
-            self.turn_epoch.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+            let epoch = self.turn_epoch.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
             self.cancelled.store(false, std::sync::atomic::Ordering::Release);
-        }
+            epoch
+        };
         self.historical_replay.store(false, std::sync::atomic::Ordering::Release);
 
         // History-only: prepend transcript pack once.
@@ -1345,13 +1411,24 @@ impl AcpClient {
             text = format!("{PLAN_EMULATION_PREAMBLE}\n\n{text}");
         }
 
+        if self.turn_epoch.load(std::sync::atomic::Ordering::Acquire) != epoch
+            || self.cancelled.load(std::sync::atomic::Ordering::Acquire)
+            || self.cancelling.load(std::sync::atomic::Ordering::Acquire)
+        {
+            return Err(AcpError::Protocol("prompt admission cancelled before dispatch".into()));
+        }
+        let transport = self.transport.read().await.clone();
+        if transport.is_none() && (self.process.is_some() || self.native_runner_unconfined) {
+            return Err(AcpError::Protocol("native transport unavailable; resume the saved conversation before sending a new prompt".into()));
+        }
+
         if let Some(bus) = &self.event_bus {
             bus.emit_status(self.control_session_id, SessionStatus::Running)
                 .await;
         }
 
         // Mock clients: no transport — accept and return.
-        if self.transport.read().await.is_none() {
+        let Some(transport) = transport else {
             if let Some(bus) = &self.event_bus {
                 bus.emit(ControlEvent::AgentMessage {
                     session_id: self.control_session_id,
@@ -1366,7 +1443,7 @@ impl AcpClient {
                     .await;
             }
             return Ok(());
-        }
+        };
 
         let params = SessionPromptParams {
             session_id: sid,
@@ -1376,7 +1453,6 @@ impl AcpClient {
             }],
         };
         let params_val = serde_json::to_value(params)?;
-        let transport = self.transport().await?;
 
         if let Some(bus) = &self.event_bus {
             bus.emit(ControlEvent::Raw {
@@ -1391,23 +1467,43 @@ impl AcpClient {
 
         // Fire the RPC immediately; do not block the UI on the full agent turn.
         // Grok streams work via notifications while session/prompt stays open.
-        let rx = transport
-            .send_request("session/prompt", Some(params_val))
-            .await?;
+        let rx = match transport.send_request("session/prompt", Some(params_val)).await {
+            Ok(rx) => rx,
+            Err(error) => {
+                if let Some(bus) = &self.event_bus {
+                    bus.emit_error(Some(self.control_session_id), format!("prompt dispatch failed; completion remains unconfirmed: {error}"));
+                    bus.emit_status(self.control_session_id, SessionStatus::Failed).await;
+                }
+                return Err(error);
+            }
+        };
+        drop(prompt_dispatch);
 
         let bus = self.event_bus.clone();
         let control_id = self.control_session_id;
         let prompt_timeout = self.config.prompt_timeout;
 
+        let turn_epoch = self.turn_epoch.clone();
+        let cancelled = self.cancelled.clone();
+        let dispatch = self.host_dispatch.clone();
+        let process = self.process.clone();
+        let stopped = self.stopped.clone();
         tokio::spawn(async move {
-            match tokio::time::timeout(prompt_timeout, rx).await {
+            let completion = tokio::time::timeout(prompt_timeout, rx).await;
+            let drained = if matches!(&completion, Ok(Ok(resp)) if resp.error.is_none()) {
+                tokio::time::timeout(Duration::from_secs(10), transport.drain_notifications()).await
+                    .map(|result| result.is_ok()).unwrap_or(false)
+            } else { true };
+            let _dispatch = dispatch.lock().await;
+            if turn_epoch.load(std::sync::atomic::Ordering::Acquire) != epoch
+                || cancelled.load(std::sync::atomic::Ordering::Acquire) { return; }
+            match completion {
                 Ok(Ok(resp)) => match NdjsonTransport::unwrap_response(resp) {
                     Ok(result) => {
                         // RPC responses and native notifications use separate
                         // consumers. Drain the ordered notification FIFO before
                         // declaring the final answer complete.
-                        let drained = tokio::time::timeout(Duration::from_secs(10), transport.drain_notifications()).await;
-                        if !matches!(drained, Ok(Ok(()))) {
+                        if !drained {
                             warn!("prompt completed but notification drain failed");
                             if let Some(bus) = &bus {
                                 bus.emit_error(Some(control_id), "acp error: final output drain failed");
@@ -1453,24 +1549,19 @@ impl AcpClient {
                     }
                 }
                 Err(_) => {
-                    warn!(
-                        timeout_secs = prompt_timeout.as_secs(),
-                        "session/prompt still open after timeout; continuing via stream"
-                    );
+                    cancelled.store(true, std::sync::atomic::Ordering::Release);
+                    turn_epoch.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                    let cleanup = if let Some(process) = process {
+                        let outcome = process.cancel().await;
+                        if outcome.cleanup_complete { stopped.cancel(); }
+                        Some(outcome)
+                    } else { None };
+                    warn!(timeout_secs = prompt_timeout.as_secs(), "session/prompt timed out; stopping owned runner");
                     if let Some(bus) = &bus {
-                        bus.emit(ControlEvent::Raw {
-                            session_id: Some(control_id),
-                            payload: json!({
-                                "channel": "term",
-                                "stream": "acp",
-                                "line": format!(
-                                    "… session/prompt still open after {} min (stream may continue)",
-                                    prompt_timeout.as_secs() / 60
-                                ),
-                            }),
-                        });
-                        // Don't leave the thread pinned on "running" forever.
-                        bus.emit_status(control_id, SessionStatus::Idle).await;
+                        bus.emit_error(Some(control_id), format!(
+                            "ACP prompt timed out; completion remains unconfirmed. Native cleanup complete: {}. Resume the saved conversation after cleanup.",
+                            cleanup.as_ref().is_none_or(|outcome| outcome.cleanup_complete)));
+                        bus.emit_status(control_id, SessionStatus::Failed).await;
                     }
                 }
             }
@@ -1502,8 +1593,18 @@ impl AcpClient {
             }
             // The agent should wind down its tool calls, but the commands run
             // in OUR terminal host — kill them so Stop actually stops work.
-            self.terminals.kill_all().await?;
         }
+        // Cleanup owners are independent: a failed hosted terminal must not
+        // prevent attempting to stop the native adapter (or vice versa).
+        let terminal_failure = self.terminals.kill_all().await.err();
+        if self.process.is_some() { self.shutting_down.store(true, std::sync::atomic::Ordering::Release); }
+        let native_failure = self.stop_owned_process().await.err();
+        if terminal_failure.is_some() || native_failure.is_some() {
+            return Err(AcpError::Protocol(format!("session cleanup unresolved; terminals: {}; native runner: {}",
+                terminal_failure.map(|error| error.to_string()).unwrap_or_else(|| "complete".into()),
+                native_failure.map(|error| error.to_string()).unwrap_or_else(|| "complete".into()))));
+        }
+        if self.process.is_some() { *self.transport.write().await = None; }
         if let Some(bus) = &self.event_bus {
             bus.emit_status(self.control_session_id, SessionStatus::Cancelled)
                 .await;
@@ -1982,7 +2083,11 @@ impl AcpClient {
             .take()
             .ok_or(AcpError::SessionNotReady)?;
 
-        while let Some(event) = rx.recv().await {
+        loop {
+            let event = tokio::select! {
+                _ = self.stopped.cancelled() => return Ok(()),
+                event = rx.recv() => match event { Some(event) => event, None => break },
+            };
             match event {
                 NotificationEvent::Notification(notif) => self.handle_notification(notif).await,
                 NotificationEvent::Fence(ack) => { let _ = ack.send(()); }
@@ -2003,7 +2108,11 @@ impl AcpClient {
             .take()
             .ok_or(AcpError::SessionNotReady)?;
 
-        while let Some(req) = rx.recv().await {
+        loop {
+            let req = tokio::select! {
+                _ = self.stopped.cancelled() => return Ok(()),
+                request = rx.recv() => match request { Some(request) => request, None => break },
+            };
             let this = self.clone();
             let epoch = self.turn_epoch.load(std::sync::atomic::Ordering::Acquire);
             tokio::spawn(async move {
@@ -2953,7 +3062,7 @@ impl AcpClient {
                     .map(|t| {
                         let t = t.replace('\n', " ");
                         if t.len() > 120 {
-                            format!("{}…", &t[..120])
+                            format!("{}…", byte_prefix(&t, 120))
                         } else {
                             t
                         }
@@ -3189,7 +3298,7 @@ impl AcpClient {
                 debug!(other, "unmapped session update");
                 let compact = serde_json::to_string(update).unwrap_or_default();
                 let compact = if compact.len() > 280 {
-                    format!("{}…", &compact[..280])
+                    format!("{}…", byte_prefix(&compact, 280))
                 } else {
                     compact
                 };
@@ -3648,16 +3757,29 @@ impl AcpClient {
     pub async fn shutdown(&self) -> Result<()> {
         self.shutting_down
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        self.drain_pending_permissions().await;
-        let _ = self.cancel().await;
-        self.terminals.kill_all().await?;
-        let mut child_guard = self.child.lock().await;
-        if let Some(child) = child_guard.as_mut() {
-            crate::process::terminate(child).await?;
-        }
-        child_guard.take();
+        self.cancel().await?;
         *self.transport.write().await = None;
         Ok(())
+    }
+
+    async fn stop_owned_process(&self) -> Result<()> {
+        if let Some(process) = &self.process {
+            let outcome = process.cancel().await;
+            if !outcome.cleanup_complete {
+                return Err(AcpError::Protocol(format!("native runner cleanup remains unresolved: {}",
+                    outcome.error.unwrap_or_else(|| "owned process or pipe still active".into()))));
+            }
+            self.runner_stopped.store(true, std::sync::atomic::Ordering::Release);
+            self.stopped.cancel();
+        }
+        Ok(())
+    }
+
+    /// A stopped native runner must be resumed with its retained conversation
+    /// identity by the registry; it cannot accept work on a dead transport.
+    pub fn runner_stopped(&self) -> bool {
+        self.runner_stopped.load(std::sync::atomic::Ordering::Acquire)
+            || self.process.as_ref().and_then(ProcessHandle::outcome).is_some_and(|outcome| outcome.cleanup_complete)
     }
 
     pub fn cwd(&self) -> &Path {
@@ -3997,6 +4119,197 @@ mod tests {
         client.send_prompt("Continue inspecting.").await.unwrap();
         let request = wire_response(&mut wire).await;
         assert_eq!(request["params"]["prompt"][0]["text"], "Continue inspecting.");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stop_during_context_preparation_rejects_prompt_without_mock_completion() {
+        let mut command = Command::new("/bin/sleep");
+        command.arg("30").process_group(0).kill_on_drop(true);
+        let process = ProcessHandle::adopt(command.spawn().unwrap(), ProcessConfig {
+            timeout:None, ..Default::default()
+        }, vec![]).unwrap();
+        let bus = grok_events::shared_bus();
+        let mut events = bus.subscribe();
+        let mut client = AcpClient::mock_for_tests("admission-stop-fixture", Some(bus));
+        Arc::get_mut(&mut client).unwrap().process = Some(process);
+        let memory = client.pending_memory.lock().await;
+        let sending = client.clone();
+        let send = tokio::spawn(async move { sending.send_prompt("generated pending prompt").await });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while client.turn_epoch.load(std::sync::atomic::Ordering::Acquire) == 0 {
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        let stopping = client.clone();
+        let stop = tokio::spawn(async move { stopping.cancel().await });
+        tokio::time::timeout(Duration::from_secs(1), async {
+            while !client.cancelled.load(std::sync::atomic::Ordering::Acquire) {
+                tokio::task::yield_now().await;
+            }
+        }).await.unwrap();
+        drop(memory);
+        assert!(send.await.unwrap().is_err());
+        tokio::time::timeout(Duration::from_secs(8), stop).await.unwrap().unwrap().unwrap();
+        assert!(client.runner_stopped());
+        while let Ok(event) = events.try_recv() {
+            assert!(!matches!(event, ControlEvent::PromptFinished { .. }
+                | ControlEvent::SessionStatusChanged {status:SessionStatus::Running | SessionStatus::Idle, ..}));
+        }
+    }
+
+    #[tokio::test]
+    async fn missing_native_transport_never_reports_offline_success() {
+        let bus = grok_events::shared_bus();
+        let mut events = bus.subscribe();
+        let mut client = AcpClient::mock_for_tests("missing-native-transport", Some(bus));
+        Arc::get_mut(&mut client).unwrap().native_runner_unconfined = true;
+        let error = client.send_prompt("generated new prompt").await.unwrap_err();
+        assert!(error.to_string().contains("native transport unavailable"));
+        assert!(events.try_recv().is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn rejected_prompt_wire_write_cannot_leave_running_or_report_completion() {
+        let fixture = tempfile::tempdir().unwrap();
+        let (mut client, _wire, mut peer) = fake_policy_client(fixture.path(), ApprovalMode::Ask, false).await;
+        let bus = grok_events::shared_bus();
+        let mut events = bus.subscribe();
+        Arc::get_mut(&mut client).unwrap().event_bus = Some(bus);
+        peer.kill().await.unwrap();
+        assert!(client.send_prompt("generated rejected prompt").await.is_err());
+        let mut last_status = None;
+        while let Ok(event) = events.try_recv() {
+            match event {
+                ControlEvent::SessionStatusChanged {status, ..} => last_status = Some(status),
+                ControlEvent::PromptFinished { .. } => panic!("failed enqueue is not completion"),
+                _ => {},
+            }
+        }
+        assert_eq!(last_status, Some(SessionStatus::Failed));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_stop_waits_group_cleanup_and_keeps_conversation_identity() {
+        let mut command = Command::new("/bin/sh");
+        command.args(["-c", "sleep 30 & wait"]).process_group(0)
+            .stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true);
+        let child = command.spawn().unwrap();
+        let pgid = child.id().unwrap() as i32;
+        let process = ProcessHandle::adopt(child, ProcessConfig { timeout:None, ..Default::default() }, Vec::new()).unwrap();
+        let mut client = AcpClient::mock_for_tests("retained-native-conversation", None);
+        Arc::get_mut(&mut client).unwrap().process = Some(process);
+        tokio::time::timeout(Duration::from_secs(8), client.cancel()).await.unwrap().unwrap();
+        assert!(client.runner_stopped());
+        assert_eq!(client.session_id().await.as_deref(), Some("retained-native-conversation"));
+        assert_ne!(unsafe { libc::kill(-pgid, 0) }, 0);
+        assert!(client.send_prompt("must explicitly resume").await.is_err());
+        assert_eq!(client.turn_epoch.load(std::sync::atomic::Ordering::Acquire), 1);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn failed_startup_cleanup_returns_retry_owner_instead_of_discarding_it() {
+        let mut command = Command::new("/bin/sleep");
+        command.arg("30").process_group(0).kill_on_drop(true);
+        let (reporter, ticket) = DrainTicket::pair();
+        let process = ProcessHandle::adopt(command.spawn().unwrap(), ProcessConfig {
+            timeout:None, cleanup_timeout:Duration::from_millis(50), ..Default::default()
+        }, vec![ticket]).unwrap();
+        let mut client = AcpClient::mock_for_tests("startup-fixture", None);
+        Arc::get_mut(&mut client).unwrap().process = Some(process);
+        let error = client.explain_startup_error(AcpError::Protocol("generated handshake failure".into())).await;
+        let retained = match error {
+            AcpError::StartupCleanup { reason, process } => {
+                assert!(reason.contains("generated handshake failure")); process
+            }, other => panic!("cleanup owner lost: {other}"),
+        };
+        assert!(!retained.outcome().unwrap().cleanup_complete);
+        reporter.complete(Ok(()));
+        assert!(retained.cancel().await.cleanup_complete);
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn late_native_prompt_completion_cannot_revive_a_cancelled_turn() {
+        let mut peer = Command::new("/usr/bin/awk")
+            .arg(r#"/session\/prompt/ {match($0, /"id":"[^"]*"/); id=substr($0,RSTART+6,RLENGTH-7); print "{\"jsonrpc\":\"2.0\",\"method\":\"fake/seen\",\"params\":" $0 "}"; fflush();} /session\/cancel/ {print "{\"jsonrpc\":\"2.0\",\"id\":\"" id "\",\"result\":{\"stopReason\":\"end_turn\"}}"; fflush();}"#)
+            .stdin(Stdio::piped()).stdout(Stdio::piped()).kill_on_drop(true).spawn().unwrap();
+        let (tx, mut wire) = tokio::sync::mpsc::unbounded_channel();
+        let (request_tx, _) = tokio::sync::mpsc::unbounded_channel();
+        let transport = NdjsonTransport::new(peer.stdin.take().unwrap(), peer.stdout.take().unwrap(), tx, request_tx);
+        let bus = grok_events::shared_bus();
+        let mut events = bus.subscribe();
+        let client = AcpClient::mock_for_tests("retained-conversation", Some(bus));
+        *client.transport.write().await = Some(transport);
+        client.send_prompt("generated fixture prompt").await.unwrap();
+        assert_eq!(wire_response(&mut wire).await["method"], "session/prompt");
+        while events.try_recv().is_ok() {}
+        client.cancel().await.unwrap();
+        let fence = tokio::time::timeout(Duration::from_secs(3), wire.recv()).await.unwrap().unwrap();
+        match fence {
+            NotificationEvent::Fence(ack) => ack.send(()).unwrap(),
+            NotificationEvent::Notification(_) => panic!("unexpected fake notification"),
+        }
+        while let Ok(event) = events.try_recv() {
+            assert!(!matches!(event, ControlEvent::PromptFinished { .. }
+                | ControlEvent::SessionStatusChanged { status:SessionStatus::Idle, .. }));
+        }
+        assert!(tokio::time::timeout(Duration::from_millis(50), events.recv()).await.is_err());
+        assert!(client.cancelled.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn hosted_cleanup_failure_still_stops_native_runner_and_retains_retry() {
+        let spawn = || {
+            let mut command = Command::new("/bin/sleep");
+            command.arg("30").process_group(0).kill_on_drop(true);
+            command.spawn().unwrap()
+        };
+        let native = spawn(); let native_pgid = native.id().unwrap() as i32;
+        let native = ProcessHandle::adopt(native, ProcessConfig {timeout:None, ..Default::default()}, vec![]).unwrap();
+        let (reporter, ticket) = DrainTicket::pair();
+        let terminal = ProcessHandle::adopt(spawn(), ProcessConfig {
+            timeout:None, cleanup_timeout:Duration::from_millis(50), ..Default::default()
+        }, vec![ticket]).unwrap();
+        let retained_terminal = terminal.clone();
+        let mut client = AcpClient::mock_for_tests("partial-cleanup", None);
+        Arc::get_mut(&mut client).unwrap().process = Some(native);
+        client.terminals.retain_fixture_process(terminal).await;
+        assert!(client.cancel().await.is_err());
+        assert!(client.runner_stopped());
+        assert_ne!(unsafe { libc::kill(-native_pgid, 0) }, 0);
+        assert!(!retained_terminal.outcome().unwrap().cleanup_complete);
+        assert!(client.cancelling.load(std::sync::atomic::Ordering::Acquire));
+        reporter.complete(Ok(()));
+        client.cancel().await.unwrap();
+        assert!(retained_terminal.outcome().unwrap().cleanup_complete);
+        assert!(!client.cancelling.load(std::sync::atomic::Ordering::Acquire));
+    }
+
+    #[tokio::test]
+    async fn multilingual_native_updates_survive_summary_and_json_clip_boundaries() {
+        let bus = grok_events::shared_bus();
+        let mut events = bus.subscribe();
+        let client = AcpClient::mock_for_tests("multilingual-fixture", Some(bus));
+        let text = format!("{}{}", "x".repeat(119), "é".repeat(300));
+        client.handle_notification(JsonRpcNotification {jsonrpc:"2.0".into(), method:"session/update".into(),
+            params:Some(json!({"sessionId":"multilingual-fixture","update":{"sessionUpdate":"unrecognized-summary","content":{"type":"text","text":text}}}))}).await;
+        let mut custom = "é".repeat(300);
+        let mut update = json!({"sessionUpdate":"unrecognized-custom","custom":custom});
+        if serde_json::to_string(&update).unwrap().is_char_boundary(280) {
+            custom.insert(0, 'x');
+            update = json!({"sessionUpdate":"unrecognized-custom","custom":custom});
+        }
+        assert!(!serde_json::to_string(&update).unwrap().is_char_boundary(280));
+        client.handle_notification(JsonRpcNotification {jsonrpc:"2.0".into(), method:"session/update".into(),
+            params:Some(json!({"sessionId":"multilingual-fixture","update":update}))}).await;
+        let mut received = 0;
+        while events.try_recv().is_ok() { received += 1; }
+        assert!(received >= 2);
     }
 
     #[test]

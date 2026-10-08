@@ -16,6 +16,7 @@ pub mod auth;
 pub mod backend_auth;
 pub mod inspect;
 pub mod spawn_opts;
+pub mod process;
 
 pub use auth::{AuthStatus, LoginManager, LoginPhase, LoginResult, LoginSessionState};
 pub use backend_auth::{AuthKind, BackendAuth};
@@ -108,11 +109,14 @@ impl GrokCli {
         cwd: &Path,
         prompt: &str,
         opts: &HeadlessSpawnOptions,
-    ) -> Result<Child> {
+    ) -> Result<(Child,process::GroupProof)> {
+        process::ProcessConfig::ensure_supported()?;
         validate_cwd(cwd)?;
         validate_prompt(prompt)?;
 
         let mut cmd = Command::new(&self.grok_path);
+        #[cfg(unix)]
+        cmd.process_group(0);
         cmd.current_dir(cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
@@ -140,8 +144,7 @@ impl GrokCli {
         cmd.arg("-p").arg(prompt);
 
         debug!(binary = %self.grok_path.display(), cwd = %cwd.display(), "spawn headless");
-        let child = cmd.spawn()?;
-        Ok(child)
+        Ok(process::spawn_group(&mut cmd)?)
     }
 
     /// Worktree: create via `grok worktree create` or git fallback helpers (higher layer).

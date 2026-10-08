@@ -497,3 +497,42 @@ Paul ordered policy/workspace enforcement before process completion and durable 
 One canonical process-wide workspace coordinator protects managed ordinary/resumed sessions, Builds and Git operations; opaque role capabilities retain parent ownership through unresolved cleanup. Requested isolation fails visibly. Land/Sync require explicit clean commits and preserve dirty edits. Queue denial or a missing checkout affects its candidate only; independent repositories stay eligible, with visible diagnostics. Git identity discovery is bounded before admission locks. QA validates native store aliases and selects a separate canonical WebKit store before window creation on macOS14+. Discovery preserves configured fake backends. Native A/B remains unrun.
 
 Remove synthesized wildcard approval buttons; display actual host mode after live changes and block unconfirmed Send, including keyboard entry. Centralize Yolo confirmation for both button and keyboard. Saved memory/recovery text remains historical reference, without operation/policy authority or semantic-truth status. Independent architecture and simplicity reviews accept the source repairs. Consolidated locked/offline Rust tests:274pass,0fail,6ignored; frontend199pass; Python136pass; workspacecheck and strict all-targetClippypass; diff-whitespacepass. Retain failure receipts outsideGit. Process/descendant completion, durable events, whole-native broker enforcement and final signed packaged workflows/recovery/accessibility/performance remain required. No installed app, original store, provider, signing or production mutation occurred.
+
+## Process completion and recovery source checkpoint — 2026-10-07
+
+Continue Paul's ordered policy/workspace → process completion → durable events
+release work. Consolidate ACP, hosted terminals and headless workers on one
+supervisor with bounded output, observed exit/EOF, typed outcomes and retained
+cleanup ownership. Record the dedicated process-group scope explicitly; detached
+descendants remain outside it. Default native Plan/reviewed roles remain refused
+until complete native enforcement is demonstrated.
+
+Persist scheduler admission/result snapshots before publication, retain run and
+session identities/history, refuse automatic interruption replay and fence stale
+cleanup against a newer attempt. Stop preserves uncertainty and still requests
+protective cleanup if saving fails. Quit fences both admission owners, reconciles
+scheduler results before removing sessions and preserves unresolved owners for
+retry. User Stop-all remains reversible. The frontend exposes results/scope/error,
+labels attempts accurately and guards confirmations/drafts. Restore saved native
+launch ceilings without widening legacy authority or carrying pending grants.
+
+Independent reviews found and repaired missing-transport mock success after
+Stop, failed enqueue remaining Running, premature status projections, deletion
+before scheduler reconciliation and a fast-exit group-verification race. Use an
+opaque host launch proof plus non-reaping owned-child observation; reject wrong,
+reaped and unidentified children. Stress64 delayed-adoption and64 actual terminal
+quick exits. Keep initial failures and the outer-sandbox cleanup denial; the
+bounded Quit test and final workspace suite pass outside that inherited sandbox.
+
+Final source verification:319Rustpasses,0fail,6existingignored;208frontendpasses;
+158Pythonpasses, including22 candidate-evidence validator fixtures. Workspace
+check, strict all-target Clippy and diff-whitespace pass. Architecture and
+simplicity reviews accept the scoped checkpoint. Add a receipt-consistency
+validator requiring current signed identity, story contracts, repeat runs and raw
+matched native performance traces; mock tests are not packaged observations or
+human approval. Update C3-034 to Stop/history/observed-result expectations.
+
+Durable ingress/runtime generations, whole-native enforcement, aggregate resource
+admission, other process utilities and final signed packaged workflows/recovery/
+accessibility/performance remain open. No installed app, original store, provider,
+signing/notarization or production publication was changed in this checkpoint.

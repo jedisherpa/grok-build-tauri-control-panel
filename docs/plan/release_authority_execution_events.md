@@ -63,3 +63,20 @@ WebKit data store or every external CLI. Verify further isolation before native
 mutation. An older app that does not participate in a new profile lock must be
 closed before shared-store activation. Any remaining unenforceable capability is
 explicitly unavailable or an open release gate, never an implicit fallback.
+
+## Process cleanup coverage
+
+The shared supervisor observes exit, bounded pipes and the dedicated process
+group. That is useful cooperative cleanup evidence; it cannot certify descendants
+that detach into a different group or session. Outcomes must state that scope,
+and tests must retain an independently cleaned detached-child fixture. A native
+runtime needs separate containment/ownership qualification before the release
+can claim complete descendant cleanup or release a protected workspace based on
+that claim. Polling process lists is not a replacement guarantee.
+
+The local Mac reports Darwin 24.6.0, XNU `11417.140.69`. The matching Apple source
+allows a nonleader to create another session in
+[setsid_internal](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/bsd/kern/kern_prot.c#L460).
+Its [process event filter](https://github.com/apple-oss-distributions/xnu/blob/xnu-11417.140.69/bsd/kern/kern_event.c#L1036)
+rejects `NOTE_TRACK`, `NOTE_TRACKERR` and `NOTE_CHILD` with `ENOTSUP`. Do not
+assume FreeBSD's descendant tracking behavior is available on this Darwin build.

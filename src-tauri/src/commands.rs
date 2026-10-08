@@ -749,6 +749,13 @@ pub async fn send_prompt(
         !t.is_empty() && !t.eq_ignore_ascii_case("default")
     });
 
+    // Stop ended the owned native runner. This new user Send deliberately
+    // reconnects the same conversation; no prior effectful prompt is replayed.
+    if state.registry.requires_reconnect(id) {
+        persist_session_checked(&state, id)?;
+        state.registry.remove_session(id).await.map_err(err)?;
+    }
+
     // Switching backend/model mid-thread: restart the thread under the new
     // agent. Cross-agent session/load can't work, so the resume ladder lands
     // on history-only and injects the prior transcript as context.
@@ -869,6 +876,28 @@ pub async fn send_prompt(
 /// Overrides switch the thread to a different backend/model; a backend switch
 /// drops the prior ACP session id (it belongs to another agent) so the ladder
 /// goes straight to history-only transcript injection.
+#[derive(serde::Deserialize)]
+#[serde(default, rename_all="camelCase")]
+struct SavedLaunchAuthority {
+    #[serde(alias="sandbox_profile")] sandbox_profile:Option<String>,
+    #[serde(alias="permission_allow")] permission_allow:Vec<String>,
+    #[serde(alias="permission_deny")] permission_deny:Vec<String>,
+    rules:Vec<String>,
+    #[serde(alias="trust_repo")] trust_repo:bool,
+    #[serde(alias="read_only")] read_only:bool,
+    #[serde(alias="approval_mode")] approval_mode:Option<grok_control_core::ApprovalMode>,
+    #[serde(alias="plan_mode")] plan_mode:bool,
+    #[serde(alias="always_approve")] always_approve:bool,
+}
+impl Default for SavedLaunchAuthority {
+    fn default()->Self { Self {sandbox_profile:Some("workspace".into()),permission_allow:vec![],permission_deny:vec![],rules:vec![],trust_repo:false,read_only:false,approval_mode:None,plan_mode:true,always_approve:false} }
+}
+fn saved_launch_authority(json:&str)->Result<SavedLaunchAuthority,String> {
+    let value:serde_json::Value=serde_json::from_str(json).map_err(|error|format!("cannot resume: saved launch authority is invalid — {error}"))?;
+    let metadata=value.get("metadata").unwrap_or(&value).clone();
+    serde_json::from_value(metadata).map_err(|error|format!("cannot resume: saved launch authority is invalid — {error}"))
+}
+
 pub(crate) async fn resume_saved_session(
     state: &AppState,
     id: Uuid,
@@ -916,9 +945,13 @@ pub(crate) async fn resume_saved_session(
     // Preserve the project link so Land/Sync keep working after a restart.
     // Never re-isolate on resume: the stored cwd already IS the worktree.
     opts.isolate_worktree = false;
-    opts.read_only = serde_json::from_str::<serde_json::Value>(&rec.metadata_json).ok()
-        .and_then(|v| v.pointer("/metadata/readOnly").or_else(|| v.pointer("/metadata/read_only")).and_then(|v| v.as_bool()))
-        .unwrap_or(false);
+    let saved_authority = saved_launch_authority(&rec.metadata_json)?;
+    opts.read_only = saved_authority.read_only;
+    opts.sandbox_profile = saved_authority.sandbox_profile.clone();
+    opts.permission_allow = saved_authority.permission_allow.clone();
+    opts.permission_deny = saved_authority.permission_deny.clone();
+    opts.rules = saved_authority.rules.clone();
+    opts.trust_repo = saved_authority.trust_repo;
     opts.project_root = extract_meta_string(&rec.metadata_json, "projectRoot")
         .or_else(|| extract_meta_string(&rec.metadata_json, "project_root"));
     // Honor the caller's current stance. An explicit approval_mode wins;
@@ -930,11 +963,14 @@ pub(crate) async fn resume_saved_session(
         "ask" | "default" => Some(grok_control_core::ApprovalMode::Ask),
         _ => None,
     });
-    opts.always_approve = always_approve.unwrap_or(false);
+    if opts.approval_mode.is_none() && plan_mode.is_none() && always_approve.is_none() {
+        opts.approval_mode = saved_authority.approval_mode.or(Some(if saved_authority.always_approve {grok_control_core::ApprovalMode::Yolo} else if saved_authority.plan_mode {grok_control_core::ApprovalMode::Plan}else{grok_control_core::ApprovalMode::Ask}));
+    }
+    opts.always_approve = always_approve.unwrap_or(saved_authority.always_approve);
     opts.plan_mode = if opts.always_approve {
         false
     } else {
-        plan_mode.unwrap_or(false)
+        plan_mode.unwrap_or(saved_authority.plan_mode)
     };
     opts.mcp_server_names = extract_mcp_from_meta(&rec.metadata_json);
     // Re-apply the high-risk approvals granted when the thread was created —
@@ -2018,7 +2054,7 @@ pub struct SchedulerAddRequest {
     pub once_delay_secs: Option<u64>,
     pub cwd: Option<String>,
     pub max_runs: Option<u64>,
-    /// When false/omitted, the job is created then immediately paused so
+    /// When false/omitted, the job is atomically admitted as paused so
     /// routines never auto-fire from the UI without an explicit enable.
     #[serde(default)]
     pub enable: bool,
@@ -2058,28 +2094,11 @@ pub async fn scheduler_add(
             secs: request.interval_secs.unwrap_or(3600),
         }
     };
-    let job = state
-        .scheduler
-        .add(
-            name,
-            prompt,
-            schedule,
-            Some(cwd),
-            request.max_runs,
-        )
-        .await
-        .map_err(err)?;
-    if !request.enable {
-        state.scheduler.pause(&job.id).await.map_err(err)?;
-        let paused = state
-            .scheduler
-            .list()
-            .await
-            .into_iter()
-            .find(|j| j.id == job.id)
-            .unwrap_or(job);
-        return Ok(paused);
-    }
+    let job = if request.enable {
+        state.scheduler.add(name,prompt,schedule,Some(cwd),request.max_runs).await
+    } else {
+        state.scheduler.add_paused(name,prompt,schedule,Some(cwd),request.max_runs).await
+    }.map_err(err)?;
     Ok(job)
 }
 
@@ -2142,9 +2161,24 @@ pub async fn persistence_checkpoint(state: State<'_, AppState>) -> Result<(), St
 
 #[tauri::command]
 pub async fn shutdown_all(state: State<'_, AppState>) -> Result<(), String> {
-    state.registry.shutdown_all().await;
-    state.persistence.checkpoint().map_err(err)?;
-    Ok(())
+    let scheduler = state.scheduler.stop_all().await;
+    let retained=state.scheduler.retained_session_ids().await;
+    let registry = state.registry.shutdown_preserving(retained).await;
+    let checkpoint = state.persistence.checkpoint();
+    let errors = [scheduler.err().map(err),registry.err().map(err),checkpoint.err().map(err)].into_iter().flatten().collect::<Vec<_>>();
+    if errors.is_empty() {Ok(())} else {Err(errors.join("; "))}
+}
+
+fn persist_session_checked(state: &AppState, id: Uuid) -> Result<(), String> {
+    let snap = state.registry.get_snapshot(id).map_err(err)?;
+    let rec = SessionRecord {
+        id, cwd:snap.metadata.cwd.clone(), mode:match snap.metadata.mode { grok_control_core::AgentMode::Acp=>"acp", grok_control_core::AgentMode::Headless=>"headless" }.into(),
+        model:snap.metadata.model.clone(), status:format!("{:?}",snap.metadata.status).to_lowercase(),
+        worktree:snap.metadata.worktree.clone(), acp_session_id:snap.metadata.acp_session_id.clone(),
+        metadata_json:serde_json::to_string(&snap).map_err(err)?, created_at:snap.metadata.created_at,
+        updated_at:Utc::now(), message_count:0,
+    };
+    state.persistence.upsert_session(&rec).map_err(|error|format!("cannot reconnect: stopped session snapshot was not saved — {error}"))
 }
 
 pub(crate) async fn persist_session(state: &AppState, id: Uuid) {
@@ -2562,4 +2596,24 @@ pub async fn reveal_project(
 ) -> Result<(), String> {
     let path = resolve_preview_cwd(&state, cwd, session_id)?;
     crate::devserver::DevServerManager::reveal_project(&path).await
+}
+
+#[cfg(test)]
+mod saved_launch_authority_tests {
+    use super::*;
+    #[test]
+    fn reconnect_preserves_launch_ceiling_and_legacy_imports_default_to_plan() {
+        let saved = saved_launch_authority(r#"{"metadata":{"sandboxProfile":"unrestricted","permissionAllow":["Read(*)"],"permissionDeny":["Write(*)"],"rules":["stay read only"],"readOnly":true,"trustRepo":true,"approvalMode":"ask","planMode":false,"alwaysApprove":false,"acpSessionId":"native-kept"}}"#).unwrap();
+        assert_eq!(saved.sandbox_profile.as_deref(), Some("unrestricted"));
+        assert!(saved.read_only && saved.trust_repo);
+        assert_eq!(saved.permission_deny, ["Write(*)"]);
+        assert_eq!(saved.permission_allow, ["Read(*)"]);
+        assert_eq!(saved.rules, ["stay read only"]);
+        assert_eq!(saved.approval_mode, Some(grok_control_core::ApprovalMode::Ask));
+        let imported = saved_launch_authority(r#"{"source":"old-import","foreignMetadata":true}"#).unwrap();
+        assert!(imported.plan_mode && !imported.always_approve);
+        assert_eq!(imported.sandbox_profile.as_deref(),Some("workspace"));
+        assert!(saved_launch_authority(r#"{"metadata":{"readOnly":"false"}}"#).is_err());
+        assert!(saved_launch_authority("corrupt preserved bytes").is_err());
+    }
 }

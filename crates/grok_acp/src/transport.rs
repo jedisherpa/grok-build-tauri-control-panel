@@ -5,17 +5,46 @@ use std::sync::{Arc, atomic::{AtomicBool, Ordering}};
 use std::time::Duration;
 
 use serde_json::Value;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout};
 use tokio::sync::{Mutex, oneshot};
 use tracing::{debug, warn};
 use uuid::Uuid;
 
 use crate::error::{AcpError, Result};
+use grok_cli_wrapper::process::DrainReporter;
 use crate::messages::{
     id_key, IncomingAgentRequest, JsonRpcError, JsonRpcMessage, JsonRpcNotification, JsonRpcRequest,
     JsonRpcResponse,
 };
+
+pub(crate) const MAX_FRAME_BYTES: usize = 1024 * 1024;
+
+/// Never allocate an unbounded newline-free frame from an untrusted runner.
+/// An oversize or invalid UTF-8 record ends the transport with an explicit
+/// drain error; its supervisor is responsible for observed process cleanup.
+pub(crate) async fn bounded_line<R: AsyncBufRead + Unpin>(reader: &mut R, bytes: &mut Vec<u8>) -> std::io::Result<usize> {
+    bytes.clear();
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() { return Ok(bytes.len()); }
+        let count = available.iter().position(|byte| *byte == b'\n').map_or(available.len(), |index| index + 1);
+        if bytes.len() + count > MAX_FRAME_BYTES {
+            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "native ACP frame exceeds 1 MiB limit"));
+        }
+        let complete = available[count - 1] == b'\n';
+        bytes.extend_from_slice(&available[..count]);
+        reader.consume(count);
+        if complete { return Ok(bytes.len()); }
+    }
+}
+
+pub(crate) async fn discard_to_eof<R: tokio::io::AsyncRead + Unpin>(reader: &mut R) -> std::io::Result<()> {
+    use tokio::io::AsyncReadExt;
+    let mut buffer = [0u8; 8192];
+    while reader.read(&mut buffer).await? != 0 {}
+    Ok(())
+}
 
 /// Local fences share the notification FIFO but cannot be supplied by the agent.
 pub enum NotificationEvent {
@@ -27,6 +56,8 @@ pub struct NdjsonTransport {
     stdin: Mutex<Option<ChildStdin>>,
     poisoned: AtomicBool,
     write_timeout: Duration,
+    drain_reporter: Mutex<Option<DrainReporter>>,
+    stdout_eof_observed: AtomicBool,
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<JsonRpcResponse>>>>,
     notification_tx: tokio::sync::mpsc::UnboundedSender<NotificationEvent>,
     agent_request_tx: tokio::sync::mpsc::UnboundedSender<IncomingAgentRequest>,
@@ -39,10 +70,22 @@ impl NdjsonTransport {
         notification_tx: tokio::sync::mpsc::UnboundedSender<NotificationEvent>,
         agent_request_tx: tokio::sync::mpsc::UnboundedSender<IncomingAgentRequest>,
     ) -> Arc<Self> {
+        Self::new_with_drain(stdin, stdout, notification_tx, agent_request_tx, None)
+    }
+
+    pub(crate) fn new_with_drain(
+        stdin: ChildStdin,
+        stdout: ChildStdout,
+        notification_tx: tokio::sync::mpsc::UnboundedSender<NotificationEvent>,
+        agent_request_tx: tokio::sync::mpsc::UnboundedSender<IncomingAgentRequest>,
+        drain_reporter: Option<DrainReporter>,
+    ) -> Arc<Self> {
         let transport = Arc::new(Self {
             stdin: Mutex::new(Some(stdin)),
             poisoned: AtomicBool::new(false),
             write_timeout: Duration::from_secs(5),
+            drain_reporter: Mutex::new(drain_reporter),
+            stdout_eof_observed: AtomicBool::new(false),
             pending: Arc::new(Mutex::new(HashMap::new())),
             notification_tx,
             agent_request_tx,
@@ -60,6 +103,13 @@ impl NdjsonTransport {
 
     async fn read_loop(self: Arc<Self>, stdout: ChildStdout) -> Result<()> {
         let result = self.read_loop_inner(stdout).await;
+        if let Some(reporter) = self.drain_reporter.lock().await.take() {
+            reporter.complete(if self.stdout_eof_observed.load(Ordering::Acquire) {
+                Ok(())
+            } else {
+                Err(result.as_ref().err().map(ToString::to_string).unwrap_or_else(|| "stdout ended without observed EOF".into()))
+            });
+        }
         // Fail every pending waiter immediately — otherwise callers block for
         // their full request timeout (up to minutes) after the process dies.
         let mut pending = self.pending.lock().await;
@@ -71,13 +121,21 @@ impl NdjsonTransport {
 
     async fn read_loop_inner(&self, stdout: ChildStdout) -> Result<()> {
         let mut reader = BufReader::new(stdout);
-        let mut line = String::new();
+        let mut bytes = Vec::new();
         loop {
-            line.clear();
-            let n = reader.read_line(&mut line).await?;
+            let n = match bounded_line(&mut reader, &mut bytes).await {
+                Ok(count) => count,
+                Err(error) => return self.settle_read_error(&mut reader, error).await,
+            };
             if n == 0 {
+                self.stdout_eof_observed.store(true, Ordering::Release);
                 return Err(AcpError::ProcessExited);
             }
+            let line = match std::str::from_utf8(&bytes) {
+                Ok(line) => line,
+                Err(error) => return self.settle_read_error(&mut reader,
+                    std::io::Error::new(std::io::ErrorKind::InvalidData, error)).await,
+            };
             let trimmed = line.trim();
             if trimmed.is_empty() {
                 continue;
@@ -141,6 +199,20 @@ impl NdjsonTransport {
                 }
             }
         }
+    }
+
+    async fn settle_read_error<R: tokio::io::AsyncRead + Unpin>(&self, reader: &mut R, error: std::io::Error) -> Result<()> {
+        if let Some(reporter) = self.drain_reporter.lock().await.as_ref() {
+            reporter.fail(error.to_string());
+        } else {
+            // Standalone/fake transports do not own a native supervisor. There
+            // is no external EOF contract to recover, so fail immediately.
+            return Err(error.into());
+        }
+        if discard_to_eof(reader).await.is_ok() {
+            self.stdout_eof_observed.store(true, Ordering::Release);
+        }
+        Err(error.into())
     }
 
     /// After a response arrives, every earlier wire notification is already in
@@ -315,6 +387,53 @@ mod tests {
     use super::*;
     use std::{process::Stdio, time::Duration};
     use tokio::sync::oneshot::error::TryRecvError;
+
+    #[tokio::test]
+    async fn oversized_newline_free_frame_has_a_fixed_allocation_bound() {
+        let payload = vec![b'x'; MAX_FRAME_BYTES * 2];
+        let mut reader = BufReader::new(std::io::Cursor::new(payload));
+        let mut frame = Vec::new();
+        let error = bounded_line(&mut reader, &mut frame).await.unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidData);
+        assert!(frame.len() <= MAX_FRAME_BYTES);
+        assert!(frame.capacity() <= MAX_FRAME_BYTES);
+    }
+
+    #[tokio::test]
+    async fn newline_free_native_flood_fails_and_reaches_verified_group_and_pipe_cleanup() {
+        use grok_cli_wrapper::process::{ProcessHandle, ProcessConfig, ProcessEnd, DrainTicket};
+        let mut child = tokio::process::Command::new("/bin/sh")
+            .args(["-c", "head -c 2097152 /dev/zero; sleep 30"])
+            .process_group(0).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
+            .kill_on_drop(true).spawn().unwrap();
+        let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (requests, _request_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (reporter, ticket) = DrainTicket::pair();
+        let _transport = NdjsonTransport::new_with_drain(child.stdin.take().unwrap(), child.stdout.take().unwrap(), notifications, requests, Some(reporter));
+        let process = ProcessHandle::adopt(child, ProcessConfig { timeout:None, ..Default::default() }, vec![ticket]).unwrap();
+        let outcome = tokio::time::timeout(Duration::from_secs(8), process.wait_outcome()).await.unwrap();
+        assert_eq!(outcome.end, ProcessEnd::IoFailure, "{outcome:?}");
+        assert!(outcome.cleanup_complete && outcome.pipes_complete, "{outcome:?}");
+        assert!(outcome.error.unwrap().contains("frame exceeds"));
+    }
+
+    #[tokio::test]
+    async fn malformed_utf8_native_frame_stops_runner_without_a_success_claim() {
+        use grok_cli_wrapper::process::{ProcessHandle, ProcessConfig, ProcessEnd, DrainTicket};
+        let mut child = tokio::process::Command::new("/bin/sh")
+            .args(["-c", r#"printf '\377\n'; sleep 30"#])
+            .process_group(0).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped())
+            .kill_on_drop(true).spawn().unwrap();
+        let (notifications, _receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (requests, _request_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (reporter, ticket) = DrainTicket::pair();
+        let _transport = NdjsonTransport::new_with_drain(child.stdin.take().unwrap(), child.stdout.take().unwrap(), notifications, requests, Some(reporter));
+        let process = ProcessHandle::adopt(child, ProcessConfig { timeout:None, ..Default::default() }, vec![ticket]).unwrap();
+        let outcome = tokio::time::timeout(Duration::from_secs(8), process.wait_outcome()).await.unwrap();
+        assert_eq!(outcome.end, ProcessEnd::IoFailure, "{outcome:?}");
+        assert!(outcome.cleanup_complete && outcome.pipes_complete);
+        assert!(outcome.error.unwrap().contains("utf-8"));
+    }
 
     #[tokio::test]
     async fn non_draining_peer_times_out_and_cannot_receive_a_later_grant() {

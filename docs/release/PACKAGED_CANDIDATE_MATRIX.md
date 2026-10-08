@@ -53,3 +53,52 @@ After stapling, recheck signature and ticket, retain the changed bundle manifest
 and verify the downloaded asset has the same executable/resources and passes
 Gatekeeper plus the upgrade/rollback story. Include failures, revised stories and
 unrun external requirements in QUALIFICATION_REPORT.md.
+
+## Machine-checked evidence ledger
+
+`scripts/candidate_evidence.py` checks receipt consistency before submission,
+including a fresh native candidate preflight against the intended signing team.
+It does not sign, submit, publish, verify a human's observation or grant release
+approval. Keep evidence outside source and bundle paths. Each reference is
+`{ "path": "relative-file", "sha256": "..." }`; aliases, hardlinks, altered
+bytes and duplicate JSON keys are rejected. Never turn generated validator
+fixtures into packaged test receipts.
+
+The `c3-candidate-evidence/v1` ledger contains:
+
+- `preflight`: the Developer ID candidate preflight receipt.
+- `build`: `c3-build-provenance/v1`, with candidate identity, Cargo.lock digest,
+  exact command, rustc/cargo/Tauri/Xcode versions and build-log reference.
+- `source_gates`: passed policy/workspace, process-completion, durable-events
+  and native-enforcement records, all pinned to the final source SHA.
+- `definitions`: all C3-001 through C3-042, using the current USER_STORIES
+  Revision header and contract digest, plus `story_revisions` pointing to the
+  current revision record. C3-043/044 require separate distribution evidence.
+- `performance_budgets`: a `c3-performance-budgets/v1` record declared before
+  measurements, with metric maximum, unit, minimum samples and statistic.
+- `runs`: immutable `c3-packaged-run/v1` records identifying candidate, unique
+  run ID, start/finish times, case/category, profile, stories/revisions, evidence
+  levels, observed outcome, generated fixture, unique observation and receipts.
+
+Native enforcement includes verified Grok, Codex and Claude capability receipts
+with executable/adapter/SDK hashes and actual probes for Plan, immutable review
+ceilings, workspace containment, deny-first policy and contained children.
+Unavailable capabilities refuse the ledger. Provider runs identify the actual
+backend/model/input and reference that backend's verified capability receipt.
+Recovery runs identify the interrupted operation and before/after evidence.
+Haven uses an actual test service; portable prerequisites require a clean account
+or machine. A generated packaged run cannot replace these evidence levels.
+
+Each required case and story level needs two independent nonoverlapping passes
+after the latest failure finishes. Keep failed and blocked records. Source or
+contract changes require current-candidate reruns; renaming run IDs or reusing
+observation/trace bytes cannot create repeat evidence.
+
+Performance records bind baseline and candidate identity, machine/OS/display/
+window/power/thermal conditions and the complete 1k/10k/50k by 1/3/8 workload
+matrix, process-cold/warm starts and at least twenty navigation cycles. Metric
+samples have matching baseline workload labels and repeated samples per
+workload. `c3-native-metric-trace/v1` documents bind samples, method, conditions,
+scenario and raw trace digest. Hitch and CPU metrics require native Instruments
+traces. Retain shell/WebKit/provider memory attribution separately. Missing
+metrics, budgets or raw traces remain an open gate.

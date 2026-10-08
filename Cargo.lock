@@ -1325,6 +1325,7 @@ dependencies = [
  "async-trait",
  "chrono",
  "futures",
+ "grok_cli_wrapper",
  "grok_events",
  "grok_permissions",
  "libc",
@@ -1354,8 +1355,10 @@ name = "grok_cli_wrapper"
 version = "0.1.13"
 dependencies = [
  "anyhow",
+ "chrono",
  "directories",
  "grok_config",
+ "libc",
  "serde",
  "serde_json",
  "tempfile",
@@ -1519,6 +1522,7 @@ version = "0.1.13"
 dependencies = [
  "chrono",
  "cron",
+ "grok_cli_wrapper",
  "grok_events",
  "serde",
  "serde_json",

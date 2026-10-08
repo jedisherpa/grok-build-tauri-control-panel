@@ -18,6 +18,8 @@ pub enum AcpError {
     AuthRequired(String),
     #[error("timeout: {0}")]
     Timeout(String),
+    #[error("native startup failed and cleanup remains unresolved: {reason}")]
+    StartupCleanup { reason: String, process: grok_cli_wrapper::process::ProcessHandle },
     #[error("session not ready")]
     SessionNotReady,
     #[error("cancelled")]

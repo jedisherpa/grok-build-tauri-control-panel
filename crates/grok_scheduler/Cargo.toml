@@ -8,6 +8,7 @@ description = "Recurring job scheduler for agent routines and goals"
 [dependencies]
 chrono.workspace = true
 cron.workspace = true
+grok_cli_wrapper = { path = "../grok_cli_wrapper" }
 grok_events = { path = "../grok_events" }
 serde.workspace = true
 serde_json.workspace = true
@@ -17,4 +18,4 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time", "test-util"] }

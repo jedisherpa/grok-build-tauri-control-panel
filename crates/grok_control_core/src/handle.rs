@@ -2,8 +2,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
-use tokio::process::Child;
-use tokio::sync::Mutex;
+use grok_cli_wrapper::process::{ProcessHandle, ProcessOutcome};
 use uuid::Uuid;
 
 use grok_acp::{AcpClient, BrainMode};
@@ -37,6 +36,16 @@ pub struct SessionMetadata {
     pub read_only: bool,
     pub always_approve: bool,
     pub sandbox_profile: Option<String>,
+    #[serde(default)]
+    pub permission_allow: Vec<String>,
+    #[serde(default)]
+    pub permission_deny: Vec<String>,
+    #[serde(default)]
+    pub rules: Vec<String>,
+    #[serde(default)]
+    pub trust_repo: bool,
+    #[serde(default)]
+    pub process_outcome: Option<ProcessOutcome>,
     /// MCP server names attached at spawn time.
     pub mcp_servers: Vec<String>,
     /// High-risk MCP approvals granted for this session (persisted so resume
@@ -59,7 +68,7 @@ pub struct AgentHandleSnapshot {
 
 pub struct AgentHandle {
     pub metadata: SessionMetadata,
-    pub child: Option<Mutex<Child>>,
+    pub child: Option<ProcessHandle>,
     pub acp_client: Option<Arc<AcpClient>>,
 }
 

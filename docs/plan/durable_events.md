@@ -31,6 +31,15 @@ event and updates transcript/status projections. Only its successful commit may
 publish the committed envelope: store ID, generation, sequence and event.
 Remove the independently lagging persistence subscriber in the Tauri setup.
 
+Store generation alone does not fence a resumed native runner. Assign an opaque
+host runtime generation before each session producer starts and carry it through
+committed envelopes, status changes and turn completion. Scoped producer handles
+share the same publication owner and storage sink; they are not separate buses
+or runners. Registry/projection consumers must reject an older runtime's status
+after a same-ID resume, and reject a retired turn's approval/completion. Caller
+or provider text cannot choose or forge those generations. A backlog of an old
+Cancelled event cannot stop a newly resumed conversation.
+
 Keep notification subscribers inexpensive; loss of a subscriber cannot lose a
 committed event. Critical admission, dispatch, approval and completion paths use
 checked publication. Persistence failure must reject subsequent consequential
